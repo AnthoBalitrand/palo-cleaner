@@ -85,7 +85,7 @@ def main():
         print(f"Starting cleaning process for {dg}")
         cleaner.optimize_address_objects(dg)
 
-    cleaner.remove_objects()
+    #cleaner.remove_objects()
 
 # entry point
 if __name__ == "__main__":

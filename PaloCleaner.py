@@ -3,6 +3,7 @@ from panos.panorama import Panorama, DeviceGroup, PanoramaDeviceGroupHierarchy
 from panos.objects import AddressObject, AddressGroup, Tag, ServiceObject, ServiceGroup
 from panos.policies import SecurityRule, PreRulebase, PostRulebase, Rulebase
 from panos.predefined import Predefined
+import re
 
 class PaloCleaner:
     def __init__(self, panorama_url, panorama_user, panorama_password, dg_filter, inline_mode):
@@ -93,6 +94,7 @@ class PaloCleaner:
         self._rulebases[location_name]['security'] = SecurityRule.refreshall(security, add=True)
 
     def get_relative_object_location(self, obj_name, reference_location):
+        # TODO : find a way to block recursive call if already on the "shared" context
         #print(f"Get relative object location for {obj_name} on {reference_location}")
         found_location = None
         found_object = None
@@ -107,6 +109,28 @@ class PaloCleaner:
             found_object, found_location = self.get_relative_object_location(obj_name, upward_dg)
         return (found_object, found_location)
 
+    def get_relative_object_location_by_tag(self, executable_condition, reference_location):
+        # TODO : what happen if upward object has the same name / tags than a matched local object ?
+        found_objects = list()
+        for obj in self._objects[reference_location]['address_obj'] + self._objects[reference_location]['address_group']:
+            if obj.tag:
+                print(f"Object {obj} has tags !!!!!! ({obj.tag})")
+                print(f"Condition is : {executable_condition!r}")
+                expr_result = dict()
+                obj_tags = obj.tag
+                exec(executable_condition, locals(), expr_result)
+                print(expr_result)
+                cond_expr_result = expr_result['cond_expr_result']
+                if cond_expr_result:
+                    print(f"AND THOSE TAGS HAVE BEEN MATCHED")
+                    found_objects.append((obj, reference_location))
+        if reference_location != 'shared':
+            upward_dg = self.get_pano_dg_hierarchy()[reference_location]
+            if not upward_dg:
+                upward_dg = 'shared'
+            found_objects += self.get_relative_object_location_by_tag(executable_condition, upward_dg)
+        return found_objects
+
     def fetch_address_obj_set(self, location_name):
         # it is possible to create an object group using the name of an upward address object
         # but the object group cannot be deleted to be replaced by a reference to the upward address object
@@ -114,13 +138,31 @@ class PaloCleaner:
 
         def flatten_group(group, location_name):
             group_obj_set = list()
-            for a in group.static_value:
-                referenced_object, referenced_object_location = self.get_relative_object_location(a, location_name)
-                if type(referenced_object) == panos.objects.AddressGroup:
-                    group_obj_set += flatten_group(referenced_object, referenced_object_location)
-                group_obj_set.append((referenced_object, referenced_object_location))
-            group_obj_set.append((group, location_name))
+            if group.static_value :
+                for a in group.static_value:
+                    referenced_object, referenced_object_location = self.get_relative_object_location(a, location_name)
+                    if type(referenced_object) == panos.objects.AddressGroup:
+                        group_obj_set += flatten_group(referenced_object, referenced_object_location)
+                    group_obj_set.append((referenced_object, referenced_object_location))
+                group_obj_set.append((group, location_name))
+            elif group.dynamic_value:
+                print(f"Found dynamic object group : {group.name}")
+                executable_condition = gen_condition_expression(group.dynamic_value, "obj_tags")
+                for referenced_object, referenced_object_location in self.get_relative_object_location_by_tag(executable_condition, location_name):
+                    print(f"Object {referenced_object.name} is referenced by tags on group {group.name}")
+                    if type(referenced_object) == panos.objects.AddressGroup:
+                        group_obj_set += flatten_group(referenced_object, referenced_object_location)
+                    else:
+                        group_obj_set.append((referenced_object, referenced_object_location))
+                group_obj_set.append((group, location_name))
             return group_obj_set
+
+        def gen_condition_expression(condition_string, field_name):
+            condition1 = re.sub('and(?![^(]*\))', f"in {field_name} and", condition_string)
+            condition2 = re.sub('or(?![^(]*\))', f"in {field_name} or", condition1)
+            condition2 += f" in {field_name}"
+            condition = "cond_expr_result = " + condition2
+            return condition
 
         obj_ref_set = list()
         for k, v in self._rulebases[location_name].items():
