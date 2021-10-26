@@ -39,6 +39,12 @@ def parse_cli_args():
         help = "Apply cleaning operation"
     )
 
+    parser.add_argument(
+        "--ignore-groups-overrides",
+        action = "store_true",
+        help = "Ignore the fact that group members can be overriden on child device-groups"
+    )
+
     return parser.parse_args()
 
 
@@ -80,7 +86,7 @@ def main():
 
     # Get used address objects set for Panorama (shared context)
     print(f"Parsing used address objects set for shared... ", end="")
-    cleaner.fetch_address_obj_set('shared')
+    cleaner.fetch_address_obj_set('shared', )
 
     # Get used address objects set for all device groups
     for dg in cleaner.get_devicegroups():
