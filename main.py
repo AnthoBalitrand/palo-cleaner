@@ -40,9 +40,9 @@ def parse_cli_args():
     )
 
     parser.add_argument(
-        "--ignore-groups-overrides",
+        "--delete-upward-objects",
         action = "store_true",
-        help = "Ignore the fact that group members can be overriden on child device-groups"
+        help = "Deletes upward unused objects (shared + intermediates) if all childs are analyzed"
     )
 
     return parser.parse_args()
@@ -66,7 +66,9 @@ def main():
                 start_cli_args.apply_cleaning)
 
     # Print reverse DG hierarchy parsed on Panorama
-    cleaner.reverse_dg_hierarchy(cleaner.get_pano_dg_hierarchy(), print_result=True)
+    reversed_tree = cleaner.reverse_dg_hierarchy(cleaner.get_pano_dg_hierarchy(), print_result=True)
+
+    analysis_perimeter = cleaner.get_perimeter(reversed_tree)
 
     # Download objects and rulebase for Panorama (shared context)
     print("\n\nDownloading Panorama objects... ", end="")
@@ -79,10 +81,11 @@ def main():
     # Download objects and rulebase for all device groups
     for dg in cleaner.get_devicegroups():
         context_name = dg.about()['name']
-        print(f"Downloading {context_name} objects... ", end="")
-        cleaner.fetch_objects(dg, context_name)
-        print(f"Downloading {context_name} rulebases... ", end="")
-        cleaner.fetch_rulebase(dg, context_name)
+        if context_name in analysis_perimeter['direct'] + analysis_perimeter['indirect']:
+            print(f"Downloading {context_name} objects... ", end="")
+            cleaner.fetch_objects(dg, context_name)
+            print(f"Downloading {context_name} rulebases... ", end="")
+            cleaner.fetch_rulebase(dg, context_name)
 
     # Get used address objects set for Panorama (shared context)
     print(f"Parsing used address objects set for shared... ", end="")
@@ -90,15 +93,17 @@ def main():
 
     # Get used address objects set for all device groups
     for dg in cleaner.get_devicegroups():
-        print(f"Parsing used address objects set for {dg}... ", end="")
-        cleaner.fetch_address_obj_set(dg.about()['name'])
+        if dg.about()['name'] in analysis_perimeter['direct'] + analysis_perimeter['indirect']:
+            print(f"Parsing used address objects set for {dg}... ", end="")
+            cleaner.fetch_address_obj_set(dg.about()['name'])
 
     # Start objects optimization for all DeviceGroup not having child
     for dg in [k for k, v in cleaner.reverse_dg_hierarchy(cleaner.get_pano_dg_hierarchy()).items() if not v]:
-        print(f"Starting objects optimization processing for {dg}")
-        cleaner.optimize_address_objects(dg)
+        if dg in analysis_perimeter['direct'] + analysis_perimeter['indirect']:
+            print(f"Starting objects optimization processing for {dg}")
+            cleaner.optimize_address_objects(dg)
 
-    cleaner.remove_objects()
+    cleaner.remove_objects(analysis_perimeter, start_cli_args.delete_upward_objects)
 
 # entry point
 if __name__ == "__main__":

@@ -12,9 +12,13 @@ class PaloCleaner:
         self._panorama_url = panorama_url
         self._panorama_credentials = (panorama_user, panorama_password)
         self._dg_filter = dg_filter
+        self._depthed_tree = dict({0: ['shared']})
         self._apply_cleaning = apply_cleaning
         self._panorama = self.panorama_connector(self._panorama_url, *self._panorama_credentials)
         self._objects = dict()
+        self._addr_namesearch = dict()
+        self._tag_namesearch = dict()
+        self._addr_ipsearch = dict()
         self._used_objects_sets = dict()
         self._rulebases = dict()
         self._stored_pano_hierarchy = None
@@ -68,24 +72,65 @@ class PaloCleaner:
         reversed_tree = dict()
 
         for k, v in pano_hierarchy.items():
+            if v is None:
+                v = 'shared'
             reversed_tree[v] = reversed_tree[v] + [k] if v in reversed_tree.keys() else [k]
             if k not in reversed_tree.keys():
                 reversed_tree[k] = list()
 
+        self._depthed_tree = dict({0: ['shared']})
+        self.gen_tree_depth(reversed_tree)
+        analysis_perimeter = self.get_perimeter(reversed_tree)
+        print(analysis_perimeter)
         # If print_result attribute is True, print the result on screen
         if print_result:
-            def print_tree_branch(tree, start = None, indent = 1):
+            def print_tree_branch(tree, start = 'shared', indent = 1):
                 for k, v in reversed_tree.items():
                     if k == start:
                         for d in v:
-                            print("   " * indent + "|--- " + d)
+                            if d in analysis_perimeter['direct']:
+                                perimeter_info = "+"
+                            elif d in analysis_perimeter['indirect']:
+                                perimeter_info = "*"
+                            else :
+                                perimeter_info = ""
+                            print("   " * indent + "|--- " + d + " " + perimeter_info)
                             print_tree_branch(tree, d, indent + 1)
 
             print("\nObjects inheritance tree is : ")
-            print("\nshared")
+            if 'shared' in analysis_perimeter['direct']:
+                perimeter_info = "+"
+            elif 'shared' in analysis_perimeter['indirect']:
+                perimeter_info = "*"
+            print("\nshared " + perimeter_info)
             print_tree_branch(reversed_tree)
 
         return reversed_tree
+
+    def get_perimeter(self, reversed_tree):
+        indirectly_included = list()
+        directly_included = list()
+        fully_included = list()
+        for depth in sorted(self._depthed_tree, reverse=True):
+            for dg in self._depthed_tree[depth]:
+                if self._dg_filter:
+                    if dg in self._dg_filter:
+                        directly_included.append(dg)
+                    else:
+                        found_child = False
+                        nb_found_child = 0
+                        for child in reversed_tree.get(dg, list()):
+                            if child in directly_included + indirectly_included:
+                                found_child = True
+                                nb_found_child += 1
+                        if found_child:
+                            indirectly_included.append(dg)
+                            if nb_found_child == len(reversed_tree.get(dg)):
+                                fully_included.append(dg)
+                else:
+                    directly_included.append(dg)
+                    fully_included.append(dg)
+        return {'direct': directly_included, 'indirect': indirectly_included, 'full': fully_included}
 
     def fetch_objects(self, context, location_name):
         """
@@ -118,9 +163,20 @@ class PaloCleaner:
             self._objects[location_name]['context'] = context
             self._objects[location_name]['address_obj'] = AddressObject.refreshall(context)
             self._objects[location_name]['address_group'] = AddressGroup.refreshall(context)
+            print(f"--> Initializing namesearch structures for {location_name}")
+            self._addr_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['address_group'] + self._objects[location_name]['address_obj']}
+            print(f"--> Initializing ipsearch structures for {location_name}")
+            self._addr_ipsearch[location_name] = dict()
+            for obj in self._objects[location_name]['address_obj']:
+                addr = self.hostify_address(obj.value)
+                if not addr in self._addr_ipsearch[location_name].keys():
+                    self._addr_ipsearch[location_name][addr] = list()
+                self._addr_ipsearch[location_name][addr].append(obj)
             self._objects[location_name]['tag'] = Tag.refreshall(context)
+            self._tag_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['tag']}
             self._objects[location_name]['service'] = ServiceObject.refreshall(context)
             self._objects[location_name]['service_group'] = ServiceGroup.refreshall(context)
+            #print(self._addr_namesearch[location_name])
         print("OK")
 
     def fetch_rulebase(self, context, location_name):
@@ -168,22 +224,30 @@ class PaloCleaner:
         print(f"Get relative object location for {obj_name} on {reference_location}")
 
         # Initialize return variables
-        found_location = None
         found_object = None
+        found_location = None
         # For each object at the reference_location level, find any object having the searched name
-        if type=="address":
+        if type == "address":
+            """
             for obj in self._objects[reference_location]['address_obj'] + self._objects[reference_location]['address_group']:
                 if obj.about()['name'] == obj_name:
                     found_location = reference_location
                     found_object = obj
-        elif type=="tag":
+            """
+            found_object = self._addr_namesearch[reference_location].get(obj_name, None)
+            found_location = reference_location
+        elif type == "tag":
+            """
             for obj in self._objects[reference_location]['tag']:
                 if obj.name == obj_name:
                     found_location = reference_location
                     found_object = obj
+            """
+            found_object = self._tag_namesearch[reference_location].get(obj_name, None)
+            found_location = reference_location
         # if no object is found at current reference_location, find the upward device-group on the hierarchy
         # and call the current function recursively with this upward level as reference_location
-        if not found_location and reference_location != 'shared':
+        if not found_object and reference_location != 'shared':
             upward_dg = self.get_pano_dg_hierarchy()[reference_location]
             if not upward_dg:
                 upward_dg = 'shared'
@@ -326,7 +390,6 @@ class PaloCleaner:
             return condition
 
         obj_ref_set = list()
-        already_resolved = list()
         self._resolved_cache[location_name] = list()
         # iterates on all rulebases for the concerned location
         for k, v in self._rulebases[location_name].items():
@@ -355,25 +418,43 @@ class PaloCleaner:
                                     #obj_ref_set += flatten_group(referenced_object, referenced_object_location, referenced_object_location)
 
                                     # TEST FOR SUPPORT OF MEMBERS OVERRIDING ON CHILD DEVICE-GROUPS
+                                    # if one of the returned flattened_members if below the referenced_object_location
+                                    # then it is overriding an existing member of the group, which cannot be deleted
                                     flattened_members = flatten_group(referenced_object, location_name, referenced_object_location)
+                                    for m, loc in flattened_members:
+                                        if loc not in [referenced_object_location, 'shared']:
+                                            print("OVERRIDING MEMBERS !!!")
+                                            print(m, loc)
+                                            upward_dg = self.get_pano_dg_hierarchy()[location_name]
+                                            if upward_dg is None:
+                                                upward_dg = 'shared'
+                                            if type(m) is AddressGroup:
+                                                # call again flatten_group but with upper location to protect source group against deletion
+                                                flattened_members += flatten_group(referenced_object, upward_dg, referenced_object_location)
+                                            elif type(m) is AddressObject:
+                                                obj_ref_set.append(self.get_relative_object_location(m.name, upward_dg))
+
                                     obj_ref_set += flattened_members
                                 elif referenced_object.dynamic_value:
                                     # if object is a dynamic group, it can reference all objects (upward or downward) starting by the location where the object is used (location_name)
                                     flattened_members = flatten_group(referenced_object, location_name, referenced_object_location)
                                     obj_ref_set += flattened_members
-                                obj_ref_set.append((referenced_object, referenced_object_location))
 
                                 # TEST FOR MEMBERS CACHING
                                 self._resolved_cache[location_name] += [x[0].name for x in flattened_members]
+
                             # Below is matched for both AddressGroups and AddressObjects
                             obj_ref_set.append((referenced_object, referenced_object_location))
                             self._resolved_cache[location_name].append(obj)
                             # for each tag used on the referenced object
                             if referenced_object.tag:
                                 for tag in referenced_object.tag:
-                                    # get the referenced object's referenced tag and its location (can be same level or upward)
-                                    referenced_tag, referenced_tag_location = self.get_relative_object_location(tag, referenced_object_location, type="tag")
-                                    obj_ref_set.append((referenced_tag, referenced_tag_location))
+                                    if tag not in self._resolved_cache[location_name]:
+                                        # get the referenced object's referenced tag and its location (can be same level or upward)
+                                        referenced_tag, referenced_tag_location = self.get_relative_object_location(tag, referenced_object_location, type="tag")
+                                        obj_ref_set.append((referenced_tag, referenced_tag_location))
+                                    else:
+                                        print(f"############### Tag {tag} has already been resolved on the current context ({location_name})")
                     elif obj != 'any' and obj in self._resolved_cache[location_name]:
                         print(f"############### Object {obj} has already been resolved on the current context ({location_name})")
                 # for all objects used as tag directly on the rule
@@ -392,6 +473,18 @@ class PaloCleaner:
         print(set(obj_ref_set))
         print("OK")
 
+    def hostify_address(self, address):
+        """
+        Submethod used to remove /32 at the end of an IP address
+        :param address: (string) IP address to be modified
+        :return: (string) Host IP address (instead of network /32)
+        """
+
+        # removing /32 mask for hosts
+        if address[-3:] == '/32':
+            return address[:-3:]
+        return address
+
     def find_upward_obj_by_addr(self, base_location_name, obj_addr):
         """
         Find AddressObject having the same IP given as obj_addr at upper levels, starting at base_location_name level
@@ -400,20 +493,8 @@ class PaloCleaner:
         :return: (list) of tuples (AddressObject, location) of objects found on upper levels
         """
 
-        def hostify_address(address):
-            """
-            Submethod used to remove /32 at the end of an IP address
-            :param address: (string) IP address to be modified
-            :return: (string) Host IP address (instead of network /32)
-            """
-
-            # removing /32 mask for hosts
-            if address[-3:] == '/32':
-                return address[:-3:]
-            return address
-
         # call to hostify_address submethod to remove /32 at the end
-        obj_addr = hostify_address(obj_addr)
+        obj_addr = self.hostify_address(obj_addr)
         # initialize the list which will contains found objects
         found_upward_objects = list()
         # find name of the parent device-group (related to base_location_name)
@@ -422,11 +503,15 @@ class PaloCleaner:
         if not upward_devicegroup:
             upward_devicegroup = 'shared'
         # for each object existing at found upper evel
+        for obj in self._addr_ipsearch[upward_devicegroup].get(obj_addr, list()):
+            found_upward_objects.append((obj, upward_devicegroup))
+        """
         for obj in self._objects[upward_devicegroup]['address_obj']:
             # if current object has the same IP address than the searched one
-            if hostify_address(obj.value) == obj_addr:
+            if self.hostify_address(obj.value) == obj_addr:
                 # add tuple for the found object to the found_upward_objects list
                 found_upward_objects.append((obj, upward_devicegroup))
+        """
         # if we are not yet at the 'shared' level
         if upward_devicegroup != 'shared':
             # call the current function recursively to find upward objects
@@ -438,24 +523,38 @@ class PaloCleaner:
         """
         Get a list of tuples (object, location) and returns the best to be used based on location and naming criterias
         TODO : WARNING, can have unpredictable results with nested device-groups
+        Will return the intermediate group replacement object if any
 
         :param obj_list: list((AddressObject, string)) List of tuples of AddressObject and location names
         :return:
         """
-
+        if len (obj_list) == 1:
+            return obj_list[0]
         # create a list of shared objects from the obj_list
         shared_obj = [x for x in obj_list if x[1] == 'shared']
+        # create a list of intermediate DG objects from the obj_list
+        interm_obj = [x for x in obj_list if x[1] != 'shared']
         # create a list of objects having name with multiple "." and ending with "corp" or "com" (probably FQDN)
         fqdn_obj = [x for x in obj_list if len(x[0].about()['name'].split('.')) > 1 and x[0].about()['name'].split('.')[-1] in ['corp', 'com']]
         # find objects being both shared and with FQDN-like naming
         shared_fqdn_obj = list(set(shared_obj) & set(fqdn_obj))
+        interm_fqdn_obj = list(set(interm_obj) & set(fqdn_obj))
 
         # if shared and well-named objects are found, return the first one
         if shared_fqdn_obj:
-            return shared_fqdn_obj[0]
+            for o in shared_fqdn_obj:
+                if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_fqdn_obj]:
+                    return o
+        if interm_fqdn_obj:
+            return interm_fqdn_obj[0]
         # else return the first found shared object
         if shared_obj:
-            return shared_obj[0]
+            for o in shared_obj:
+                if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_obj]:
+                    return o
+        if interm_obj:
+            return interm_obj[0]
+        print(f"ERROR !!!!!! UNABLE TO CHOSE OBJECT IN LIST {obj_list}")
 
     def optimize_address_objects(self, location_name):
         """
@@ -564,20 +663,23 @@ class PaloCleaner:
                         if self._apply_cleaning:
                             r.apply()
             # fetch all AddressGroup objects for the concerned location
-            for g in self._objects[location_name]['address_group']:
-                replace = False
-                # if reference to the initial object is found on the group members
-                if ref_obj_name in g.static_value:
-                    replace = True
-                # replace the found reference by the new object name
-                if replace:
-                    g.static_value.remove(ref_obj_name)
-                    g.static_value.append(replacement_obj_name)
-                    print(f"    -- Replaced on static group {g.name}")
-                    #print(f"{ref_obj_name} (inherited from {ref_obj_location} has been replaced by {replacement_obj_name} (inherited from {replacement_obj_location}) on group {g.name}")
-                    # apply change if anything ha been changed
-                    if self._apply_cleaning:
-                        g.apply()
+            # after checking that there are existing AddressGroups on this location
+            if self._objects[location_name]['address_group']:
+                for g in self._objects[location_name]['address_group']:
+                    replace = False
+                    # if reference to the initial object is found on the group members
+                    if g.static_value:
+                        if ref_obj_name in g.static_value:
+                            replace = True
+                        # replace the found reference by the new object name
+                        if replace:
+                            g.static_value.remove(ref_obj_name)
+                            g.static_value.append(replacement_obj_name)
+                            print(f"    -- Replaced on static group {g.name}")
+                            #print(f"{ref_obj_name} (inherited from {ref_obj_location} has been replaced by {replacement_obj_name} (inherited from {replacement_obj_location}) on group {g.name}")
+                            # apply change if anything ha been changed
+                            if self._apply_cleaning:
+                                g.apply()
         # if initial object and replacement objects have the same name, deleting the initial object will make the reference
         # directly pointing to the replacement object
         else:
@@ -586,7 +688,22 @@ class PaloCleaner:
         # add objects to the deletion list
         self._removable_objects.append(ref_obj)
 
-    def remove_objects(self):
+    def gen_tree_depth(self, input_tree, start='shared', depth=1):
+        """
+        Submethod used to create a dict with the "depth" value for each device-group, depth for 'shared' being 0
+
+        :param input_tree: (dict) Reversed PanoramaDeviceGroupHierarchy tree
+        :param start: (string) Where to start for depth calculation (function being called recursively)
+        :param depth: (int) Actual depth of analysis
+        :return: (dict) Dict with keys being the depth of the devicegroups and value being list of device-group names
+        """
+        for loc in input_tree[start]:
+            if depth not in self._depthed_tree.keys():
+                self._depthed_tree[depth] = list()
+            self._depthed_tree[depth].append(loc)
+            self.gen_tree_depth(input_tree, loc, depth + 1)
+
+    def remove_objects(self, analyzis_perimeter, delete_upward_objects):
         """
         Delete objects which have been added to the _removable_objects dict
 
@@ -631,33 +748,15 @@ class PaloCleaner:
             for obj_tuple in v:
                 global_used_objects_set.add(obj_tuple)
 
-        depthed_tree = dict({0: ['shared']})
-
-        def gen_tree_depth(input_tree, start=None, depth=1):
-            """
-            Submethod used to create a dict with the "depth" value for each device-group, depth for 'shared' being 0
-
-            :param input_tree: (dict) Reversed PanoramaDeviceGroupHierarchy tree
-            :param start: (string) Where to start for depth calculation (function being called recursively)
-            :param depth: (int) Actual depth of analysis
-            :return: (dict) Dict with keys being the depth of the devicegroups and value being list of device-group names
-            """
-
-            for loc in input_tree[start]:
-                if depth not in depthed_tree.keys():
-                    depthed_tree[depth] = list()
-                depthed_tree[depth].append(loc)
-                gen_tree_depth(input_tree, loc, depth+1)
-
-        # get reversed PanoramaDeviceGroupHierarchy dict
-        dg_reversed_tree = self.reverse_dg_hierarchy(self.get_pano_dg_hierarchy())
-        # use it on gen_tree_depth to update depthed_tree
-        gen_tree_depth(dg_reversed_tree)
-
         # Create a list for which the order will be the more "depth" device-groups first, then going up to 'shared'
         dg_clean_order = list()
-        for key in sorted(depthed_tree.keys(), reverse=True):
-            dg_clean_order += depthed_tree[key]
+        for key in sorted(self._depthed_tree.keys(), reverse=True):
+            for dg in self._depthed_tree[key]:
+                if dg in analyzis_perimeter['direct']:
+                    dg_clean_order.append(dg)
+                elif delete_upward_objects:
+                    if dg in analyzis_perimeter['direct'] + analyzis_perimeter['indirect'] and dg in analyzis_perimeter['full']:
+                        dg_clean_order.append(dg)
         print(f"Cleaning DG in the following order : {dg_clean_order} ")
 
         # for each device-group in the dg_clean_order list (starting with the more depthed)
