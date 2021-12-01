@@ -19,6 +19,7 @@ class PaloCleaner:
         self._addr_namesearch = dict()
         self._tag_namesearch = dict()
         self._addr_ipsearch = dict()
+        self._service_namesearch = dict()
         self._used_objects_sets = dict()
         self._rulebases = dict()
         self._stored_pano_hierarchy = None
@@ -158,6 +159,7 @@ class PaloCleaner:
             self._objects[location_name]['address_group'] = list()
             self._objects[location_name]['tag'] = list()
             self._objects[location_name]['service_group'] = list()
+            self._service_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['service']}
         else:
             # else download all objects types
             self._objects[location_name]['context'] = context
@@ -176,6 +178,8 @@ class PaloCleaner:
             self._tag_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['tag']}
             self._objects[location_name]['service'] = ServiceObject.refreshall(context)
             self._objects[location_name]['service_group'] = ServiceGroup.refreshall(context)
+            print(f"--> Initializing namesearch structures for services on {location_name}")
+            self._service_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['service'] + self._objects[location_name]['service_group']}
             #print(self._addr_namesearch[location_name])
         print("OK")
 
@@ -221,7 +225,7 @@ class PaloCleaner:
         :return: (AddressObject, string) Found object (or group), and its location name
         """
 
-        print(f"Get relative object location for {obj_name} on {reference_location}")
+        print(f"Get relative object location for {obj_name} (type = {type}) on {reference_location}")
 
         # Initialize return variables
         found_object = None
@@ -245,12 +249,19 @@ class PaloCleaner:
             """
             found_object = self._tag_namesearch[reference_location].get(obj_name, None)
             found_location = reference_location
+        elif type == "service":
+            found_object = self._service_namesearch[reference_location].get(obj_name, None)
+            found_location = reference_location
+
         # if no object is found at current reference_location, find the upward device-group on the hierarchy
         # and call the current function recursively with this upward level as reference_location
-        if not found_object and reference_location != 'shared':
+        if not found_object and reference_location not in ['shared', 'predefined']:
             upward_dg = self.get_pano_dg_hierarchy()[reference_location]
             if not upward_dg:
                 upward_dg = 'shared'
+            found_object, found_location = self.get_relative_object_location(obj_name, upward_dg, type)
+        elif not found_object and (type == "service" and reference_location == 'shared'):
+            upward_dg = "predefined"
             found_object, found_location = self.get_relative_object_location(obj_name, upward_dg, type)
         # finally return the tuple of the found object and its location
         return (found_object, found_location)
@@ -315,8 +326,7 @@ class PaloCleaner:
         # it is possible to create an object group using the name of an upward address object
         # but the object group cannot be deleted to be replaced by a reference to the upward address object
         # WARNING : unexpected behaviors if groups and address objects have the same names
-
-        def flatten_group(group, members_location_base, group_location):
+        def flatten_group(group, members_location_base, group_location, obj_type='address'):
             """
             Submethod used to iterate over members of groups (including nested groups) to find all used objects
             :param group: (AddressGroup) for which to get all members
@@ -328,48 +338,62 @@ class PaloCleaner:
 
             group_obj_set = list()
             # if this is a static group, only check for same-level or upward members
-            if group.static_value :
-                for a in group.static_value:
-                    if a not in self._resolved_cache[members_location_base]:
-                        # Get object referenced relatively to AddressGroup location
-                        referenced_object, referenced_object_location = self.get_relative_object_location(a, members_location_base)
-                        # if referenced object is another group, flatten this one recursively
+            if obj_type == "address":
+                if group.static_value :
+                    for a in group.static_value:
+                        if a not in self._resolved_cache[members_location_base]['addresses']:
+                            # Get object referenced relatively to AddressGroup location
+                            referenced_object, referenced_object_location = self.get_relative_object_location(a, members_location_base)
+                            # if referenced object is another group, flatten this one recursively
+                            if type(referenced_object) == panos.objects.AddressGroup:
+                                group_obj_set += flatten_group(referenced_object, members_location_base, referenced_object_location)
+                            # add object (address or nested group) to object set
+                            group_obj_set.append((referenced_object, referenced_object_location))
+                            # for each tag used on a referenced object, add it to the used objects set
+                            if referenced_object.tag:
+                                for tag in referenced_object.tag:
+                                    if not tag in self._resolved_cache[members_location_base]['tags']:
+                                        referenced_tag, referenced_tag_location = self.get_relative_object_location(tag, referenced_object_location, type="tag")
+                                        group_obj_set.append((referenced_tag, referenced_tag_location))
+                        else:
+                            print(f"{a} member of {group.name} has already been resolved in current context ({group_location})")
+                # if this is a dynamic group, check for upward or downward members (down to location_name of the referencing rule)
+                elif group.dynamic_value:
+                    print(f"[{group_location}] Found DAG : {group.name}")
+                    # Transform the dynamic group condition to an executable python statement
+                    # Example : ('TAG1' and 'TAG2') or 'TAG3'
+                    # will become "cond_expr_result = ('TAG1' and 'TAG2') in obj_tags or 'TAG3' in obj_tags"
+                    executable_condition = gen_condition_expression(group.dynamic_value, "obj_tags")
+                    # for each object, location found using the tags condition
+                    for referenced_object, referenced_object_location in self.get_relative_object_location_by_tag(executable_condition, members_location_base):
+                        print(f"[{members_location_base}] Group {group.name} is referencing object ({referenced_object}, {referenced_object_location})")
+                        # if object is another group, flatten it
                         if type(referenced_object) == panos.objects.AddressGroup:
                             group_obj_set += flatten_group(referenced_object, members_location_base, referenced_object_location)
-                        # add object (address or nested group) to object set
-                        group_obj_set.append((referenced_object, referenced_object_location))
+                        # else just add each found object to the set
+                        else:
+                            # TODO : do not add object to the referenced list if an object with the same name has already been added
+                            group_obj_set.append((referenced_object, referenced_object_location))
+                            # add object to the list of objects which are referenced by their tag for further treatment
+                            self._tag_referenced.add((referenced_object, referenced_object_location))
                         # for each tag used on a referenced object, add it to the used objects set
                         if referenced_object.tag:
                             for tag in referenced_object.tag:
-                                if not tag in self._resolved_cache[members_location_base]:
-                                    referenced_tag, referenced_tag_location = self.get_relative_object_location(tag, referenced_object_location, type="tag")
-                                    group_obj_set.append((referenced_tag, referenced_tag_location))
-                    else:
-                        print(f"{a} member of {group.name} has already been resolved in current context ({group_location})")
-            # if this is a dynamic group, check for upward or downward members (down to location_name of the referencing rule)
-            elif group.dynamic_value:
-                print(f"[{group_location}] Found DAG : {group.name}")
-                # Transform the dynamic group condition to an executable python statement
-                # Example : ('TAG1' and 'TAG2') or 'TAG3'
-                # will become "cond_expr_result = ('TAG1' and 'TAG2') in obj_tags or 'TAG3' in obj_tags"
-                executable_condition = gen_condition_expression(group.dynamic_value, "obj_tags")
-                # for each object, location found using the tags condition
-                for referenced_object, referenced_object_location in self.get_relative_object_location_by_tag(executable_condition, members_location_base):
-                    print(f"[{members_location_base}] Group {group.name} is referencing object ({referenced_object}, {referenced_object_location})")
-                    # if object is another group, flatten it
-                    if type(referenced_object) == panos.objects.AddressGroup:
-                        group_obj_set += flatten_group(referenced_object, members_location_base, referenced_object_location)
-                    # else just add each found object to the set
-                    else:
-                        # TODO : do not add object to the referenced list if an object with the same name has already been added
-                        group_obj_set.append((referenced_object, referenced_object_location))
-                        # add object to the list of objects which are referenced by their tag for further treatment
-                        self._tag_referenced.add((referenced_object, referenced_object_location))
-                    # for each tag used on a referenced object, add it to the used objects set
-                    if referenced_object.tag:
-                        for tag in referenced_object.tag:
-                            referenced_tag, referenced_tag_location = self.get_relative_object_location(tag, referenced_object_location, type="tag")
-                            group_obj_set.append((referenced_tag, referenced_tag_location))
+                                referenced_tag, referenced_tag_location = self.get_relative_object_location(tag, referenced_object_location, type="tag")
+                                group_obj_set.append((referenced_tag, referenced_tag_location))
+            elif obj_type == "service":
+                if group.value:
+                    for s in group.value:
+                        if s not in self._resolved_cache[members_location_base]['services']:
+                            referenced_object, referenced_object_location = self.get_relative_object_location(s, members_location_base)
+                            if type(referenced_object) == panos.objects.ServiceGroup:
+                                group_obj_set += flatten_group(referenced_object, members_location_base, referenced_object_location, obj_type)
+                            group_obj_set.append((referenced_object, referenced_object_location))
+                            if referenced_object.tag:
+                                for tag in referenced_object.tag:
+                                    if not tag in self._resolved_cache[members_location_base]['tags']:
+                                        referenced_tag, referenced_tag_location = self.get_relative_object_location(tag, referenced_object_location, type="tag")
+                                        group_obj_set.append((referenced_tag, referenced_tag_location))
 
             # finally add the group itself to the objects set
             group_obj_set.append((group, group_location))
@@ -390,7 +414,7 @@ class PaloCleaner:
             return condition
 
         obj_ref_set = list()
-        self._resolved_cache[location_name] = list()
+        self._resolved_cache[location_name] = dict({'addresses':list(), 'services': list(), 'tags': list()})
         # iterates on all rulebases for the concerned location
         for k, v in self._rulebases[location_name].items():
             if k == "context":
@@ -407,7 +431,7 @@ class PaloCleaner:
                         rule_objects.append(r.destination_translated_address)
                 for obj in rule_objects:
                     # if the value is not 'any'
-                    if obj != 'any' and obj not in self._resolved_cache[location_name]:
+                    if obj != 'any' and obj not in self._resolved_cache[location_name]['addresses']:
                         # get the referenced object and its location (can be at same level or upward)
                         referenced_object, referenced_object_location = self.get_relative_object_location(obj, location_name)
                         if referenced_object and referenced_object_location:
@@ -418,8 +442,9 @@ class PaloCleaner:
                                     #obj_ref_set += flatten_group(referenced_object, referenced_object_location, referenced_object_location)
 
                                     # TEST FOR SUPPORT OF MEMBERS OVERRIDING ON CHILD DEVICE-GROUPS
-                                    # if one of the returned flattened_members if below the referenced_object_location
-                                    # then it is overriding an existing member of the group, which cannot be deleted
+                                    # if one of the returned flattened_members is below the referenced_object_location
+                                    # then it is overriding an existing member of the group, thus upward cannot be deleted
+                                    # TODO : local one can be deleted if this is a copy of the upward one !!!
                                     flattened_members = flatten_group(referenced_object, location_name, referenced_object_location)
                                     for m, loc in flattened_members:
                                         if loc not in [referenced_object_location, 'shared']:
@@ -441,32 +466,63 @@ class PaloCleaner:
                                     obj_ref_set += flattened_members
 
                                 # TEST FOR MEMBERS CACHING
-                                self._resolved_cache[location_name] += [x[0].name for x in flattened_members]
+                                self._resolved_cache[location_name]['addresses'] += [x[0].name for x in flattened_members]
 
                             # Below is matched for both AddressGroups and AddressObjects
                             obj_ref_set.append((referenced_object, referenced_object_location))
-                            self._resolved_cache[location_name].append(obj)
+                            self._resolved_cache[location_name]['addresses'].append(obj)
                             # for each tag used on the referenced object
                             if referenced_object.tag:
                                 for tag in referenced_object.tag:
-                                    if tag not in self._resolved_cache[location_name]:
+                                    if tag not in self._resolved_cache[location_name]['tags']:
                                         # get the referenced object's referenced tag and its location (can be same level or upward)
                                         referenced_tag, referenced_tag_location = self.get_relative_object_location(tag, referenced_object_location, type="tag")
                                         obj_ref_set.append((referenced_tag, referenced_tag_location))
                                     else:
                                         print(f"############### Tag {tag} has already been resolved on the current context ({location_name})")
-                    elif obj != 'any' and obj in self._resolved_cache[location_name]:
+                    elif obj != 'any' and obj in self._resolved_cache[location_name]['addresses']:
                         print(f"############### Object {obj} has already been resolved on the current context ({location_name})")
                 # for all objects used as tag directly on the rule
                 if r.tag:
                     for tag in r.tag:
-                        if tag not in self._resolved_cache[location_name]:
+                        if tag not in self._resolved_cache[location_name]['tags']:
                             # get the referenced tag object and its location (can be at same level or upward)
                             referenced_tag, referenced_tag_location = self.get_relative_object_location(tag, location_name, type="tag")
                             obj_ref_set.append((referenced_tag, referenced_tag_location))
-                            self._resolved_cache[location_name].append(tag)
+                            self._resolved_cache[location_name]['tags'].append(tag)
                         else:
                             print(f"############### Tag {tag} has already been resolved on the current context ({location_name})")
+                if r.service:
+                    # NAT rules will not sent a list as service, so need to be converted to list is not already
+                    for service in [r.service] if isinstance(r.service, str) else r.service:
+                        print(f"Service {service} is used on rule {r.name}")
+                        if service not in self._resolved_cache[location_name]['tags'] + ['application-default', 'any']:
+                            referenced_service, referenced_service_location = self.get_relative_object_location(service, location_name, type="service")
+                            if type(referenced_service) == panos.objects.ServiceGroup:
+                                if referenced_service.value:
+                                    flattened_members = flatten_group(referenced_service, location_name, referenced_service_location, "service")
+                                    for m, loc in flattened_members:
+                                        if loc not in [referenced_service_location, 'shared']:
+                                            upward_dg = self.get_pano_dg_hierarchy()[location_name]
+                                            if upward_dg is None:
+                                                upward_dg = 'shared'
+                                            if type(m) is ServiceGroup:
+                                                flattened_members += flatten_group(referenced_service, upward_dg, referenced_service_location)
+                                            elif type(m) is ServiceObject:
+                                                obj_ref_set.append(self.get_relative_object_location(m.name, upward_dg))
+                                    obj_ref_set += flattened_members
+                            obj_ref_set.append((referenced_service, referenced_service_location))
+                            self._resolved_cache[location_name]['services'].append(service)
+                            if referenced_service.tag:
+                                for tag in referenced_service.tag:
+                                    if tag not in self._resolved_cache[location_name]['tags']:
+                                        # get the referenced object's referenced tag and its location (can be same level or upward)
+                                        referenced_tag, referenced_tag_location = self.get_relative_object_location(tag, referenced_service_location, type="tag")
+                                        obj_ref_set.append((referenced_tag, referenced_tag_location))
+                                    else:
+                                        print(f"############### Tag {tag} has already been resolved on the current context ({location_name})")
+                        elif service != 'any' and service != 'application-default' and service in self._resolved_cache[location_name]['tags']:
+                            print(f"############### Service {service} has already been resolved on the current context ({location_name})")
 
         # add the fetched objects set to the _used_objects_set dict
         self._used_objects_sets[location_name] = set(obj_ref_set)
