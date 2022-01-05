@@ -65,7 +65,7 @@ def main():
                 start_cli_args.device_groups,
                 start_cli_args.apply_cleaning)
 
-    # Print reverse DG hierarchy parsed on Panorama
+    # Print and get the reverse DG hierarchy parsed on Panorama
     reversed_tree = cleaner.reverse_dg_hierarchy(cleaner.get_pano_dg_hierarchy(), print_result=True)
 
     analysis_perimeter = cleaner.get_perimeter(reversed_tree)

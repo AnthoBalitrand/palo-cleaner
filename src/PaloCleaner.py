@@ -1,11 +1,13 @@
 import pan.xapi
+import sys
+sys.path.append("/Users/to148757/PycharmProjects/panos-python/pan-os-python")
+
 import panos.objects
 from panos.panorama import Panorama, DeviceGroup, PanoramaDeviceGroupHierarchy
 from panos.objects import AddressObject, AddressGroup, Tag, ServiceObject, ServiceGroup
-from panos.policies import SecurityRule, PreRulebase, PostRulebase, Rulebase, NatRule
+from panos.policies import SecurityRule, PreRulebase, PostRulebase, Rulebase, NatRule, AuthenticationRule
 from panos.predefined import Predefined
 import re
-import dns.resolver as Resolver
 
 class PaloCleaner:
     def __init__(self, panorama_url, panorama_user, panorama_password, dg_filter, apply_cleaning):
@@ -79,10 +81,14 @@ class PaloCleaner:
             if k not in reversed_tree.keys():
                 reversed_tree[k] = list()
 
+        # Initializes _depthred_tree dict which is an "ordered list" of device-groups, from higher in hierarchy to
+        # lowest ones. Then calls gen_tree_depth method to populate.
         self._depthed_tree = dict({0: ['shared']})
         self.gen_tree_depth(reversed_tree)
+
+
         analysis_perimeter = self.get_perimeter(reversed_tree)
-        print(analysis_perimeter)
+
         # If print_result attribute is True, print the result on screen
         if print_result:
             def print_tree_branch(tree, start = 'shared', indent = 1):
@@ -109,6 +115,16 @@ class PaloCleaner:
         return reversed_tree
 
     def get_perimeter(self, reversed_tree):
+        """
+        Returns the list of directly, indirectly, and fully included device groups in the cleaning perimeter.
+        Direct included DG are the ones specified in the CLI argument at startup
+        Indirect included are all upwards DG above the directly included ones.
+        Fully included are parents DG having all their child included.
+
+        :param reversed_tree: (dict) Dict where keys are parent device groups and value is the list of childs
+        :return: (dict) Representation of directly, indirectly, and fulled included device-groups
+        """
+
         indirectly_included = list()
         directly_included = list()
         fully_included = list()
@@ -203,10 +219,12 @@ class PaloCleaner:
         context.add(pre_rulebase)
         self._rulebases[location_name]['pre_security'] = SecurityRule.refreshall(pre_rulebase, add=True)
         self._rulebases[location_name]['pre_nat'] = NatRule.refreshall(pre_rulebase, add=True)
+        self._rulebases[location_name]['pre_auth'] = AuthenticationRule.refreshall(pre_rulebase, add=True)
         post_rulebase = PostRulebase()
         context.add(post_rulebase)
         self._rulebases[location_name]['post_security'] = SecurityRule.refreshall(post_rulebase, add=True)
         self._rulebases[location_name]['post_nat'] = NatRule.refreshall(post_rulebase, add=True)
+        self._rulebases[location_name]['pre-auth'] = AuthenticationRule.refreshall(post_rulebase, add=True)
         default_rulebase = Rulebase()
         context.add(default_rulebase)
         self._rulebases[location_name]['default_security'] = SecurityRule.refreshall(default_rulebase, add=True)
