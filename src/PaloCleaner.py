@@ -440,8 +440,15 @@ class PaloCleaner:
                 continue
             # for each rule in the current rulebase
             for r in v:
-                # for all objects, used either as source or destination
-                rule_objects = r.source + r.destination
+                print(r.name)
+                try:
+                    # for all objects, used either as source or destination
+                    rule_objects = r.source + r.destination
+                except AttributeError:
+                    try:
+                        rule_objects = r.source_addresses + r.destination_addresses
+                    except AttributeError:
+                        pass
                 if 'nat' in k:
                     if r.source_translation_translated_addresses:
                         rule_objects += r.source_translation_translated_addresses
