@@ -1,4 +1,3 @@
-import getpass
 import argparse
 from PaloCleaner import PaloCleaner
 
@@ -54,9 +53,7 @@ def main():
 
     # If password has not been provided in the command arguments, ask for it with getpass.getpass
     if not start_cli_args.api_password:
-        pano_api_password = getpass.getpass(f"Password for API user {start_cli_args.api_user} : ")
-    else:
-        pano_api_password = start_cli_args.api_password
+        pano_api_password = ""
 
     # Instantiate the PaloCleaner object (connection to Panorama)
     cleaner = PaloCleaner(start_cli_args.panorama_url,
@@ -64,28 +61,8 @@ def main():
                 pano_api_password,
                 start_cli_args.device_groups,
                 start_cli_args.apply_cleaning)
-
-    # Print and get the reverse DG hierarchy parsed on Panorama
-    reversed_tree = cleaner.reverse_dg_hierarchy(cleaner.get_pano_dg_hierarchy(), print_result=True)
-
-    analysis_perimeter = cleaner.get_perimeter(reversed_tree)
-
-    # Download objects and rulebase for Panorama (shared context)
-    print("\n\nDownloading Panorama objects... ", end="")
-    cleaner.fetch_objects(cleaner._panorama, 'shared')
-    print("Downloading Panorama predefined objects... ", end="")
-    cleaner.fetch_objects(cleaner._panorama, 'predefined')
-    print("Downloading Panorama rulebases... ", end="")
-    cleaner.fetch_rulebase(cleaner._panorama, 'shared')
-
-    # Download objects and rulebase for all device groups
-    for dg in cleaner.get_devicegroups():
-        context_name = dg.about()['name']
-        if context_name in analysis_perimeter['direct'] + analysis_perimeter['indirect']:
-            print(f"Downloading {context_name} objects... ", end="")
-            cleaner.fetch_objects(dg, context_name)
-            print(f"Downloading {context_name} rulebases... ", end="")
-            cleaner.fetch_rulebase(dg, context_name)
+    cleaner.start()
+    """
 
     # Get used address objects set for Panorama (shared context)
     print(f"Parsing used address objects set for shared... ", end="")
@@ -104,7 +81,7 @@ def main():
             cleaner.optimize_address_objects(dg)
 
     cleaner.remove_objects(analysis_perimeter, start_cli_args.delete_upward_objects)
-
+    """
 # entry point
 if __name__ == "__main__":
     main()

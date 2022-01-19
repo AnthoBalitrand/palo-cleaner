@@ -2,21 +2,30 @@ import pan.xapi
 import sys
 sys.path.append("/Users/to148757/PycharmProjects/panos-python/pan-os-python")
 
+from rich.console import Console
+from rich.prompt import Prompt
+from rich.tree import Tree
+from rich.spinner import Spinner
+from rich.text import Text
+from rich.panel import Panel
 import panos.objects
 from panos.panorama import Panorama, DeviceGroup, PanoramaDeviceGroupHierarchy
 from panos.objects import AddressObject, AddressGroup, Tag, ServiceObject, ServiceGroup
 from panos.policies import SecurityRule, PreRulebase, PostRulebase, Rulebase, NatRule, AuthenticationRule
 from panos.predefined import Predefined
+from panos.errors import PanXapiError
 import re
+import time
 
 class PaloCleaner:
     def __init__(self, panorama_url, panorama_user, panorama_password, dg_filter, apply_cleaning):
         self._panorama_url = panorama_url
-        self._panorama_credentials = (panorama_user, panorama_password)
+        self._panorama_user = panorama_user
+        self._panorama_password = panorama_password
         self._dg_filter = dg_filter
         self._depthed_tree = dict({0: ['shared']})
         self._apply_cleaning = apply_cleaning
-        self._panorama = self.panorama_connector(self._panorama_url, *self._panorama_credentials)
+        self._panorama = None
         self._objects = dict()
         self._addr_namesearch = dict()
         self._tag_namesearch = dict()
@@ -28,18 +37,78 @@ class PaloCleaner:
         self._removable_objects = list()
         self._tag_referenced = set()
         self._resolved_cache = dict()
+        self._console = Console()
 
-    def panorama_connector(self, url, user, password):
-        """
-        Creates the Panorama object (connection)
-        :param url: (string) FQDN / IP of the Panorama to connect
-        :param user: (string) API user to be used
-        :param password: (string) API user password
-        :return: (Panorama) Connection to Panorama
-        """
+    def start(self):
+        header_text = Text("""
 
-        print(f"Connecting to {url} with user {user}... ")
-        return Panorama(url, user, password)
+  ___      _        ___ _                       
+ | _ \__ _| |___   / __| |___ __ _ _ _  ___ _ _ 
+ |  _/ _` | / _ \ | (__| / -_) _` | ' \/ -_) '_|
+ |_| \__,_|_\___/  \___|_\___\__,_|_||_\___|_|  
+                                                
+        by Anthony BALITRAND v1.0                                           
+
+""")
+        self._console.print(header_text, style="green", justify="left")
+        while self._panorama_password == "":
+            self._panorama_password = Prompt.ask(f"Please provide the password for API user {self._panorama_user!r} ", password=True)
+        with self._console.status("Connecting to Panorama...", spinner="dots12") as status:
+            try:
+                self._panorama = Panorama(self._panorama_url, self._panorama_user, self._panorama_password)
+                self.get_pano_dg_hierarchy()
+                time.sleep(1)
+                self._console.log("Panorama connection established")
+            except PanXapiError as e:
+                self._console.log(f"Error while connecting to Panorama : {e.message}", style="red")
+                return 0
+            except Exception as e:
+                self._console.log("Unknown error occured while connecting to Panorama", style="red")
+                return 0
+
+            status.update("Parsing device groups list")
+            hierarchy_tree = self.generate_hierarchy_tree()
+            time.sleep(2)
+            self._console.log("Discovered hierarchy tree is the following :")
+            self._console.log("( + are directly included / * are indirectly included / - are not included )")
+            self._console.log(Panel(hierarchy_tree))
+            time.sleep(2)
+
+            status.update("Downloading Panorama shared objects")
+            self.fetch_objects(self._panorama, 'shared')
+            self._console.log("Panorama objects downloaded")
+
+            status.update("Downloading Panorama predefined objects")
+            self.fetch_objects(self._panorama, 'predefined')
+            self._console.log("Panorama predefined objects downloaded")
+
+            status.update("Downloading Panorama rulebases")
+            self.fetch_rulebase(self._panorama, 'shared')
+            self._console.log("Panorama rulebases downloaded")
+
+            for dg in self.get_devicegroups():
+                context_name = dg.about()['name']
+                if context_name in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']:
+                    status.update(f"Downloading {context_name} objects")
+                    self.fetch_objects(dg, context_name)
+                    self._console.log(f"{context_name} objects downloaded")
+                    status.update(f"Downloading {context_name} rulebases")
+                    self.fetch_rulebase(dg, context_name)
+                    self._console.log(f"{context_name} rulebases downloaded")
+
+            status.update("Parsing used address objects set for shared")
+            self.fetch_address_obj_set("shared")
+            self._console.log("shared used objects set processed")
+
+            for dg in self.get_devicegroups():
+                if dg.about()['name'] in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']:
+                    status.update(f"Parsing used address objects set for {dg}")
+                    self.fetch_address_obj_set(dg.about()['name'])
+                    self._console.log(f"{dg.about()['name']} used objects set processed")
+
+
+
+        #self.reverse_dg_hierarchy(self.get_pano_dg_hierarchy(), print_result=True)
 
     def get_devicegroups(self):
         """
@@ -58,10 +127,21 @@ class PaloCleaner:
         """
 
         if not self._stored_pano_hierarchy:
+            self._reversed_tree = dict()
             self._stored_pano_hierarchy = PanoramaDeviceGroupHierarchy(self._panorama).fetch()
-        return self._stored_pano_hierarchy
+            for k, v in self._stored_pano_hierarchy.items():
+                if v is None:
+                    v = 'shared'
+                self._reversed_tree[v] = self._reversed_tree[v] + [k] if v in self._reversed_tree.keys() else [k]
+                if k not in self._reversed_tree.keys():
+                    self._reversed_tree[k] = list()
 
-    def reverse_dg_hierarchy(self, pano_hierarchy, print_result=False):
+            # Initializes _depthred_tree dict which is an "ordered list" of device-groups, from higher in hierarchy to
+            # lowest ones. Then calls gen_tree_depth method to populate.
+            self._depthed_tree = dict({0: ['shared']})
+            self.gen_tree_depth(self._reversed_tree)
+
+    def generate_hierarchy_tree(self):
         """
         Reverses the PanoramaDeviceGroupHierarchy dict
         (permits to have list of childs for each parent, instead of parent for each child)
@@ -71,48 +151,28 @@ class PaloCleaner:
         :param print_result: (bool) To print or not the reversed hierarchy on stdout
         :return: (dict) Each key is a device-group name, the associated value is the list of child device-groups
         """
-
-        reversed_tree = dict()
-
-        for k, v in pano_hierarchy.items():
-            if v is None:
-                v = 'shared'
-            reversed_tree[v] = reversed_tree[v] + [k] if v in reversed_tree.keys() else [k]
-            if k not in reversed_tree.keys():
-                reversed_tree[k] = list()
-
-        # Initializes _depthred_tree dict which is an "ordered list" of device-groups, from higher in hierarchy to
-        # lowest ones. Then calls gen_tree_depth method to populate.
-        self._depthed_tree = dict({0: ['shared']})
-        self.gen_tree_depth(reversed_tree)
-
-
-        analysis_perimeter = self.get_perimeter(reversed_tree)
+        self._analysis_perimeter = self.get_perimeter(self._reversed_tree)
+        if 'shared' in self._analysis_perimeter['direct']:
+            hierarchy_tree = Tree("+ shared", style="red")
+        elif 'shared' in self._analysis_perimeter['indirect']:
+            hierarchy_tree = Tree("* shared", style="yellow")
 
         # If print_result attribute is True, print the result on screen
-        if print_result:
-            def print_tree_branch(tree, start = 'shared', indent = 1):
-                for k, v in reversed_tree.items():
-                    if k == start:
-                        for d in v:
-                            if d in analysis_perimeter['direct']:
-                                perimeter_info = "+"
-                            elif d in analysis_perimeter['indirect']:
-                                perimeter_info = "*"
-                            else :
-                                perimeter_info = ""
-                            print("   " * indent + "|--- " + d + " " + perimeter_info)
-                            print_tree_branch(tree, d, indent + 1)
+        def print_tree_branch(tree, tree_branch, start = 'shared', indent = 1):
+            for k, v in self._reversed_tree.items():
+                if k == start:
+                    for d in v:
+                        if d in self._analysis_perimeter['direct']:
+                            leaf = tree_branch.add("+ " + d, style="red")
+                        elif d in self._analysis_perimeter['indirect']:
+                            leaf = tree_branch.add("* " + d, style="yellow")
+                        else :
+                            leaf = tree_branch.add("- " + d, style="green")
+                        print_tree_branch(tree, leaf, d, indent + 1)
 
-            print("\nObjects inheritance tree is : ")
-            if 'shared' in analysis_perimeter['direct']:
-                perimeter_info = "+"
-            elif 'shared' in analysis_perimeter['indirect']:
-                perimeter_info = "*"
-            print("\nshared " + perimeter_info)
-            print_tree_branch(reversed_tree)
+        print_tree_branch(self._reversed_tree, hierarchy_tree)
 
-        return reversed_tree
+        return hierarchy_tree
 
     def get_perimeter(self, reversed_tree):
         """
@@ -158,7 +218,6 @@ class PaloCleaner:
         :param location_name: (string) the name of the location
         :return:
         """
-
         # create _objects[location] if not yet existing
         if location_name not in self._objects.keys():
             self._objects[location_name] = dict()
@@ -181,9 +240,9 @@ class PaloCleaner:
             self._objects[location_name]['context'] = context
             self._objects[location_name]['address_obj'] = AddressObject.refreshall(context)
             self._objects[location_name]['address_group'] = AddressGroup.refreshall(context)
-            print(f"--> Initializing namesearch structures for {location_name}")
+            self._console.log(f"{location_name} objects namesearch structures initialized")
             self._addr_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['address_group'] + self._objects[location_name]['address_obj']}
-            print(f"--> Initializing ipsearch structures for {location_name}")
+            self._console.log(f"{location_name} objects ipsearch structures initialized")
             self._addr_ipsearch[location_name] = dict()
             for obj in self._objects[location_name]['address_obj']:
                 addr = self.hostify_address(obj.value)
@@ -194,10 +253,8 @@ class PaloCleaner:
             self._tag_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['tag']}
             self._objects[location_name]['service'] = ServiceObject.refreshall(context)
             self._objects[location_name]['service_group'] = ServiceGroup.refreshall(context)
-            print(f"--> Initializing namesearch structures for services on {location_name}")
+            self._console.log(f"{location_name} services namesearch structures initialized")
             self._service_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['service'] + self._objects[location_name]['service_group']}
-            #print(self._addr_namesearch[location_name])
-        print("OK")
 
     def fetch_rulebase(self, context, location_name):
         """
@@ -228,8 +285,6 @@ class PaloCleaner:
         default_rulebase = Rulebase()
         context.add(default_rulebase)
         self._rulebases[location_name]['default_security'] = SecurityRule.refreshall(default_rulebase, add=True)
-
-        print("OK")
 
     def get_relative_object_location(self, obj_name, reference_location, type="address"):
         """
@@ -274,7 +329,7 @@ class PaloCleaner:
         # if no object is found at current reference_location, find the upward device-group on the hierarchy
         # and call the current function recursively with this upward level as reference_location
         if not found_object and reference_location not in ['shared', 'predefined']:
-            upward_dg = self.get_pano_dg_hierarchy()[reference_location]
+            upward_dg = self._stored_pano_hierarchy[reference_location]
             if not upward_dg:
                 upward_dg = 'shared'
             found_object, found_location = self.get_relative_object_location(obj_name, upward_dg, type)
@@ -316,7 +371,7 @@ class PaloCleaner:
         # if we are not yet at the 'shared' level
         if reference_location != 'shared':
             # find the upward device-group
-            upward_dg = self.get_pano_dg_hierarchy()[reference_location]
+            upward_dg = self._stored_pano_hierarchy[reference_location]
             if not upward_dg:
                 upward_dg = 'shared'
             # call the current function recursively with the upward group level
@@ -475,7 +530,7 @@ class PaloCleaner:
                                         if loc not in [referenced_object_location, 'shared']:
                                             print("OVERRIDING MEMBERS !!!")
                                             print(m, loc)
-                                            upward_dg = self.get_pano_dg_hierarchy()[location_name]
+                                            upward_dg = self._stored_pano_hierarchy[location_name]
                                             if upward_dg is None:
                                                 upward_dg = 'shared'
                                             if type(m) is AddressGroup:
@@ -528,7 +583,7 @@ class PaloCleaner:
                                     flattened_members = flatten_group(referenced_service, location_name, referenced_service_location, "service")
                                     for m, loc in flattened_members:
                                         if loc not in [referenced_service_location, 'shared']:
-                                            upward_dg = self.get_pano_dg_hierarchy()[location_name]
+                                            upward_dg = self._stored_pano_hierarchy[location_name]
                                             if upward_dg is None:
                                                 upward_dg = 'shared'
                                             if type(m) is ServiceGroup:
@@ -551,8 +606,6 @@ class PaloCleaner:
 
         # add the fetched objects set to the _used_objects_set dict
         self._used_objects_sets[location_name] = set(obj_ref_set)
-        print(set(obj_ref_set))
-        print("OK")
 
     def hostify_address(self, address):
         """
@@ -579,7 +632,7 @@ class PaloCleaner:
         # initialize the list which will contains found objects
         found_upward_objects = list()
         # find name of the parent device-group (related to base_location_name)
-        upward_devicegroup = self.get_pano_dg_hierarchy().get(base_location_name)
+        upward_devicegroup = self._stored_pano_hierarchy.get(base_location_name)
         # if there's no parent, then parent is 'shared' level
         if not upward_devicegroup:
             upward_devicegroup = 'shared'
