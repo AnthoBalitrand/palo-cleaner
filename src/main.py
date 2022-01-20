@@ -29,7 +29,8 @@ def parse_cli_args():
     parser.add_argument(
         "--api-password",
         action = "store",
-        help = "Password to use for API connection to Panorama"
+        help = "Password to use for API connection to Panorama",
+        default = ""
     )
 
     parser.add_argument(
@@ -44,6 +45,12 @@ def parse_cli_args():
         help = "Deletes upward unused objects (shared + intermediates) if all childs are analyzed"
     )
 
+    parser.add_argument(
+        "--superverbose",
+        action = "store_true",
+        help = "Enables super-verbose logs. WARNING --> lots of outputs to STDOUT !"
+    )
+
     return parser.parse_args()
 
 
@@ -51,16 +58,13 @@ def main():
     # Get script start parameters list and values
     start_cli_args = parse_cli_args()
 
-    # If password has not been provided in the command arguments, ask for it with getpass.getpass
-    if not start_cli_args.api_password:
-        pano_api_password = ""
-
     # Instantiate the PaloCleaner object (connection to Panorama)
     cleaner = PaloCleaner(start_cli_args.panorama_url,
                 start_cli_args.api_user,
-                pano_api_password,
+                start_cli_args.api_password,
                 start_cli_args.device_groups,
-                start_cli_args.apply_cleaning)
+                start_cli_args.apply_cleaning,
+                start_cli_args.superverbose)
     cleaner.start()
     """
 
