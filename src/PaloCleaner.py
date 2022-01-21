@@ -17,6 +17,7 @@ from panos.predefined import Predefined
 from panos.errors import PanXapiError
 import re
 import time
+import random
 
 class PaloCleaner:
     def __init__(self, panorama_url, panorama_user, panorama_password, dg_filter, apply_cleaning, superverbose=False):
@@ -72,7 +73,7 @@ class PaloCleaner:
             hierarchy_tree = self.generate_hierarchy_tree()
             time.sleep(2)
             self._console.log("Discovered hierarchy tree is the following :")
-            self._console.log("( + are directly included / * are indirectly included / - are not included )")
+            self._console.log("( [red] + are directly included [/red] / [yellow] * are indirectly included [/yellow] / [green] - are not included [/green] )")
             self._console.log(Panel(hierarchy_tree))
             time.sleep(2)
 
@@ -419,6 +420,160 @@ class PaloCleaner:
         return found_objects
 
     def fetch_address_obj_set(self, location_name, progress, task):
+
+        def gen_condition_expression(condition_string, field_name):
+            """
+            Transforms a DAG objects match condition in an executable python statement
+            :param condition_string: (string) Condition got from the DAG object
+            :param field_name: (string) List on which the objects will be put for match at statement execution
+            :return: (string) Python executable condition
+            """
+
+            condition1 = re.sub('and(?![^(]*\))', f"in {field_name} and", condition_string)
+            condition2 = re.sub('or(?![^(]*\))', f"in {field_name} or", condition1)
+            condition2 += f" in {field_name}"
+            condition = "cond_expr_result = " + condition2
+            return condition
+
+        def shorten_object_type(object_type):
+            return object_type.replace('Group', '').replace('Object', '')
+
+        def flatten_object(used_object: panos.objects, object_location: str, usage_base: str, referencer_type: str = None, referenced_name: str = None):
+
+            obj_set = list()
+
+            if not isinstance(used_object, type(None)):
+                if self._superverbose:
+                    self._console.log(
+                        f"   Marking {used_object.name!r} ({used_object.__class__.__name__}) as resolved on cache for location {usage_base}",
+                        style="green italic")
+                self._resolved_cache[usage_base][shorten_object_type(used_object.__class__.__name__)].append(
+                    used_object.name)
+
+                obj_set.append((used_object, object_location))
+
+            if type(used_object) in [panos.objects.AddressObject, panos.objects.ServiceObject, panos.objects.Tag]:
+                if self._superverbose:
+                    self._console.log(
+                        f"   Object {used_object.name!r} ({used_object.__class__.__name__}) used on {usage_base!r} (ref by {referencer_type} {referenced_name}) has been found on location {object_location}", style="green italic")
+                #obj_set.append((used_object, object_location))
+            elif type(used_object) is panos.objects.AddressGroup:
+                if used_object.static_value:
+                    if self._superverbose:
+                        self._console.log(
+                            f"   Object {used_object.name!r} (static AddressGroup) used on {usage_base!r} (ref by {referencer_type} {referenced_name!r}) has been found on location {object_location}", style="green italic")
+                    for group_member in used_object.static_value:
+                        if group_member not in self._resolved_cache[usage_base]['Address']:
+                            if self._superverbose:
+                                self._console.log(
+                                    f"   Found group member of AddressGroup {used_object.name!r} : {group_member!r}", style="green italic")
+                            obj_set += flatten_object(*self.get_relative_object_location(group_member, usage_base),
+                                                      usage_base, used_object.__class__.__name__, used_object.name)
+
+                            # TODO : check on obj_set if members have been added which are "below" the group location (returned by get_relative_object_location)
+
+                            """
+                            ref_object, ref_object_location = self.get_relative_object_location(group_member, usage_base)
+                            obj_set += flatten_object(ref_object, ref_object_location, ref_object_location) 
+                            """
+                elif used_object.dynamic_value:
+                    if self._superverbose:
+                        self._console.log(
+                            f"   Object {used_object.name!r} (dynamic AddressGroup) used on {usage_base!r} (ref by {referencer_type} {referenced_name!r}) has been found on location {object_location}", style="green italic")
+                    executable_condition = gen_condition_expression(used_object.dynamic_value, "obj_tags")
+                    for referenced_object, referenced_object_location in self.get_relative_object_location_by_tag(
+                            executable_condition, usage_base):
+                        if self._superverbose:
+                            self._console.log(
+                                f"   Found group member of dynamic AddressGroup {used_object.name!r} : {referenced_object.name!r}", style="green italic")
+                        if referenced_object.name not in self._resolved_cache[usage_base]['Address']:
+                            obj_set += flatten_object(referenced_object, referenced_object_location, usage_base, used_object.__class__.__name__, used_object.name)
+                            self._tag_referenced.add((referenced_object, referenced_object_location))
+                        else:
+                            if self._superverbose:
+                                self._console.log(f"   Address Object {referenced_object.name!r} already resolved in context {usage_base}", style="yellow")
+            elif type(used_object) is panos.objects.ServiceGroup:
+                if used_object.value:
+                    if self._superverbose:
+                        self._console.log(
+                            f"Object {used_object.name!r} (ServiceGroup) used on {usage_base} has been found on location {object_location}")
+                    for group_member in used_object.value:
+                        if group_member not in self._resolved_cache[usage_base]['Service']:
+                            if self._superverbose:
+                                self._console.log(
+                                    f"Found group member of ServiceGroup {used_object.name} : {group_member}")
+                            obj_set += flatten_object(*self.get_relative_object_location(group_member, usage_base),
+                                                      usage_base)
+
+            # checking is used_object is not None permits to avoid cases where unsupported objects are used on the rule
+            # IE : EDL at the time of writing this comment
+
+            if not isinstance(used_object, type(None)):
+                """
+                if self._superverbose:
+                    self._console.log(
+                        f"   Marking {used_object.name!r} ({used_object.__class__.__name__}) as resolved on cache for location {usage_base}", style="green italic")
+                self._resolved_cache[usage_base][used_object.__class__.__name__.replace('Group', '')].append(used_object.name)
+
+                
+                if type(used_object) in [panos.objects.AddressObject, panos.objects.AddressGroup]:
+                    self._resolved_cache[usage_base]['addresses'].append(used_object.name)
+                elif type(used_object) is panos.objects.Tag:
+                    self._resolved_cache[usage_base]['tags'].append(used_object.name)
+                elif type(used_object) in [panos.objects.ServiceObject, panos.objects.ServiceGroup]:
+                    self._resolved_cache[usage_base]['services'].append(used_object.name)
+                """
+
+                if type(used_object) is not panos.objects.Tag:
+                    if used_object.tag:
+                        for tag in used_object.tag:
+                            if self._superverbose:
+                                self._console.log(f"   Object {used_object.name} ({used_object.__class__.__name__}) uses tag {tag}", style="green italic")
+                            if tag not in self._resolved_cache[usage_base]['Tag']:
+                                obj_set += flatten_object(
+                                    *self.get_relative_object_location(tag, object_location, obj_type="tag"), usage_base, used_object.__class__.__name__, used_object.name)
+
+            return obj_set
+
+        location_obj_set = list()
+        self._resolved_cache[location_name] = dict({'Address': list(), 'Service': list(), 'Tag': list()})
+
+        # iterates on all rulebases for the concerned location
+        for k, v in self._rulebases[location_name].items():
+            if k == "context":
+                # if the current key is 'context', pass (as it contains the DeviceGroup object instance)
+                continue
+            # for each rule in the current rulebase
+            for r in v:
+                if self._superverbose:
+                    self._console.log(f"[{location_name}] Processing used objects on rule {r.name!r}")
+                try:
+                    # for all objects, used either as source or destination
+                    rule_objects = r.source + r.destination
+                except AttributeError:
+                    try:
+                        rule_objects = r.source_addresses + r.destination_addresses
+                    except AttributeError:
+                        pass
+                if 'nat' in k:
+                    if r.source_translation_translated_addresses:
+                        rule_objects += r.source_translation_translated_addresses
+                    if r.destination_translated_address:
+                        rule_objects.append(r.destination_translated_address)
+                for obj in rule_objects:
+                    if obj != 'any' and obj not in self._resolved_cache[location_name]['Address']:
+                        location_obj_set += (flattened := flatten_object(*self.get_relative_object_location(obj, location_name), location_name, r.__class__.__name__, r.name))
+                        if not flattened:
+                            self._console.log(f"   Un-supported object seems to be used on rule {r.name!r} ({obj})", style="red")
+                    else:
+                        if self._superverbose:
+                            self._console.log(f"   Address Object {obj!r} already resolved in context {location_name}", style="yellow")
+
+                time.sleep(0.05)
+                progress.update(task, advance=1)
+
+
+    def fetch_address_obj_set_old(self, location_name, progress, task):
         """
         For a given location_name, will parse the rulebase, and will build a set of all objects used
         (either directly referenced, or member of a static or dynamic group)
