@@ -77,58 +77,53 @@ class PaloCleaner:
             self._console.log(Panel(hierarchy_tree))
             time.sleep(2)
 
-            status.update("Downloading Panorama shared objects")
+        perimeter = [(dg.about()['name'], dg) for dg in self.get_devicegroups() if dg.about()['name'] in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']]
+
+        with Progress(
+                    SpinnerColumn(spinner_name="dots12"),
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(),
+                    TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                    TimeRemainingColumn(),
+                    TimeElapsedColumn(),
+                    console=self._console,
+                    transient=True
+            ) as progress:
+
+            download_task = progress.add_task("", total=len(perimeter) + 1)
+
+            progress.update(download_task, description="Downloading Panorama shared objects")
             self.fetch_objects(self._panorama, 'shared')
             self.fetch_objects(self._panorama, 'predefined')
             self._console.log(f"Panorama objects downloaded ({self.count_objects('shared')} found)")
 
-            status.update("Downloading Panorama rulebases")
+            progress.update(download_task, description="Downloading Panorama rulebases")
             self.fetch_rulebase(self._panorama, 'shared')
             self._console.log(f"Panorama rulebases downloaded ({self.count_rules('shared')} rules found)")
 
-            for dg in self.get_devicegroups():
-                context_name = dg.about()['name']
-                if context_name in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']:
-                    status.update(f"Downloading {context_name} objects")
-                    self.fetch_objects(dg, context_name)
-                    self._console.log(f"{context_name} objects downloaded ({self.count_objects(context_name)} found)")
-                    status.update(f"Downloading {context_name} rulebases")
-                    self.fetch_rulebase(dg, context_name)
-                    self._console.log(f"{context_name} rulebases downloaded ({self.count_rules(context_name)} rules found)")
-            """
-            status.update("Parsing used address objects set for shared")
-            self.fetch_address_obj_set("shared")
+            progress.update(download_task, advance=1)
+
+            for (context_name, dg) in perimeter:
+                progress.update(download_task, description=f"Downloading {context_name} objects")
+                self.fetch_objects(dg, context_name)
+                self._console.log(f"{context_name} objects downloaded ({self.count_objects(context_name)} found)")
+                progress.update(download_task, description=f"Downloading {context_name} rulebases")
+                self.fetch_rulebase(dg, context_name)
+                self._console.log(f"{context_name} rulebases downloaded ({self.count_rules(context_name)} rules found)")
+                progress.update(download_task, advance=1)
+
+            progress.remove_task(download_task)
+
+            shared_fetch_task = progress.add_task("Shared - Processing used objects location", total=self.count_rules('shared'))
+            self.fetch_address_obj_set("shared", progress, shared_fetch_task)
             self._console.log("shared used objects set processed")
+            progress.remove_task(shared_fetch_task)
 
-            for dg in self.get_devicegroups():
-                if dg.about()['name'] in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']:
-                    status.update(f"Parsing used address objects set for {dg}")
-                    self.fetch_address_obj_set(dg.about()['name'])
-                    self._console.log(f"{dg.about()['name']} used objects set processed")
-            """
-
-        with Progress(
-                SpinnerColumn(spinner_name= "dots12"),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                TimeRemainingColumn(),
-                TimeElapsedColumn(),
-                console= self._console,
-                transient= True
-                ) as progress:
-
-            shared_task = progress.add_task("Shared - Processing used objects location", total=self.count_rules('shared'))
-            self.fetch_address_obj_set("shared", progress, shared_task)
-            self._console.log("shared used objects set processed")
-            progress.remove_task(shared_task)
-
-            for dg in self.get_devicegroups():
-                if dg.about()['name'] in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']:
-                    dg_task = progress.add_task(f"{dg.about()['name']} - Processing used objects location", total=self.count_rules(dg.about()['name']))
-                    self.fetch_address_obj_set(dg.about()['name'], progress, dg_task)
-                    self._console.log(f"{dg.about()['name']} used objects set processed")
-                    progress.remove_task(dg_task)
+            for (context_name, dg) in perimeter:
+                dg_fetch_task = progress.add_task(f"{dg.about()['name']} - Processing used objects location", total=self.count_rules(dg.about()['name']))
+                self.fetch_address_obj_set(dg.about()['name'], progress, dg_fetch_task)
+                self._console.log(f"{dg.about()['name']} used objects set processed")
+                progress.remove_task(dg_fetch_task)
         #self.reverse_dg_hierarchy(self.get_pano_dg_hierarchy(), print_result=True)
 
     def get_devicegroups(self):
@@ -553,7 +548,7 @@ class PaloCleaner:
                         if self._superverbose:
                             self._console.log(f"  * Address Object {obj!r} already resolved in context {location_name}", style="yellow")
 
-                time.sleep(0.05)
+                time.sleep(0.5)
                 progress.update(task, advance=1)
 
 
