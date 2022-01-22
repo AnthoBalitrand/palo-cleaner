@@ -66,17 +66,8 @@ def main():
                 start_cli_args.apply_cleaning,
                 start_cli_args.superverbose)
     cleaner.start()
+
     """
-
-    # Get used address objects set for Panorama (shared context)
-    print(f"Parsing used address objects set for shared... ", end="")
-    cleaner.fetch_address_obj_set('shared', )
-
-    # Get used address objects set for all device groups
-    for dg in cleaner.get_devicegroups():
-        if dg.about()['name'] in analysis_perimeter['direct'] + analysis_perimeter['indirect']:
-            print(f"Parsing used address objects set for {dg}... ", end="")
-            cleaner.fetch_address_obj_set(dg.about()['name'])
 
     # Start objects optimization for all DeviceGroup not having child
     for dg in [k for k, v in cleaner.reverse_dg_hierarchy(cleaner.get_pano_dg_hierarchy()).items() if not v]:
