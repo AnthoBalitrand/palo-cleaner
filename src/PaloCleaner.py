@@ -130,6 +130,14 @@ class PaloCleaner:
                 self.fetch_address_obj_set(dg.about()['name'], progress, dg_fetch_task)
                 self._console.log(f"{dg.about()['name']} used objects set processed")
                 progress.remove_task(dg_fetch_task)
+
+            # 26012022 - cleaning only leafs device groups (DG without childs)
+            dg_to_clean = [context_name for context_name, dg in perimeter if not self._stored_pano_hierarchy.get(context_name)]
+            for context_name in dg_to_clean:
+                dg_optimize_task = progress.add_task(f"{context_name} - Optimizing objects", total=len(self._used_objects_sets[context_name]))
+                self.optimize_address_objects(context_name, progress, dg_optimize_task)
+                self._console.log(f"{context_name} objects optimization done")
+                progress.remove_task(dg_optimize_task)
         # self.reverse_dg_hierarchy(self.get_pano_dg_hierarchy(), print_result=True)
 
     def get_devicegroups(self):
@@ -466,18 +474,7 @@ class PaloCleaner:
                                                       usage_base, used_object.__class__.__name__, used_object.name,
                                                       recursion_level + 1)
 
-                            """
-                            if member_object_loc not in ['shared', object_location]: 
-                                if self._superverbose: 
-                                    self._console.log(f"  {'*' * recursion_level} group member of AddressGroup {used_object.name!r} : {group_member!r} is overriden at location {member_object_loc}. Protecting base member", style="red italic")
-                                obj_set += flatten_object()
-                            """
-                            # TODO : check on obj_set if members have been added which are "below" the group location (returned by get_relative_object_location)
-
-                            """
-                            ref_object, ref_object_location = self.get_relative_object_location(group_member, usage_base)
-                            obj_set += flatten_object(ref_object, ref_object_location, ref_object_location) 
-                            """
+                    # the condition below permits to "protect" the group members (at group level) if they are overriden at a lower location
 
                     if object_location != usage_base:
                         if self._superverbose:
@@ -589,6 +586,8 @@ class PaloCleaner:
                 time.sleep(0.5)
                 progress.update(task, advance=1)
 
+        self._used_objects_sets[location_name] = set(location_obj_set)
+
     def hostify_address(self, address):
         """
         Used to remove /32 at the end of an IP address
@@ -618,7 +617,7 @@ class PaloCleaner:
         # if there's no parent, then parent is 'shared' level
         if not upward_devicegroup:
             upward_devicegroup = 'shared'
-        # for each object existing at found upper evel
+        # for each object existing at found upper level
         for obj in self._addr_ipsearch[upward_devicegroup].get(obj_addr, list()):
             found_upward_objects.append((obj, upward_devicegroup))
         """
@@ -673,7 +672,7 @@ class PaloCleaner:
             return interm_obj[0]
         print(f"ERROR !!!!!! UNABLE TO CHOSE OBJECT IN LIST {obj_list}")
 
-    def optimize_address_objects(self, location_name):
+    def optimize_address_objects(self, location_name, progress, task):
         """
         Start object optimization processing for device-group given as argument
 
@@ -684,6 +683,7 @@ class PaloCleaner:
         # for each object and location found on the _used_objects_set for the current location
         for obj, location in self._used_objects_sets[location_name]:
             # if the current object type is AddressObject and exists at the current location level
+            # TODO : find objects at upward locations even if the used object is not local (can be at an intermediate level)
             if type(obj) == panos.objects.AddressObject and location == location_name:
                 # find similar objects (same IP address) on upper level device-groups (including 'shared')
                 upward_objects = self.find_upward_obj_by_addr(location_name, obj.value)
@@ -692,10 +692,13 @@ class PaloCleaner:
                     # find which one is the best to use
                     replacement_obj, replacement_obj_location = self.find_best_replacement_addr_obj(upward_objects)
                     # print(f"Object {obj.about()['name']} ({obj.value}) can be replaced by {replacement_obj[0].about()['name']} ({replacement_obj[0].value}) on {replacement_obj[1]}")
-                    print(
-                        f"[{location_name}] Replacing ({obj}, {location}) --by--> ({replacement_obj.about()['name']}, {replacement_obj_location})")
+                    #print(
+                    #    f"[{location_name}] Replacing ({obj}, {location}) --by--> ({replacement_obj.about()['name']}, {replacement_obj_location})")
+                    self._console.log(f"   Replacing {obj.about()['name']} ({obj.__class__.__name__}) at location {location_name} by {replacement_obj.about()['name']} at location {replacement_obj_location}")
                     # call replace_object method with current object and the one with which to replace it
-                    self.replace_object(location_name, (obj, location), (replacement_obj, replacement_obj_location))
+                    #self.replace_object(location_name, (obj, location), (replacement_obj, replacement_obj_location))
+
+            progress.update(task, advance=1)
 
     def replace_object(self, location_name, ref_obj, replacement_obj):
         """
