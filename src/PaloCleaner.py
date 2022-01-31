@@ -9,6 +9,8 @@ from rich.tree import Tree
 from rich.spinner import Spinner
 from rich.text import Text
 from rich.panel import Panel
+from rich.box import Box
+from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn, TimeRemainingColumn
 import panos.objects
 from panos.panorama import Panorama, DeviceGroup, PanoramaDeviceGroupHierarchy
@@ -42,6 +44,7 @@ class PaloCleaner:
         self._resolved_cache = dict()
         self._superverbose = superverbose
         self._console = Console()
+        self._replacements = dict()
 
     def start(self):
         header_text = Text("""
@@ -85,11 +88,11 @@ class PaloCleaner:
 
         with Progress(
                 SpinnerColumn(spinner_name="dots12"),
-                TextColumn("[progress.description]{task.description}"),
                 BarColumn(),
                 TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
                 TimeRemainingColumn(),
                 TimeElapsedColumn(),
+                TextColumn("[progress.description]{task.description}"),
                 console=self._console,
                 transient=True
         ) as progress:
@@ -132,11 +135,13 @@ class PaloCleaner:
                 progress.remove_task(dg_fetch_task)
 
             # 26012022 - cleaning only leafs device groups (DG without childs)
-            dg_to_clean = [context_name for context_name, dg in perimeter if not self._stored_pano_hierarchy.get(context_name)]
+            dg_to_clean = [context_name for context_name, dg in perimeter if not self._reversed_tree.get(context_name)]
             for context_name in dg_to_clean:
                 dg_optimize_task = progress.add_task(f"{context_name} - Optimizing objects", total=len(self._used_objects_sets[context_name]))
                 self.optimize_address_objects(context_name, progress, dg_optimize_task)
                 self._console.log(f"{context_name} objects optimization done")
+                self.replace_object_in_groups(context_name, progress, dg_optimize_task)
+                self._console.log(f"{context_name} objects replaced in groups")
                 progress.remove_task(dg_optimize_task)
         # self.reverse_dg_hierarchy(self.get_pano_dg_hierarchy(), print_result=True)
 
@@ -272,37 +277,34 @@ class PaloCleaner:
             predef = Predefined()
             self._panorama.add(predef)
             predef.refreshall()
-            self._objects[location_name]['service'] = [v for k, v in predef.service_objects.items()]
+            self._objects[location_name]['Service'] = [v for k, v in predef.service_objects.items()]
             # context object is stored on the dict for further usage
             self._objects[location_name]['context'] = context
-            for type in ['address_obj', 'address_group', 'tag', 'service_group']:
-                self._objects[location_name][type] = list()
-            self._service_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['service']}
+            for obj_type in ['Address', 'Tag']:
+                self._objects[location_name][obj_type] = list()
+            self._service_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Service']}
         else:
             # else download all objects types
             self._objects[location_name]['context'] = context
-            self._objects[location_name]['address_obj'] = AddressObject.refreshall(context)
-            self._objects[location_name]['address_group'] = AddressGroup.refreshall(context)
+            self._objects[location_name]['Address'] = AddressObject.refreshall(context) + AddressGroup.refreshall(context)
             if self._superverbose:
                 self._console.log(f"{location_name} objects namesearch structures initialized")
-            self._addr_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['address_group'] +
-                                                    self._objects[location_name]['address_obj']}
+            self._addr_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Address']}
             if self._superverbose:
                 self._console.log(f"{location_name} objects ipsearch structures initialized")
             self._addr_ipsearch[location_name] = dict()
-            for obj in self._objects[location_name]['address_obj']:
-                addr = self.hostify_address(obj.value)
-                if addr not in self._addr_ipsearch[location_name].keys():
-                    self._addr_ipsearch[location_name][addr] = list()
-                self._addr_ipsearch[location_name][addr].append(obj)
-            self._objects[location_name]['tag'] = Tag.refreshall(context)
-            self._tag_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['tag']}
-            self._objects[location_name]['service'] = ServiceObject.refreshall(context)
-            self._objects[location_name]['service_group'] = ServiceGroup.refreshall(context)
+            for obj in self._objects[location_name]['Address']:
+                if type(obj) is panos.objects.AddressObject:
+                    addr = self.hostify_address(obj.value)
+                    if addr not in self._addr_ipsearch[location_name].keys():
+                        self._addr_ipsearch[location_name][addr] = list()
+                    self._addr_ipsearch[location_name][addr].append(obj)
+            self._objects[location_name]['Tag'] = Tag.refreshall(context)
+            self._tag_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Tag']}
+            self._objects[location_name]['Service'] = ServiceObject.refreshall(context) + ServiceGroup.refreshall(context)
             if self._superverbose:
                 self._console.log(f"{location_name} services namesearch structures initialized")
-            self._service_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['service'] +
-                                                       self._objects[location_name]['service_group']}
+            self._service_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Service']}
 
     def fetch_rulebase(self, context, location_name):
         """
@@ -390,8 +392,7 @@ class PaloCleaner:
 
         found_objects = list()
         # For each object at the reference_location level
-        for obj in self._objects[reference_location]['address_obj'] + self._objects[reference_location][
-            'address_group']:
+        for obj in self._objects[reference_location]['Address']:
             # check if current object has tags
             if obj.tag:
                 # print(f"Object {obj} has tags !!!!!! ({obj.tag})")
@@ -634,6 +635,22 @@ class PaloCleaner:
         # returns list of tuple containing all found objects
         return found_upward_objects
 
+    def find_upward_obj_static_group(self, base_location_name, obj_group):
+        found_upward_objects = list()
+        upward_devicegroup = self._stored_pano_hierarchy.get(base_location_name)
+        if not upward_devicegroup:
+            upward_devicegroup = 'shared'
+        for obj in self._objects[upward_devicegroup]['Address']:
+            if type(obj) is panos.objects.AddressGroup:
+                if obj.static_value:
+                    if sorted(obj.static_value) == sorted(obj_group.static_value):
+                        found_upward_objects.append((obj, upward_devicegroup))
+
+        if upward_devicegroup != 'shared':
+            found_upward_objects += self.find_upward_obj_static_group(upward_devicegroup, obj_group)
+
+        return found_upward_objects
+
     def find_best_replacement_addr_obj(self, obj_list):
         """
         Get a list of tuples (object, location) and returns the best to be used based on location and naming criterias
@@ -681,24 +698,124 @@ class PaloCleaner:
         """
 
         # for each object and location found on the _used_objects_set for the current location
-        for obj, location in self._used_objects_sets[location_name]:
-            # if the current object type is AddressObject and exists at the current location level
-            # TODO : find objects at upward locations even if the used object is not local (can be at an intermediate level)
-            if type(obj) == panos.objects.AddressObject and location == location_name:
-                # find similar objects (same IP address) on upper level device-groups (including 'shared')
-                upward_objects = self.find_upward_obj_by_addr(location_name, obj.value)
-                # if upward duplicate objects are found
-                if upward_objects:
-                    # find which one is the best to use
-                    replacement_obj, replacement_obj_location = self.find_best_replacement_addr_obj(upward_objects)
-                    # print(f"Object {obj.about()['name']} ({obj.value}) can be replaced by {replacement_obj[0].about()['name']} ({replacement_obj[0].value}) on {replacement_obj[1]}")
-                    #print(
-                    #    f"[{location_name}] Replacing ({obj}, {location}) --by--> ({replacement_obj.about()['name']}, {replacement_obj_location})")
-                    self._console.log(f"   Replacing {obj.about()['name']} ({obj.__class__.__name__}) at location {location_name} by {replacement_obj.about()['name']} at location {replacement_obj_location}")
-                    # call replace_object method with current object and the one with which to replace it
-                    #self.replace_object(location_name, (obj, location), (replacement_obj, replacement_obj_location))
+        self._replacements[location_name] = {'Address': dict(), 'Service': dict(), 'Tag': dict()}
+        for obj_type in [panos.objects.AddressObject, panos.objects.AddressGroup]:
+            # TODO : check performance of the following statement
+            for (obj, location) in [(o, l) for (o, l) in self._used_objects_sets[location_name] if type(o) is obj_type]:
+                # if the current object type is AddressObject and exists at the current location level
+                # TODO : find objects at upward locations even if the used object is not local (can be at an intermediate level)
+                # TODO 2 : processing for both types of objects can probably be merged
+                if type(obj) == panos.objects.AddressObject and location == location_name:
+                    # find similar objects (same IP address) on upper level device-groups (including 'shared')
+                    upward_objects = self.find_upward_obj_by_addr(location_name, obj.value)
+                    # if upward duplicate objects are found
+                    if upward_objects:
+                        # find which one is the best to use
+                        replacement_obj, replacement_obj_location = self.find_best_replacement_addr_obj(upward_objects)
+                        # print(f"Object {obj.about()['name']} ({obj.value}) can be replaced by {replacement_obj[0].about()['name']} ({replacement_obj[0].value}) on {replacement_obj[1]}")
+                        #print(
+                        #    f"[{location_name}] Replacing ({obj}, {location}) --by--> ({replacement_obj.about()['name']}, {replacement_obj_location})")
+                        if self._superverbose:
+                            self._console.log(f"   * Replacing {obj.about()['name']} ({obj.__class__.__name__}) at location {location_name} by {replacement_obj.about()['name']} at location {replacement_obj_location}", style="green italic")
+                        # call replace_object method with current object and the one with which to replace it
+                        #self.replace_object(location_name, (obj, location), (replacement_obj, replacement_obj_location))
+                        #self.replace_object_in_groups(location_name, (obj, location), (replacement_obj, replacement_obj_location))
+                        self._replacements[location_name]['Address'][obj.about()['name']] = {
+                            'source': (obj, location),
+                            'replacement': (replacement_obj, replacement_obj_location),
+                        }
+                elif type(obj) == panos.objects.AddressGroup and location == location_name:
+                    upward_objects = self.find_upward_obj_static_group(location_name, obj)
+                    if upward_objects:
+                        replacement_obj, replacement_obj_location = upward_objects[0]
+                        self._console.log(
+                            f"   Replacing {obj.about()['name']} ({obj.__class__.__name__}) at location {location_name} by {replacement_obj.about()['name']} at location {replacement_obj_location}")
+                        self._replacements[location_name]['Address'][obj.about()['name']] = {
+                            'source': (obj, location),
+                            'replacement': (replacement_obj, replacement_obj_location)
+                        }
+                progress.update(task, advance=1)
 
-            progress.update(task, advance=1)
+    def replace_object_in_groups(self, location_name, progress, task):
+
+        replacements_done = dict()
+
+        for replacement_name, replacement in self._replacements[location_name]['Address'].items():
+
+            source_obj = replacement_name
+            source_obj_instance, source_obj_location = replacement['source']
+            replacement_obj_instance, replacement_obj_location = replacement['replacement']
+
+            if source_obj in self._tag_referenced:
+                for tag in source_obj_instance.tag:
+                    if not [x for x in self._objects['shared']['Tag'] if x.name == tag]:
+                        # tag used on referenced object does not exists as shared, so create it
+                        tag_instance, tag_location = self.get_relative_object_location(tag, location_name, obj_type="tag")
+                        self._console.log(f"   [shared] Creating tag {tag!r} (copy from {tag_location}), to be used on ({replacement_obj_instance.about()['name']} at location {replacement_obj_location})")
+                        if self._apply_cleaning:
+                            try:
+                                self._panorama.add(tag_instance).create()
+                            except Exception as e:
+                                self._console.log(f"    [shared] Error while creating tag {tag!r} ! : {e.message}", style="red")
+                        self._objects['shared']['Tag'].append(tag_instance)
+                        self._used_objects_sets['shared'].add((tag_instance, 'shared'))
+                    self._console.log(f"    [{replacement_obj_location}] Adding tag {tag} to object {replacement_obj_instance.about()['name']!r} ({replacement_obj_instance.__class__.__name__})", style="yellow italic")
+                    replacement_obj_instance.tag.append(tag)
+                    if self._apply_cleaning:
+                        replacement_obj_instance.apply()
+
+            # replacing object on current location static groups (if name changed)
+            if source_obj_instance.about()['name'] != replacement_obj_instance.about()['name']:
+                for object in self._objects[location_name]['Address']:
+                    if type(object) is panos.objects.AddressGroup:
+                        changed = False
+                        try:
+                            object.static_value.remove(source_obj_instance.about()['name'])
+                            object.static_value.append(replacement_obj_instance.about()['name'])
+                            self._console.log(f"    [{location_name}] Replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} on {object.about()['name']!r} ({object.__class__.__name__})", style="yellow italic")
+                            changed = True
+                            if object.name not in replacements_done:
+                                replacements_done[object.name] = list()
+                            replacements_done[object.name].append((source_obj_instance.about()['name'], replacement_obj_instance.about()['name']))
+                        except ValueError:
+                            continue
+                        except Exception as e:
+                            self._console.log(f"    [{location_name}] Unknown error while replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} on {object.about()['name']!r} ({object.__class__.__name__}) : {e.message}", style="red")
+                        if self._apply_cleaning and changed:
+                            object.apply()
+            else :
+                for object in self._objects[location_name]['Address']:
+                    if type(object) is panos.objects.AddressGroup:
+                        changed = False
+                        try:
+                            if source_obj_instance.about()['name'] in object.static_value:
+                                self._console.log(
+                                    f"    [{location_name}] Replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} on {object.about()['name']!r} ({object.__class__.__name__})",
+                                    style="yellow italic")
+                                changed = True
+                                if object.name not in replacements_done:
+                                    replacements_done[object.name] = list()
+                                replacements_done[object.name].append((source_obj_instance.about()['name'], replacement_obj_instance.about()['name']))
+                        except ValueError:
+                            continue
+                        except Exception as e:
+                            self._console.log(
+                                f"    [{location_name}] Unknown error while replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} on {object.about()['name']!r} ({object.__class__.__name__}) : {e.message}",
+                                style="red")
+
+        for changed_group_name in replacements_done:
+            group_table = Table(style="dim", border_style="not dim", expand=False)
+            group_table.add_column(changed_group_name)
+            for replaced_item in replacements_done[changed_group_name]:
+                if replaced_item[0] != replaced_item[1]:
+                    group_table.add_row(f"[red]- {replaced_item[0]}[/red]")
+                    group_table.add_row(f"[green]+ {replaced_item[1]}[/green]")
+                else:
+                    group_table.add_row(f"[yellow]! {replaced_item[0]}[/yellow]")
+            self._console.print(group_table)
+
+        # TODO : delete object if replacement object has the same name EXCEPT IF USED ON A RULE WHICH CANNOT BE DELETED !
+
 
     def replace_object(self, location_name, ref_obj, replacement_obj):
         """
@@ -710,7 +827,7 @@ class PaloCleaner:
         :param replacement_obj: ((AddressObject, string)) Replacement object instance and its location name
         :return:
         """
-
+        """
         # Get all useful values from replaced and replacement objects
         ref_obj_instance, ref_obj_location = ref_obj
         ref_obj_name = ref_obj_instance.about()['name']
@@ -738,7 +855,7 @@ class PaloCleaner:
                 replacement_obj_instance.tag.append(t)
                 if self._apply_cleaning:
                     replacement_obj_instance.apply()
-
+        """
         # If the initial and the replacement objects have different names
         if ref_obj_name != replacement_obj_name:
             # fetch all items of the _rulebases cached data for the concerned location
