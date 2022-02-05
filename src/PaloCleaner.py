@@ -3,7 +3,7 @@ import sys
 
 sys.path.append("/Users/to148757/PycharmProjects/panos-python/pan-os-python")
 
-from rich.console import Console
+from rich.console import Console, group
 from rich.prompt import Prompt
 from rich.tree import Tree
 from rich.spinner import Spinner
@@ -11,6 +11,7 @@ from rich.text import Text
 from rich.panel import Panel
 from rich.box import Box
 from rich.table import Table
+from rich.live import Live
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn, TimeRemainingColumn
 import panos.objects
 from panos.panorama import Panorama, DeviceGroup, PanoramaDeviceGroupHierarchy
@@ -76,12 +77,12 @@ class PaloCleaner:
 
             status.update("Parsing device groups list")
             hierarchy_tree = self.generate_hierarchy_tree()
-            time.sleep(2)
+            time.sleep(1)
             self._console.log("Discovered hierarchy tree is the following :")
             self._console.log(
                 "( [red] + are directly included [/red] / [yellow] * are indirectly included [/yellow] / [green] - are not included [/green] )")
             self._console.log(Panel(hierarchy_tree))
-            time.sleep(2)
+            time.sleep(1)
 
         perimeter = [(dg.about()['name'], dg) for dg in self.get_devicegroups() if
                      dg.about()['name'] in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']]
@@ -142,6 +143,8 @@ class PaloCleaner:
                 self._console.log(f"{context_name} objects optimization done")
                 self.replace_object_in_groups(context_name, progress, dg_optimize_task)
                 self._console.log(f"{context_name} objects replaced in groups")
+                self.replace_object_in_rulebase(context_name, progress, dg_optimize_task)
+                self._console.log(f"{context_name} objects replaced in rulebases")
                 progress.remove_task(dg_optimize_task)
         # self.reverse_dg_hierarchy(self.get_pano_dg_hierarchy(), print_result=True)
 
@@ -573,7 +576,7 @@ class PaloCleaner:
                             if ip_regex.match(obj):
                                 location_obj_set += [(AddressObject(name=obj, value=obj), location_name)]
                                 self._console.log(
-                                    f"   * Created AddressObject for address {obj} used on rule {r.name!r}",
+                                    f"  * Created AddressObject for address {obj} used on rule {r.name!r}",
                                     style="yellow")
                             else:
                                 self._console.log(
@@ -741,7 +744,6 @@ class PaloCleaner:
         replacements_done = dict()
 
         for replacement_name, replacement in self._replacements[location_name]['Address'].items():
-
             source_obj = replacement_name
             source_obj_instance, source_obj_location = replacement['source']
             replacement_obj_instance, replacement_obj_location = replacement['replacement']
@@ -764,44 +766,31 @@ class PaloCleaner:
                     if self._apply_cleaning:
                         replacement_obj_instance.apply()
 
-            # replacing object on current location static groups (if name changed)
-            if source_obj_instance.about()['name'] != replacement_obj_instance.about()['name']:
-                for object in self._objects[location_name]['Address']:
-                    if type(object) is panos.objects.AddressGroup:
-                        changed = False
-                        try:
-                            object.static_value.remove(source_obj_instance.about()['name'])
-                            object.static_value.append(replacement_obj_instance.about()['name'])
-                            self._console.log(f"    [{location_name}] Replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} on {object.about()['name']!r} ({object.__class__.__name__})", style="yellow italic")
+            # replacing object on current location static groups
+            for checked_object in self._objects[location_name]['Address']:
+                if type(checked_object) is panos.objects.AddressGroup:
+                    changed = False
+                    matched = False
+                    try:
+                        if source_obj_instance.about()['name'] != replacement_obj_instance.about()['name']:
+                            checked_object.static_value.remove(source_obj_instance.about()['name'])
+                            checked_object.static_value.append(replacement_obj_instance.about()['name'])
                             changed = True
-                            if object.name not in replacements_done:
-                                replacements_done[object.name] = list()
-                            replacements_done[object.name].append((source_obj_instance.about()['name'], replacement_obj_instance.about()['name']))
-                        except ValueError:
-                            continue
-                        except Exception as e:
-                            self._console.log(f"    [{location_name}] Unknown error while replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} on {object.about()['name']!r} ({object.__class__.__name__}) : {e.message}", style="red")
-                        if self._apply_cleaning and changed:
-                            object.apply()
-            else :
-                for object in self._objects[location_name]['Address']:
-                    if type(object) is panos.objects.AddressGroup:
-                        changed = False
-                        try:
-                            if source_obj_instance.about()['name'] in object.static_value:
-                                self._console.log(
-                                    f"    [{location_name}] Replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} on {object.about()['name']!r} ({object.__class__.__name__})",
-                                    style="yellow italic")
-                                changed = True
-                                if object.name not in replacements_done:
-                                    replacements_done[object.name] = list()
-                                replacements_done[object.name].append((source_obj_instance.about()['name'], replacement_obj_instance.about()['name']))
-                        except ValueError:
-                            continue
-                        except Exception as e:
-                            self._console.log(
-                                f"    [{location_name}] Unknown error while replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} on {object.about()['name']!r} ({object.__class__.__name__}) : {e.message}",
-                                style="red")
+                            matched = True
+                        elif source_obj_instance.about()['name'] in checked_object.static_value:
+                            matched = True
+
+                        if matched:
+                            self._console.log(f"    [{location_name}] Replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} on {checked_object.about()['name']!r} ({checked_object.__class__.__name__})", style="yellow italic")
+                            if checked_object.name not in replacements_done:
+                                replacements_done[checked_object.name] = list()
+                            replacements_done[checked_object.name].append((source_obj_instance.about()['name'], replacement_obj_instance.about()['name']))
+                    except ValueError:
+                        continue
+                    except Exception as e:
+                        self._console.log(f"    [{location_name}] Unknown error while replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} on {checked_object.about()['name']!r} ({checked_object.__class__.__name__}) : {e.message}", style="red")
+                    if self._apply_cleaning and changed:
+                        checked_object.apply()
 
         for changed_group_name in replacements_done:
             group_table = Table(style="dim", border_style="not dim", expand=False)
@@ -812,9 +801,66 @@ class PaloCleaner:
                     group_table.add_row(f"[green]+ {replaced_item[1]}[/green]")
                 else:
                     group_table.add_row(f"[yellow]! {replaced_item[0]}[/yellow]")
-            self._console.print(group_table)
+            self._console.log(group_table)
 
         # TODO : delete object if replacement object has the same name EXCEPT IF USED ON A RULE WHICH CANNOT BE DELETED !
+
+    def replace_object_in_rulebase(self, location_name, progress, task):
+
+        def replace_in_rule(rule):
+            replacements_done = dict()
+            # Need to map fields to rule type
+            for row in ["source", "destination"]:
+                replacements_done[row] = list()
+                for o in getattr(rule, row):
+                    if (replacement := self._replacements[location_name]['Address'].get(o)):
+                        source_obj_instance, source_obj_location = replacement['source']
+                        replacement_obj_instance, replacement_obj_location = replacement['replacement']
+                        if o != (repl_name := replacement_obj_instance.about()['name']):
+                            # replacement type 2 = removed
+                            # replacement type 3 = added
+                            replacements_done[row].append((o, 2))
+                            replacements_done[row].append((repl_name, 3))
+                        else:
+                            # replacement type 1 = same name different location
+                            replacements_done[row].append((o, 1))
+                    else:
+                        # replacement type 0 = no replacement
+                        replacements_done[row].append((o, 0))
+            return replacements_done
+
+        def format_for_table(repl_name, repl_type):
+            type_map = {0: '', 1: 'yellow', 2: 'red', 3: 'green'}
+            action_map = {0: ' ', 1: '!', 2: '-', 3: '+'}
+            formatted_return = f"[{type_map[repl_type]}]" if repl_type > 0 else ""
+            formatted_return += f"{action_map[repl_type]} {repl_name}"
+            formatted_return += f"[/{type_map[repl_type]}]" if repl_type > 0 else ""
+            return formatted_return
+
+        for rulebase_name, rulebase in self._rulebases[location_name].items():
+            if rulebase_name != "context" and len(rulebase) > 0:
+
+                rulebase_table = Table(
+                    title=f"{location_name} : {rulebase_name} (len : {len(rulebase)})",
+                    style="dim",
+                    border_style="not dim",
+                    expand=True)
+
+                for c_name in ["Name", "src_addr", "dest_addr", "action"]:
+                    rulebase_table.add_column(c_name)
+
+                for r in rulebase:
+                    replacements_in_rule = replace_in_rule(r)
+                    for table_add_loop in range((max_iter := max([len(y) for x,y in replacements_in_rule.items()]))):
+                        rulebase_table.add_row(
+                            r.name if table_add_loop == 0 else "",
+                            format_for_table(*replacements_in_rule['source'][table_add_loop]) if table_add_loop < len(replacements_in_rule['source']) else "",
+                            format_for_table(*replacements_in_rule['destination'][table_add_loop]) if table_add_loop < len(replacements_in_rule['destination']) else "",
+                            r.action if table_add_loop == 0 else "",
+                            end_section=True if table_add_loop == max_iter - 1 else False
+                        )
+
+                self._console.log(rulebase_table)
 
 
     def replace_object(self, location_name, ref_obj, replacement_obj):
