@@ -1,7 +1,7 @@
 import pan.xapi
 import sys
 
-sys.path.append("/Users/to148757/PycharmProjects/panos-python/pan-os-python")
+sys.path.append("/Users/to148757/PycharmProjects/panos-python-2/pan-os-python")
 
 from rich.console import Console, group
 from rich.prompt import Prompt
@@ -334,7 +334,7 @@ class PaloCleaner:
         context.add(post_rulebase)
         self._rulebases[location_name]['post_security'] = SecurityRule.refreshall(post_rulebase, add=True)
         self._rulebases[location_name]['post_nat'] = NatRule.refreshall(post_rulebase, add=True)
-        self._rulebases[location_name]['pre-auth'] = AuthenticationRule.refreshall(post_rulebase, add=True)
+        self._rulebases[location_name]['post_auth'] = AuthenticationRule.refreshall(post_rulebase, add=True)
         default_rulebase = Rulebase()
         context.add(default_rulebase)
         self._rulebases[location_name]['default_security'] = SecurityRule.refreshall(default_rulebase, add=True)
