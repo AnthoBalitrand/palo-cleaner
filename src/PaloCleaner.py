@@ -1,8 +1,6 @@
 import pan.xapi
 import sys
 
-sys.path.append("/Users/to148757/PycharmProjects/panos-python-2/pan-os-python")
-
 from rich.console import Console, group
 from rich.prompt import Prompt
 from rich.tree import Tree
@@ -16,9 +14,11 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeEl
 import panos.objects
 from panos.panorama import Panorama, DeviceGroup, PanoramaDeviceGroupHierarchy
 from panos.objects import AddressObject, AddressGroup, Tag, ServiceObject, ServiceGroup
-from panos.policies import SecurityRule, PreRulebase, PostRulebase, Rulebase, NatRule, AuthenticationRule
+from panos.policies import SecurityRule, PreRulebase, PostRulebase, Rulebase, NatRule, AuthenticationRule, RulebaseHitCount
 from panos.predefined import Predefined
 from panos.errors import PanXapiError
+from panos.firewall import Firewall
+from panos.device import SystemSettings
 import re
 import time
 
@@ -46,6 +46,8 @@ class PaloCleaner:
         self._superverbose = superverbose
         self._console = Console()
         self._replacements = dict()
+        self._panorama_devices = dict()
+        self._hitcounts = dict()
 
     def start(self):
         header_text = Text("""
@@ -109,6 +111,10 @@ class PaloCleaner:
             self.fetch_rulebase(self._panorama, 'shared')
             self._console.log(f"Panorama rulebases downloaded ({self.count_rules('shared')} rules found)")
 
+            progress.update(download_task, description="Downloading Panorama managed devices information")
+            self.get_panorama_managed_devices()
+            self._console.log(f"Panorama managed devices information downloaded (found {len(self._panorama_devices)} devices)")
+
             progress.update(download_task, advance=1)
 
             for (context_name, dg) in perimeter:
@@ -118,6 +124,12 @@ class PaloCleaner:
                 progress.update(download_task, description=f"Downloading {context_name} rulebases")
                 self.fetch_rulebase(dg, context_name)
                 self._console.log(f"{context_name} rulebases downloaded ({self.count_rules(context_name)} rules found)")
+                # downloading hitcounts for leafs
+                if not self._reversed_tree.get(context_name):
+                    progress.update(download_task, description=f"Downloading {context_name} hitcounts (connecting to devices)")
+                    self.fetch_hitcounts(dg, context_name)
+                    self._console.log(f"{context_name} hit counts downloaded for all rulebases")
+
                 progress.update(download_task, advance=1)
 
             progress.remove_task(download_task)
@@ -178,6 +190,13 @@ class PaloCleaner:
             # lowest ones. Then calls gen_tree_depth method to populate.
             self._depthed_tree = dict({0: ['shared']})
             self.gen_tree_depth(self._reversed_tree)
+
+    def get_panorama_managed_devices(self):
+        devices = self._panorama.refresh_devices(expand_vsys=False, include_device_groups=False)
+        for fw in devices:
+            if fw.state.connected:
+                self._panorama_devices[getattr(fw, "serial")] = fw
+
 
     def generate_hierarchy_tree(self):
         """
@@ -291,10 +310,10 @@ class PaloCleaner:
             self._objects[location_name]['context'] = context
             self._objects[location_name]['Address'] = AddressObject.refreshall(context) + AddressGroup.refreshall(context)
             if self._superverbose:
-                self._console.log(f"{location_name} objects namesearch structures initialized")
+                self._console.log(f"  {location_name} objects namesearch structures initialized")
             self._addr_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Address']}
             if self._superverbose:
-                self._console.log(f"{location_name} objects ipsearch structures initialized")
+                self._console.log(f"  {location_name} objects ipsearch structures initialized")
             self._addr_ipsearch[location_name] = dict()
             for obj in self._objects[location_name]['Address']:
                 if type(obj) is panos.objects.AddressObject:
@@ -306,7 +325,7 @@ class PaloCleaner:
             self._tag_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Tag']}
             self._objects[location_name]['Service'] = ServiceObject.refreshall(context) + ServiceGroup.refreshall(context)
             if self._superverbose:
-                self._console.log(f"{location_name} services namesearch structures initialized")
+                self._console.log(f"  {location_name} services namesearch structures initialized")
             self._service_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Service']}
 
     def fetch_rulebase(self, context, location_name):
@@ -329,15 +348,40 @@ class PaloCleaner:
         context.add(pre_rulebase)
         self._rulebases[location_name]['pre_security'] = SecurityRule.refreshall(pre_rulebase, add=True)
         self._rulebases[location_name]['pre_nat'] = NatRule.refreshall(pre_rulebase, add=True)
-        self._rulebases[location_name]['pre_auth'] = AuthenticationRule.refreshall(pre_rulebase, add=True)
+        self._rulebases[location_name]['pre_authentication'] = AuthenticationRule.refreshall(pre_rulebase, add=True)
         post_rulebase = PostRulebase()
         context.add(post_rulebase)
         self._rulebases[location_name]['post_security'] = SecurityRule.refreshall(post_rulebase, add=True)
         self._rulebases[location_name]['post_nat'] = NatRule.refreshall(post_rulebase, add=True)
-        self._rulebases[location_name]['post_auth'] = AuthenticationRule.refreshall(post_rulebase, add=True)
+        self._rulebases[location_name]['post_authentication'] = AuthenticationRule.refreshall(post_rulebase, add=True)
         default_rulebase = Rulebase()
         context.add(default_rulebase)
         self._rulebases[location_name]['default_security'] = SecurityRule.refreshall(default_rulebase, add=True)
+
+    def fetch_hitcounts(self, context, location_name):
+        dg_firewalls = Firewall.refreshall(context)
+        rulebases = ["security", "nat", "authentication"]
+        interest_counters = ["last_hit_timestamp", "rule_modification_timestamp"]
+        self._hitcounts[location_name] = ({x: dict() for x in rulebases})
+
+        for fw in dg_firewalls:
+            device = self._panorama_devices.get(getattr(fw, "serial"))
+            if device:
+                system_settings = device.find("", SystemSettings)
+                fw_ip = system_settings.ip_address
+                fw_vsys = getattr(fw, "vsys")
+                fw_conn = Firewall(fw_ip, self._panorama_user, self._panorama_password, vsys=fw_vsys)
+                print(f"Connecting to device {fw_ip} on vsys {fw_vsys} ({location_name})")
+                rb = Rulebase()
+                fw_conn.add(rb)
+                for rulebase in rulebases:
+                    ans = rb.opstate.hit_count.refresh(rulebase, all_rules=True)
+                    for rule, counters in ans.items():
+                        if not (res := self._hitcounts[location_name][rulebase].get(rule)):
+                            self._hitcounts[location_name][rulebase][rule] = ({x: getattr(counters, x) for x in interest_counters})
+                        else:
+                            for ic in interest_counters:
+                                self._hitcounts[location_name][rulebase][rule][ic] = max(getattr(res, ic), getattr(counters, ic))
 
     def get_relative_object_location(self, obj_name, reference_location, obj_type="address"):
         """
@@ -807,10 +851,17 @@ class PaloCleaner:
 
     def replace_object_in_rulebase(self, location_name, progress, task):
 
+        ruletype_fields_map = {
+            panos.policies.SecurityRule: ["source", "destination"],
+            panos.policies.NatRule: ["source", "destination"],
+            panos.policies.AuthenticationRule: ["source_addresses", "destination_addresses"]
+        }
+
         def replace_in_rule(rule):
             replacements_done = dict()
+            replacements_count = 0
             # Need to map fields to rule type
-            for row in ["source", "destination"]:
+            for row in ruletype_fields_map.get(type(rule)):
                 replacements_done[row] = list()
                 for o in getattr(rule, row):
                     if (replacement := self._replacements[location_name]['Address'].get(o)):
@@ -824,10 +875,11 @@ class PaloCleaner:
                         else:
                             # replacement type 1 = same name different location
                             replacements_done[row].append((o, 1))
+                        replacements_count += 1
                     else:
                         # replacement type 0 = no replacement
                         replacements_done[row].append((o, 0))
-            return replacements_done
+            return replacements_done, replacements_count
 
         def format_for_table(repl_name, repl_type):
             type_map = {0: '', 1: 'yellow', 2: 'red', 3: 'green'}
@@ -839,6 +891,8 @@ class PaloCleaner:
 
         for rulebase_name, rulebase in self._rulebases[location_name].items():
             if rulebase_name != "context" and len(rulebase) > 0:
+                total_replacements = 0
+                hitcount_rb_name = rulebase_name.split('_')[1]
 
                 rulebase_table = Table(
                     title=f"{location_name} : {rulebase_name} (len : {len(rulebase)})",
@@ -846,21 +900,31 @@ class PaloCleaner:
                     border_style="not dim",
                     expand=True)
 
-                for c_name in ["Name", "src_addr", "dest_addr", "action"]:
+                for c_name in ["Name", "src_addr", "dest_addr", "action", "last_modif", "last_hit"]:
                     rulebase_table.add_column(c_name)
 
                 for r in rulebase:
-                    replacements_in_rule = replace_in_rule(r)
-                    for table_add_loop in range((max_iter := max([len(y) for x,y in replacements_in_rule.items()]))):
-                        rulebase_table.add_row(
-                            r.name if table_add_loop == 0 else "",
-                            format_for_table(*replacements_in_rule['source'][table_add_loop]) if table_add_loop < len(replacements_in_rule['source']) else "",
-                            format_for_table(*replacements_in_rule['destination'][table_add_loop]) if table_add_loop < len(replacements_in_rule['destination']) else "",
-                            r.action if table_add_loop == 0 else "",
-                            end_section=True if table_add_loop == max_iter - 1 else False
-                        )
-
-                self._console.log(rulebase_table)
+                    replacements_in_rule, replacements_count = replace_in_rule(r)
+                    if r.disabled or not (rule_counters := self._hitcounts[location_name][hitcount_rb_name].get(r.name)):
+                        rule_modification_timestamp = 0
+                        last_hit_timestamp = 0
+                    else:
+                        rule_modification_timestamp = rule_counters.get('rule_modification_timestamp')
+                        last_hit_timestamp = rule_counters.get('last_hit_timestamp')
+                    if replacements_count:
+                        total_replacements += replacements_count
+                        for table_add_loop in range((max_iter := max([len(y) for x, y in replacements_in_rule.items()]))):
+                            rulebase_table.add_row(
+                                r.name if table_add_loop == 0 else "",
+                                format_for_table(*replacements_in_rule['source'][table_add_loop]) if table_add_loop < len(replacements_in_rule['source']) else "",
+                                format_for_table(*replacements_in_rule['destination'][table_add_loop]) if table_add_loop < len(replacements_in_rule['destination']) else "",
+                                r.action if table_add_loop == 0 else "",
+                                str(rule_modification_timestamp),
+                                str(last_hit_timestamp),
+                                end_section=True if table_add_loop == max_iter - 1 else False
+                            )
+                if total_replacements:
+                    self._console.log(rulebase_table)
 
 
     def replace_object(self, location_name, ref_obj, replacement_obj):
