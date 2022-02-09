@@ -1,3 +1,5 @@
+import datetime
+
 import pan.xapi
 
 from rich.console import Console
@@ -39,9 +41,9 @@ class PaloCleaner:
         self._removable_objects = list()
         self._tag_referenced = set()
         self._superverbose = kwargs['superverbose']
-        self._max_change_age = kwargs['max_days_since_change']
-        self._max_hit_age = kwargs['max_days_since_hit']
-        self._need_opstate = self._max_hit_age or self._max_hit_age
+        self._max_change_timestamp = int(time.time()) - int(kwargs['max_days_since_change']) * 86400 if kwargs['max_days_since_change'] else None
+        self._max_hit_timestamp = int(time.time()) - int(kwargs['max_days_since_hit']) * 86400 if kwargs['max_days_since_hit'] else None
+        self._need_opstate = self._max_change_timestamp or self._max_hit_timestamp
         self._console = Console()
         self._replacements = dict()
         self._panorama_devices = dict()
@@ -903,8 +905,8 @@ class PaloCleaner:
                 for r in rulebase:
                     replacements_in_rule, replacements_count = replace_in_rule(r)
                     if r.disabled or not self._need_opstate or not (rule_counters := self._hitcounts.get(location_name, dict()).get(hitcount_rb_name, dict()).get(r.name)):
-                        rule_modification_timestamp = 0
-                        last_hit_timestamp = 0
+                        rule_modification_timestamp = 0 if self._need_opstate else "N/A"
+                        last_hit_timestamp = 0 if self._need_opstate else "N/A"
                     else:
                         rule_modification_timestamp = rule_counters.get('rule_modification_timestamp')
                         last_hit_timestamp = rule_counters.get('last_hit_timestamp')
