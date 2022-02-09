@@ -1,15 +1,11 @@
 import pan.xapi
-import sys
 
-from rich.console import Console, group
+from rich.console import Console
 from rich.prompt import Prompt
 from rich.tree import Tree
-from rich.spinner import Spinner
 from rich.text import Text
 from rich.panel import Panel
-from rich.box import Box
 from rich.table import Table
-from rich.live import Live
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn, TimeRemainingColumn
 import panos.objects
 from panos.panorama import Panorama, DeviceGroup, PanoramaDeviceGroupHierarchy
@@ -42,7 +38,6 @@ class PaloCleaner:
         self._stored_pano_hierarchy = None
         self._removable_objects = list()
         self._tag_referenced = set()
-        self._resolved_cache = dict()
         self._superverbose = superverbose
         self._console = Console()
         self._replacements = dict()
@@ -494,7 +489,7 @@ class PaloCleaner:
                     self._console.log(
                         f"  {'*' * recursion_level} Marking {used_object.name!r} ({used_object.__class__.__name__}) as resolved on cache for location {usage_base}",
                         style="green italic")
-                self._resolved_cache[usage_base][shorten_object_type(used_object.__class__.__name__)].append(
+                resolved_cache[usage_base][shorten_object_type(used_object.__class__.__name__)].append(
                     used_object.name)
 
                 obj_set.append((used_object, object_location))
@@ -511,7 +506,7 @@ class PaloCleaner:
                             f"  {'*' * recursion_level} Object {used_object.name!r} (static AddressGroup) used on {usage_base!r} (ref by {referencer_type} {referencer_name!r}) has been found on location {object_location}",
                             style="green italic")
                     for group_member in used_object.static_value:
-                        if group_member not in self._resolved_cache[usage_base]['Address']:
+                        if group_member not in resolved_cache[usage_base]['Address']:
                             if self._superverbose:
                                 self._console.log(
                                     f"  {'*' * recursion_level} Found group member of AddressGroup {used_object.name!r} : {group_member!r}",
@@ -543,7 +538,7 @@ class PaloCleaner:
                             self._console.log(
                                 f"  {'*' * recursion_level} Found group member of dynamic AddressGroup {used_object.name!r} : {referenced_object.name!r}",
                                 style="green italic")
-                        if referenced_object.name not in self._resolved_cache[usage_base]['Address']:
+                        if referenced_object.name not in resolved_cache[usage_base]['Address']:
                             obj_set += flatten_object(referenced_object, referenced_object_location, usage_base,
                                                       used_object.__class__.__name__, used_object.name,
                                                       recursion_level + 1)
@@ -559,7 +554,7 @@ class PaloCleaner:
                         self._console.log(
                             f"  {'*' * recursion_level} Object {used_object.name!r} (ServiceGroup) used on {usage_base} has been found on location {object_location}")
                     for group_member in used_object.value:
-                        if group_member not in self._resolved_cache[usage_base]['Service']:
+                        if group_member not in resolved_cache[usage_base]['Service']:
                             if self._superverbose:
                                 self._console.log(
                                     f"  {'*' * recursion_level} Found group member of ServiceGroup {used_object.name} : {group_member}")
@@ -578,7 +573,7 @@ class PaloCleaner:
                                 self._console.log(
                                     f"  {'*' * recursion_level} Object {used_object.name} ({used_object.__class__.__name__}) uses tag {tag}",
                                     style="green italic")
-                            if tag not in self._resolved_cache[usage_base]['Tag']:
+                            if tag not in resolved_cache[usage_base]['Tag']:
                                 obj_set += flatten_object(
                                     *self.get_relative_object_location(tag, object_location, obj_type="tag"),
                                     usage_base, used_object.__class__.__name__, used_object.name)
@@ -586,7 +581,8 @@ class PaloCleaner:
             return obj_set
 
         location_obj_set = list()
-        self._resolved_cache[location_name] = dict({'Address': list(), 'Service': list(), 'Tag': list()})
+        resolved_cache = dict()
+        resolved_cache[location_name] = dict({'Address': list(), 'Service': list(), 'Tag': list()})
         ip_regex = re.compile(r'^(\d{1,3}\.){3}\d{1,3}(\/\d{1,2})?$')
 
         # iterates on all rulebases for the concerned location
@@ -612,7 +608,7 @@ class PaloCleaner:
                     if r.destination_translated_address:
                         rule_objects.append(r.destination_translated_address)
                 for obj in rule_objects:
-                    if obj != 'any' and obj not in self._resolved_cache[location_name]['Address']:
+                    if obj != 'any' and obj not in resolved_cache[location_name]['Address']:
                         location_obj_set += (
                             flattened := flatten_object(*self.get_relative_object_location(obj, location_name),
                                                         location_name, r.__class__.__name__, r.name))
