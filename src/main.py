@@ -51,6 +51,20 @@ def parse_cli_args():
         help = "Enables super-verbose logs. WARNING --> lots of outputs to STDOUT !"
     )
 
+    parser.add_argument(
+        "--max-days-since-change",
+        action = "store",
+        help = "Don't apply any change to rules not having be modified since more than X days",
+        default = 0
+    )
+
+    parser.add_argument(
+        "--max-days-since-hit",
+        action = "store",
+        help = "Don't apply any change to rules not being hit since more than X days",
+        default = 0
+    )
+
     return parser.parse_args()
 
 
@@ -59,12 +73,7 @@ def main():
     start_cli_args = parse_cli_args()
 
     # Instantiate the PaloCleaner object (connection to Panorama)
-    cleaner = PaloCleaner(start_cli_args.panorama_url,
-                start_cli_args.api_user,
-                start_cli_args.api_password,
-                start_cli_args.device_groups,
-                start_cli_args.apply_cleaning,
-                start_cli_args.superverbose)
+    cleaner = PaloCleaner(**start_cli_args.__dict__)
     cleaner.start()
 
     """

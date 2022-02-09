@@ -20,13 +20,13 @@ import time
 
 
 class PaloCleaner:
-    def __init__(self, panorama_url, panorama_user, panorama_password, dg_filter, apply_cleaning, superverbose=False):
-        self._panorama_url = panorama_url
-        self._panorama_user = panorama_user
-        self._panorama_password = panorama_password
-        self._dg_filter = dg_filter
+    def __init__(self, **kwargs):
+        self._panorama_url = kwargs['panorama_url']
+        self._panorama_user = kwargs['api_user']
+        self._panorama_password = kwargs['api_password']
+        self._dg_filter = kwargs['device_groups']
         self._depthed_tree = dict({0: ['shared']})
-        self._apply_cleaning = apply_cleaning
+        self._apply_cleaning = kwargs['apply_cleaning']
         self._panorama = None
         self._objects = dict()
         self._addr_namesearch = dict()
@@ -38,7 +38,10 @@ class PaloCleaner:
         self._stored_pano_hierarchy = None
         self._removable_objects = list()
         self._tag_referenced = set()
-        self._superverbose = superverbose
+        self._superverbose = kwargs['superverbose']
+        self._max_change_age = kwargs['max_days_since_change']
+        self._max_hit_age = kwargs['max_days_since_hit']
+        self._need_opstate = self._max_hit_age or self._max_hit_age
         self._console = Console()
         self._replacements = dict()
         self._panorama_devices = dict()
@@ -120,7 +123,7 @@ class PaloCleaner:
                 self.fetch_rulebase(dg, context_name)
                 self._console.log(f"{context_name} rulebases downloaded ({self.count_rules(context_name)} rules found)")
                 # downloading hitcounts for leafs
-                if not self._reversed_tree.get(context_name):
+                if self._need_opstate and not self._reversed_tree.get(context_name):
                     progress.update(download_task, description=f"Downloading {context_name} hitcounts (connecting to devices)")
                     self.fetch_hitcounts(dg, context_name)
                     self._console.log(f"{context_name} hit counts downloaded for all rulebases")
@@ -191,7 +194,6 @@ class PaloCleaner:
         for fw in devices:
             if fw.state.connected:
                 self._panorama_devices[getattr(fw, "serial")] = fw
-
 
     def generate_hierarchy_tree(self):
         """
@@ -856,12 +858,11 @@ class PaloCleaner:
         def replace_in_rule(rule):
             replacements_done = dict()
             replacements_count = 0
-            # Need to map fields to rule type
             for row in ruletype_fields_map.get(type(rule)):
                 replacements_done[row] = list()
                 for o in getattr(rule, row):
                     if (replacement := self._replacements[location_name]['Address'].get(o)):
-                        source_obj_instance, source_obj_location = replacement['source']
+                        #source_obj_instance, source_obj_location = replacement['source']
                         replacement_obj_instance, replacement_obj_location = replacement['replacement']
                         if o != (repl_name := replacement_obj_instance.about()['name']):
                             # replacement type 2 = removed
@@ -901,7 +902,7 @@ class PaloCleaner:
 
                 for r in rulebase:
                     replacements_in_rule, replacements_count = replace_in_rule(r)
-                    if r.disabled or not (rule_counters := self._hitcounts[location_name][hitcount_rb_name].get(r.name)):
+                    if r.disabled or not self._need_opstate or not (rule_counters := self._hitcounts.get(location_name, dict()).get(hitcount_rb_name, dict()).get(r.name)):
                         rule_modification_timestamp = 0
                         last_hit_timestamp = 0
                     else:
