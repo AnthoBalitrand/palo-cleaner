@@ -157,7 +157,10 @@ class PaloCleaner:
                 self._console.log(f"{context_name} objects replaced in groups")
                 self.replace_object_in_rulebase(context_name, progress, dg_optimize_task)
                 self._console.log(f"{context_name} objects replaced in rulebases")
+                self.clean_local_object_set(context_name, progress, dg_optimize_task)
+                self._console.log(f"{context_name} used objects set cleaned")
                 progress.remove_task(dg_optimize_task)
+            #self.clean_local_object_set("shared", progress, None)
         # self.reverse_dg_hierarchy(self.get_pano_dg_hierarchy(), print_result=True)
 
     def get_devicegroups(self):
@@ -485,9 +488,23 @@ class PaloCleaner:
 
         def flatten_object(used_object: panos.objects, object_location: str, usage_base: str,
                            referencer_type: str = None, referencer_name: str = None, recursion_level: int = 1, ):
+            """
+            Recursively called function, charged of returning the obj_set (list of (panos.objects, location)) for a given rule
+            (first call is from a loop iterating over the different rules of a rulebase at a given location)
+
+            Calls itself recursively for AddressGroups (static or dynamic)
+
+            :param used_object: (panos.object) The used object (found with get_relative_object_location)
+            :param object_location: (string) The location where the used objects has been found by get_relative_object_location
+            :param usage_base: (string) The location where the object has been found used
+            :param referencer_type: (string) The type (class.__name__) of the object where the reference to used_object has been found
+            :param referencer_name: (string) The name of the where the reference to used_object has been found
+            """
 
             obj_set = list()
 
+            # If used_object has been resolved at the time of calling the flatten_object function, mark it as resolved (in cache) for the "usage_base" location (adding its name)
+            # and add the (object, location) tuple to the obj_set list
             if not isinstance(used_object, type(None)):
                 if self._superverbose:
                     self._console.log(
@@ -498,12 +515,16 @@ class PaloCleaner:
 
                 obj_set.append((used_object, object_location))
 
+            # if the resolved object is a "simple" object (not needing recursive search), just display a log indicating that search is over
             if type(used_object) in [panos.objects.AddressObject, panos.objects.ServiceObject, panos.objects.Tag]:
                 if self._superverbose:
                     self._console.log(
                         f"  {'*' * recursion_level} Object {used_object.name!r} ({used_object.__class__.__name__}) used on {usage_base!r} (ref by {referencer_type} {referencer_name}) has been found on location {object_location}",
                         style="green italic")
+
+            # if the resolved object needs recursive search for members (AddressGroup), let's go
             elif type(used_object) is panos.objects.AddressGroup:
+                # in case of a static group, just call the flatten_object function recursively for each member (which can be only at the group level or below)
                 if used_object.static_value:
                     if self._superverbose:
                         self._console.log(
@@ -521,8 +542,9 @@ class PaloCleaner:
                                                       usage_base, used_object.__class__.__name__, used_object.name,
                                                       recursion_level + 1)
 
+                    # TODO : find a way to protect upward group members for modification if they are overriden below
+                    """
                     # the condition below permits to "protect" the group members (at group level) if they are overriden at a lower location
-
                     if object_location != usage_base:
                         if self._superverbose:
                             self._console.log(
@@ -530,6 +552,10 @@ class PaloCleaner:
                                 style="red italic")
                         obj_set += flatten_object(used_object, object_location, object_location, referencer_type,
                                                   referencer_name, recursion_level)
+                    """
+
+                # in case of a dynamic group, the group condition is converted to an executable Python statement, for members to be found using their tags
+                # for dynamic groups, members can be at any location, upward starting from the usage_base location
                 elif used_object.dynamic_value:
                     if self._superverbose:
                         self._console.log(
@@ -552,6 +578,8 @@ class PaloCleaner:
                                 self._console.log(
                                     f"  {'*' * recursion_level} Address Object {referenced_object.name!r} already resolved in context {usage_base}",
                                     style="yellow")
+
+            # do the same with ServiceGroups than for static AddressGroups
             elif type(used_object) is panos.objects.ServiceGroup:
                 if used_object.value:
                     if self._superverbose:
@@ -566,6 +594,7 @@ class PaloCleaner:
                                                       usage_base, used_object.__class__.__name__, used_object.name,
                                                       recursion_level + 1)
 
+            # checking if the resolved objects has tags (which needs to be added to the used_object_set too)
             # checking is used_object is not None permits to avoid cases where unsupported objects are used on the rule
             # IE : EDL at the time of writing this comment
 
@@ -612,26 +641,32 @@ class PaloCleaner:
                     if r.destination_translated_address:
                         rule_objects.append(r.destination_translated_address)
                 for obj in rule_objects:
+                    # calls flatten_object function (to add objects to location_obj_set) only if obj is not already found in cache for the current location
                     if obj != 'any' and obj not in resolved_cache[location_name]['Address']:
                         location_obj_set += (
                             flattened := flatten_object(*self.get_relative_object_location(obj, location_name),
                                                         location_name, r.__class__.__name__, r.name))
+
+                        # matched if the object used has not been found by the get_relative_object_location
+                        # (flatten object will not return anything in such a case)
                         if not flattened:
+                            # can be in case of an IP address / subnet directly used on a rule
                             if ip_regex.match(obj):
                                 location_obj_set += [(AddressObject(name=obj, value=obj), location_name)]
                                 self._console.log(
                                     f"  * Created AddressObject for address {obj} used on rule {r.name!r}",
                                     style="yellow")
+
+                            # else for any type of un-supported object type
                             else:
                                 self._console.log(
                                     f"  * Un-supported object type seems to be used on rule {r.name!r} ({obj})",
                                     style="red")
-                    else:
+                    elif obj != 'any':
                         if self._superverbose:
                             self._console.log(f" * Address Object {obj!r} already resolved in context {location_name}",
                                               style="yellow")
 
-                time.sleep(0.5)
                 progress.update(task, advance=1)
 
         self._used_objects_sets[location_name] = set(location_obj_set)
@@ -770,6 +805,7 @@ class PaloCleaner:
                         self._replacements[location_name]['Address'][obj.about()['name']] = {
                             'source': (obj, location),
                             'replacement': (replacement_obj, replacement_obj_location),
+                            'blocked': False
                         }
                 elif type(obj) == panos.objects.AddressGroup and location == location_name:
                     upward_objects = self.find_upward_obj_static_group(location_name, obj)
@@ -779,7 +815,8 @@ class PaloCleaner:
                             f"   Replacing {obj.about()['name']} ({obj.__class__.__name__}) at location {location_name} by {replacement_obj.about()['name']} at location {replacement_obj_location}")
                         self._replacements[location_name]['Address'][obj.about()['name']] = {
                             'source': (obj, location),
-                            'replacement': (replacement_obj, replacement_obj_location)
+                            'replacement': (replacement_obj, replacement_obj_location),
+                            'blocked': False
                         }
                 progress.update(task, advance=1)
 
@@ -899,19 +936,37 @@ class PaloCleaner:
                     border_style="not dim",
                     expand=True)
 
-                for c_name in ["Name", "src_addr", "dest_addr", "action", "last_modif", "last_hit"]:
+                for c_name in ["Name", "src_addr", "dest_addr", "action", "last_modif", "last_hit", "changed"]:
                     rulebase_table.add_column(c_name)
 
                 for r in rulebase:
+                    in_timestamp_boundaries = False
                     replacements_in_rule, replacements_count = replace_in_rule(r)
-                    if r.disabled or not self._need_opstate or not (rule_counters := self._hitcounts.get(location_name, dict()).get(hitcount_rb_name, dict()).get(r.name)):
-                        rule_modification_timestamp = 0 if self._need_opstate else "N/A"
-                        last_hit_timestamp = 0 if self._need_opstate else "N/A"
-                    else:
-                        rule_modification_timestamp = rule_counters.get('rule_modification_timestamp')
-                        last_hit_timestamp = rule_counters.get('last_hit_timestamp')
                     if replacements_count:
+
                         total_replacements += replacements_count
+
+                        # if rule is disabled or if the job does not needs to rely on rule timestamps
+                        # or if the hitcounts for a rule cannot be found (ie : new rule not yet pushed on device)
+                        # then just consider that the rule can be modified (in_timestamp_boundaries = True)
+                        if r.disabled or not self._need_opstate or not (rule_counters := self._hitcounts.get(location_name, dict()).get(hitcount_rb_name, dict()).get(r.name)):
+                            in_timestamp_boundaries = True
+                            rule_modification_timestamp = 0 if self._need_opstate else "N/A"
+                            last_hit_timestamp = 0 if self._need_opstate else "N/A"
+                        else:
+                            rule_modification_timestamp = rule_counters.get('rule_modification_timestamp')
+                            last_hit_timestamp = rule_counters.get('last_hit_timestamp')
+                            # if the rule last modification and last hit timestamps are above the minimums requested,
+                            # then consider that it can be updated (in_timestamp_boundaries = True)
+                            if rule_modification_timestamp > self._max_change_timestamp and last_hit_timestamp > self._max_hit_timestamp:
+                                in_timestamp_boundaries = True
+                            # else, for each object used on the rule, protect them to make sure they'll not be deleted later by the job
+                            else:
+                                for field in ruletype_fields_map[type(r)]:
+                                    for object_name in getattr(r, field):
+                                        if object_name in self._replacements[location_name]["Address"]:
+                                            self._replacements[location_name]["Address"][object_name]["blocked"] = True
+
                         for table_add_loop in range((max_iter := max([len(y) for x, y in replacements_in_rule.items()]))):
                             rulebase_table.add_row(
                                 r.name if table_add_loop == 0 else "",
@@ -920,10 +975,35 @@ class PaloCleaner:
                                 r.action if table_add_loop == 0 else "",
                                 str(rule_modification_timestamp),
                                 str(last_hit_timestamp),
+                                "Y" if in_timestamp_boundaries else "N",
                                 end_section=True if table_add_loop == max_iter - 1 else False
                             )
+
                 if total_replacements:
                     self._console.log(rulebase_table)
+
+    def clean_local_object_set(self, location_name, progress, task):
+        for type in self._replacements.get(location_name, list()):
+            for name, infos in self._replacements[location_name][type].items():
+                if not infos['blocked']:
+                    try:
+                        self._used_objects_sets[location_name].remove(infos['source'])
+                        if self._superverbose:
+                            self._console.log(f"[{location_name}] Removing object {name} (location {infos['source'][1]}) from used objects set")
+                    except ValueError:
+                        self._console.log(
+                            f"ValueError when trying to remove {name} from used objects sets at location {location_name} : object not found on object set")
+                    except:
+                        self._console.log(
+                            f"Unknown Error when trying to remove {name} from used objects sets at location {location_name}")
+                else:
+                    self._console.log(f"Not removing {name} as it is blocked by hitcounts at location {location_name}")
+
+        for type in self._objects[location_name]:
+            if type != "context":
+                for o in self._objects[location_name][type]:
+                    if not (o, location_name) in self._used_objects_sets[location_name]:
+                        self._console.log(f"Object {o.name} ({o.__class__.__name__}) can be deleted at location {location_name}")
 
 
     def replace_object(self, location_name, ref_obj, replacement_obj):
