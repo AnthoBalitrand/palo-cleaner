@@ -83,6 +83,9 @@ class PaloCleaner:
             self._console.log("Discovered hierarchy tree is the following :")
             self._console.log(
                 "( [red] + are directly included [/red] / [yellow] * are indirectly included [/yellow] / [green] - are not included [/green] )")
+            self._console.log(
+                " F (Fully included = cleaned) / P (Partially included = not cleaned) "
+            )
             self._console.log(Panel(hierarchy_tree))
             time.sleep(1)
 
@@ -212,9 +215,15 @@ class PaloCleaner:
         """
         self._analysis_perimeter = self.get_perimeter(self._reversed_tree)
         if 'shared' in self._analysis_perimeter['direct']:
-            hierarchy_tree = Tree("+ shared", style="red")
+            line_value = "+ "
+            line_value += "F " if "shared" in self._analysis_perimeter['full'] else "P "
+            line_value += "shared"
+            hierarchy_tree = Tree(line_value, style="red")
         elif 'shared' in self._analysis_perimeter['indirect']:
-            hierarchy_tree = Tree("* shared", style="yellow")
+            line_value = "* "
+            line_value += "F " if "shared" in self._analysis_perimeter['full'] else "P "
+            line_value += "shared"
+            hierarchy_tree = Tree(line_value, style="yellow")
 
         # If print_result attribute is True, print the result on screen
         def add_leafs(tree, tree_branch, start='shared'):
@@ -222,9 +231,15 @@ class PaloCleaner:
                 if k == start:
                     for d in v:
                         if d in self._analysis_perimeter['direct']:
-                            leaf = tree_branch.add("+ " + d, style="red")
+                            line_value = "+ "
+                            line_value += "F " if d in self._analysis_perimeter['full'] else "P "
+                            line_value += d
+                            leaf = tree_branch.add(line_value, style="red")
                         elif d in self._analysis_perimeter['indirect']:
-                            leaf = tree_branch.add("* " + d, style="yellow")
+                            line_value = "* "
+                            line_value += "F " if d in self._analysis_perimeter['full'] else "P "
+                            line_value += d
+                            leaf = tree_branch.add(line_value, style="yellow")
                         else:
                             leaf = tree_branch.add("- " + d, style="green")
                         add_leafs(tree, leaf, d)
@@ -242,7 +257,6 @@ class PaloCleaner:
         :param reversed_tree: (dict) Dict where keys are parent device groups and value is the list of childs
         :return: (dict) Representation of directly, indirectly, and fulled included device-groups
         """
-
         indirectly_included = list()
         directly_included = list()
         fully_included = list()
@@ -251,6 +265,7 @@ class PaloCleaner:
                 if self._dg_filter:
                     if dg in self._dg_filter:
                         directly_included.append(dg)
+                        fully_included.append(dg)
                     else:
                         found_child = False
                         nb_found_child = 0
