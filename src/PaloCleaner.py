@@ -1,7 +1,4 @@
-import datetime
-
 import pan.xapi
-
 from rich.console import Console
 from rich.prompt import Prompt
 from rich.tree import Tree
@@ -326,11 +323,9 @@ class PaloCleaner:
             # else download all objects types
             self._objects[location_name]['context'] = context
             self._objects[location_name]['Address'] = AddressObject.refreshall(context) + AddressGroup.refreshall(context)
-            if self._superverbose:
-                self._console.log(f"  {location_name} objects namesearch structures initialized")
             self._addr_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Address']}
             if self._superverbose:
-                self._console.log(f"  {location_name} objects ipsearch structures initialized")
+                self._console.log(f"  {location_name} objects namesearch structures initialized")
             self._addr_ipsearch[location_name] = dict()
             for obj in self._objects[location_name]['Address']:
                 if type(obj) is panos.objects.AddressObject:
@@ -338,12 +333,14 @@ class PaloCleaner:
                     if addr not in self._addr_ipsearch[location_name].keys():
                         self._addr_ipsearch[location_name][addr] = list()
                     self._addr_ipsearch[location_name][addr].append(obj)
+            if self._superverbose:
+                self._console.log(f"  {location_name} objects ipsearch structures initialized")
             self._objects[location_name]['Tag'] = Tag.refreshall(context)
             self._tag_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Tag']}
             self._objects[location_name]['Service'] = ServiceObject.refreshall(context) + ServiceGroup.refreshall(context)
+            self._service_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Service']}
             if self._superverbose:
                 self._console.log(f"  {location_name} services namesearch structures initialized")
-            self._service_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Service']}
 
     def fetch_rulebase(self, context, location_name):
         """
@@ -632,6 +629,7 @@ class PaloCleaner:
         resolved_cache = dict()
         resolved_cache[location_name] = dict({'Address': list(), 'Service': list(), 'Tag': list()})
         ip_regex = re.compile(r'^(\d{1,3}\.){3}\d{1,3}(\/\d{1,2})?$')
+        range_regex = re.compile(r'^((\d{1,3}\.){3}\d{1,3}-?){2}$')
 
         # iterates on all rulebases for the concerned location
         for k, v in self._rulebases[location_name].items():
@@ -666,7 +664,7 @@ class PaloCleaner:
                         # (flatten object will not return anything in such a case)
                         if not flattened:
                             # can be in case of an IP address / subnet directly used on a rule
-                            if ip_regex.match(obj):
+                            if ip_regex.match(obj) or range_regex.match(obj):
                                 location_obj_set += [(AddressObject(name=obj, value=obj), location_name)]
                                 self._console.log(
                                     f"  * Created AddressObject for address {obj} used on rule {r.name!r}",
