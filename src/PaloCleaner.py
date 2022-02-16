@@ -17,6 +17,24 @@ from panos.device import SystemSettings
 import re
 import time
 
+repl_map = {
+    SecurityRule: {
+        "Address": [["source"], ["destination"]],
+        "Service": [["service"]],
+        "Tag": [["tag"]],
+    },
+    NatRule: {
+        "Address": [["source"], ["destination"], ["source_translation_translated_addresses"], "destination_translated_address"],
+        "Service": ["service"],
+        "Tag": [["tag"]],
+    },
+    AuthenticationRule: {
+        "Address": [["source_addresses"], ["destination_addresses"]],
+        "Service": [["service"]],
+        "Tag": [["tag"]],
+    }
+}
+
 
 class PaloCleaner:
     def __init__(self, **kwargs):
@@ -397,7 +415,7 @@ class PaloCleaner:
                             for ic in interest_counters:
                                 self._hitcounts[location_name][rulebase][rule][ic] = max(getattr(res, ic), getattr(counters, ic))
 
-    def get_relative_object_location(self, obj_name, reference_location, obj_type="address"):
+    def get_relative_object_location(self, obj_name, reference_location, obj_type="Address"):
         """
         Find referenced object by location (permits to get the referenced object on current location if
         existing at this level, or on upper levels of the device-groups hierarchy)
@@ -415,13 +433,13 @@ class PaloCleaner:
         found_object = None
         found_location = None
         # For each object at the reference_location level, find any object having the searched name
-        if obj_type == "address":
+        if obj_type == "Address":
             found_object = self._addr_namesearch[reference_location].get(obj_name, None)
             found_location = reference_location
-        elif obj_type == "tag":
+        elif obj_type == "Tag":
             found_object = self._tag_namesearch[reference_location].get(obj_name, None)
             found_location = reference_location
-        elif obj_type == "service":
+        elif obj_type == "Service":
             found_object = self._service_namesearch[reference_location].get(obj_name, None)
             found_location = reference_location
 
@@ -432,7 +450,7 @@ class PaloCleaner:
             if not upward_dg:
                 upward_dg = 'shared'
             found_object, found_location = self.get_relative_object_location(obj_name, upward_dg, obj_type)
-        elif not found_object and (obj_type == "service" and reference_location == 'shared'):
+        elif not found_object and (obj_type == "Service" and reference_location == 'shared'):
             upward_dg = "predefined"
             found_object, found_location = self.get_relative_object_location(obj_name, upward_dg, obj_type)
         # finally return the tuple of the found object and its location
@@ -640,45 +658,54 @@ class PaloCleaner:
             for r in v:
                 if self._superverbose:
                     self._console.log(f"[{location_name}] Processing used objects on rule {r.name!r}")
-                try:
-                    # for all objects, used either as source or destination
-                    rule_objects = r.source + r.destination
-                except AttributeError:
-                    try:
-                        rule_objects = r.source_addresses + r.destination_addresses
-                    except AttributeError:
-                        pass
-                if 'nat' in k:
-                    if r.source_translation_translated_addresses:
-                        rule_objects += r.source_translation_translated_addresses
-                    if r.destination_translated_address:
-                        rule_objects.append(r.destination_translated_address)
-                for obj in rule_objects:
-                    # calls flatten_object function (to add objects to location_obj_set) only if obj is not already found in cache for the current location
-                    if obj != 'any' and obj not in resolved_cache[location_name]['Address']:
-                        location_obj_set += (
-                            flattened := flatten_object(*self.get_relative_object_location(obj, location_name),
-                                                        location_name, r.__class__.__name__, r.name))
 
-                        # matched if the object used has not been found by the get_relative_object_location
-                        # (flatten object will not return anything in such a case)
-                        if not flattened:
-                            # can be in case of an IP address / subnet directly used on a rule
-                            if ip_regex.match(obj) or range_regex.match(obj):
-                                location_obj_set += [(AddressObject(name=obj, value=obj), location_name)]
-                                self._console.log(
-                                    f"  * Created AddressObject for address {obj} used on rule {r.name!r}",
-                                    style="yellow")
+                rule_objects = {x: [] for x in repl_map.get(type(r))}
 
-                            # else for any type of un-supported object type
-                            else:
-                                self._console.log(
-                                    f"  * Un-supported object type seems to be used on rule {r.name!r} ({obj})",
-                                    style="red")
-                    elif obj != 'any':
-                        if self._superverbose:
-                            self._console.log(f" * Address Object {obj!r} already resolved in context {location_name}",
-                                              style="yellow")
+                for obj_type, obj_fields in repl_map.get(type(r)).items():
+                    for field in obj_fields:
+                        if type(field) is str:
+                            if (to_add := getattr(r, field)):
+                                rule_objects[obj_type].append(to_add)
+                        else:
+                            if (to_add := getattr(r, field[0])):
+                                rule_objects[obj_type] += to_add
+
+                    for obj in rule_objects[obj_type]:
+                        if obj != 'any' and obj not in resolved_cache[location_name][obj_type]:
+                            location_obj_set += (
+                                flattened := flatten_object(*self.get_relative_object_location(obj, location_name, obj_type),
+                                                            location_name, r.__class__.__name__, r.name)
+                            )
+
+                            # matched if the object used has not been found by the get_relative_object_location
+                            # (flatten object will not return anything in such a case)
+                            if not flattened:
+                                # can be in case of an IP address / subnet directly used on a rule
+                                if obj_type == "Address":
+                                    if ip_regex.match(obj) or range_regex.match(obj):
+                                        location_obj_set += [(AddressObject(name=obj, value=obj), location_name)]
+                                        self._console.log(
+                                            f"  * Created AddressObject for address {obj} used on rule {r.name!r}",
+                                            style="yellow")
+
+                                    # else for any type of un-supported object type
+                                    else:
+                                        self._console.log(
+                                            f"  * Un-supported object type seems to be used on rule {r.name!r} ({obj})",
+                                            style="red")
+                                elif obj_type == "Service":
+                                    if not obj == "application-default":
+                                        self._console.log(
+                                            f"  * Un-supported object type seems to be used on rule {r.name!r} ({obj})",
+                                            style="red")
+                                else:
+                                    self._console.log(
+                                        f"  * Un-supported object type seems to be used on rule {r.name!r} ({obj})",
+                                        style="red")
+                        elif obj != 'any':
+                            if self._superverbose:
+                                self._console.log(f" * {obj_type} Object {obj!r} already resolved in context {location_name}",
+                                                  style="yellow")
 
                 progress.update(task, advance=1)
 
@@ -949,7 +976,12 @@ class PaloCleaner:
                     border_style="not dim",
                     expand=True)
 
-                for c_name in ["Name", "src_addr", "dest_addr", "action", "last_modif", "last_hit", "changed"]:
+                tab_headers = {
+                    "security": ["Name", "src_addr", "dest_addr", "action", "last_modif", "last_hit", "changed"],
+                    "nat": ["Name", "src_addr", "dest_addr", "src_trans", "dest_trans", "last_modif", "last_hit", "changed"]
+                }
+
+                for c_name in tab_headers[rulebase_name.split('_')[1]]:
                     rulebase_table.add_column(c_name)
 
                 for r in rulebase:
@@ -980,17 +1012,35 @@ class PaloCleaner:
                                         if object_name in self._replacements[location_name]["Address"]:
                                             self._replacements[location_name]["Address"][object_name]["blocked"] = True
 
-                        for table_add_loop in range((max_iter := max([len(y) for x, y in replacements_in_rule.items()]))):
-                            rulebase_table.add_row(
-                                r.name if table_add_loop == 0 else "",
-                                format_for_table(*replacements_in_rule['source'][table_add_loop]) if table_add_loop < len(replacements_in_rule['source']) else "",
-                                format_for_table(*replacements_in_rule['destination'][table_add_loop]) if table_add_loop < len(replacements_in_rule['destination']) else "",
-                                r.action if table_add_loop == 0 else "",
-                                str(rule_modification_timestamp),
-                                str(last_hit_timestamp),
-                                "Y" if in_timestamp_boundaries else "N",
-                                end_section=True if table_add_loop == max_iter - 1 else False
-                            )
+                        if type(r) is SecurityRule:
+                            for table_add_loop in range((max_iter := max([len(y) for x, y in replacements_in_rule.items()]))):
+                                rulebase_table.add_row(
+                                    r.name if table_add_loop == 0 else "",
+                                    format_for_table(*replacements_in_rule['source'][table_add_loop]) if table_add_loop < len(replacements_in_rule['source']) else "",
+                                    format_for_table(*replacements_in_rule['destination'][table_add_loop]) if table_add_loop < len(replacements_in_rule['destination']) else "",
+                                    r.action if table_add_loop == 0 else "",
+                                    str(rule_modification_timestamp),
+                                    str(last_hit_timestamp),
+                                    "Y" if in_timestamp_boundaries else "N",
+                                    end_section=True if table_add_loop == max_iter - 1 else False
+                                )
+                        elif type(r) is NatRule:
+                            for table_add_loop in range((max_iter := max([len(y) for x, y in replacements_in_rule.items()]))):
+                                rulebase_table.add_row(
+                                    r.name if table_add_loop == 0 else "",
+                                    format_for_table(
+                                        *replacements_in_rule['source'][table_add_loop]) if table_add_loop < len(
+                                        replacements_in_rule['source']) else "",
+                                    format_for_table(
+                                        *replacements_in_rule['destination'][table_add_loop]) if table_add_loop < len(
+                                        replacements_in_rule['destination']) else "",
+                                    "",
+                                    "",
+                                    str(rule_modification_timestamp),
+                                    str(last_hit_timestamp),
+                                    "Y" if in_timestamp_boundaries else "N",
+                                    end_section=True if table_add_loop == max_iter - 1 else False
+                                )
 
                 if total_replacements:
                     self._console.log(rulebase_table)
