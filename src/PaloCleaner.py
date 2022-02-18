@@ -44,6 +44,8 @@ class PaloCleaner:
         self._dg_filter = kwargs['device_groups']
         self._depthed_tree = dict({0: ['shared']})
         self._apply_cleaning = kwargs['apply_cleaning']
+        self._tiebreak_tag = kwargs['tiebreak_tag']
+        self._apply_tiebreak_tag = kwargs['apply_tiebreak_tag']
         self._panorama = None
         self._objects = dict()
         self._addr_namesearch = dict()
@@ -124,6 +126,10 @@ class PaloCleaner:
             self.fetch_objects(self._panorama, 'shared')
             self.fetch_objects(self._panorama, 'predefined')
             self._console.log(f"Panorama objects downloaded ({self.count_objects('shared')} found)")
+
+            # calling a function which will make sure that the tiebreak-tag exists (if requested as argument)
+            # and will create it if it does not
+            self.validate_tiebreak_tag()
 
             progress.update(download_task, description="Downloading Panorama rulebases")
             self.fetch_rulebase(self._panorama, 'shared')
@@ -414,6 +420,22 @@ class PaloCleaner:
                         else:
                             for ic in interest_counters:
                                 self._hitcounts[location_name][rulebase][rule][ic] = max(getattr(res, ic), getattr(counters, ic))
+
+    def validate_tiebreak_tag(self):
+        """
+        This function will check that the tiebreak tag exists (on shared context) if it has been requested
+        If it does not exists, it will be created and added to the (already fetched) objects set for shared context
+        :return:
+        """
+
+        if self._tiebreak_tag:
+            if not self._tiebreak_tag in self._tag_namesearch['shared']:
+                self._console.log(f"Creating tiebreak tag {self._tiebreak_tag} on shared context")
+                tiebreak_tag = Tag(name=self._tiebreak_tag)
+                self._objects['shared']['Tag'].append(tiebreak_tag)
+                self._tag_namesearch['shared'][self._tiebreak_tag] = tiebreak_tag
+                if self._apply_cleaning:
+                    self._panorama.add(tiebreak_tag).create()
 
     def get_relative_object_location(self, obj_name, reference_location, obj_type="Address"):
         """
@@ -724,6 +746,22 @@ class PaloCleaner:
         return address
 
     def find_upward_obj_by_addr(self, base_location_name, obj_addr):
+        obj_addr = self.hostify_address(obj_addr)
+        found_upward_objects = list()
+        current_location_search = base_location_name
+        reached_max = False
+        while not reached_max:
+            if current_location_search == "shared":
+                reached_max = True
+            for obj in self._addr_ipsearch[current_location_search].get(obj_addr, list()):
+                found_upward_objects.append((obj, current_location_search))
+            current_location_search = self._stored_pano_hierarchy.get(current_location_search)
+            if not current_location_search:
+                current_location_search = "shared"
+
+        return found_upward_objects
+
+    def find_upward_obj_by_addr2(self, base_location_name, obj_addr):
         """
         Find AddressObject having the same IP given as obj_addr at upper levels, starting at base_location_name level
         :param base_location_name: (string) Base location where to find objects upward
@@ -773,7 +811,7 @@ class PaloCleaner:
 
         return found_upward_objects
 
-    def find_best_replacement_addr_obj(self, obj_list):
+    def find_best_replacement_addr_obj(self, obj_list, base_location):
         """
         Get a list of tuples (object, location) and returns the best to be used based on location and naming criterias
         TODO : WARNING, can have unpredictable results with nested device-groups
@@ -782,34 +820,75 @@ class PaloCleaner:
         :param obj_list: list((AddressObject, string)) List of tuples of AddressObject and location names
         :return:
         """
+        choosen_object = None
+        choosen_by_tiebreak = False
         if len(obj_list) == 1:
-            return obj_list[0]
-        # create a list of shared objects from the obj_list
-        shared_obj = [x for x in obj_list if x[1] == 'shared']
-        # create a list of intermediate DG objects from the obj_list
-        interm_obj = [x for x in obj_list if x[1] != 'shared']
-        # create a list of objects having name with multiple "." and ending with "corp" or "com" (probably FQDN)
-        fqdn_obj = [x for x in obj_list if
-                    len(x[0].about()['name'].split('.')) > 1 and x[0].about()['name'].split('.')[-1] in ['corp', 'com']]
-        # find objects being both shared and with FQDN-like naming
-        shared_fqdn_obj = list(set(shared_obj) & set(fqdn_obj))
-        interm_fqdn_obj = list(set(interm_obj) & set(fqdn_obj))
+            choosen_object = obj_list[0]
+            if self._superverbose:
+                self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as there's no other existing for value {choosen_object[0].value}")
+        else:
+            if self._tiebreak_tag:
+                for o in obj_list:
+                    if not choosen_object:
+                        try:
+                            if self._tiebreak_tag in o[0].tag:
+                                choosen_object = o
+                            if self._superverbose:
+                                self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen by tiebreak")
+                        except:
+                            pass
+            if not choosen_object:
+                # create a list of shared objects from the obj_list
+                shared_obj = [x for x in obj_list if x[1] == 'shared']
+                # create a list of intermediate DG objects from the obj_list
+                interm_obj = [x for x in obj_list if x[1] != 'shared' and x[1] != base_location]
+                # create a list of objects having name with multiple "." and ending with "corp" or "com" (probably FQDN)
+                fqdn_obj = [x for x in obj_list if
+                            len(x[0].about()['name'].split('.')) > 1 and x[0].about()['name'].split('.')[-1] in ['corp', 'com']]
+                # find objects being both shared and with FQDN-like naming
+                shared_fqdn_obj = list(set(shared_obj) & set(fqdn_obj))
+                interm_fqdn_obj = list(set(interm_obj) & set(fqdn_obj))
 
-        # if shared and well-named objects are found, return the first one
-        if shared_fqdn_obj:
-            for o in shared_fqdn_obj:
-                if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_fqdn_obj]:
-                    return o
-        if interm_fqdn_obj:
-            return interm_fqdn_obj[0]
-        # else return the first found shared object
-        if shared_obj:
-            for o in shared_obj:
-                if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_obj]:
-                    return o
-        if interm_obj:
-            return interm_obj[0]
-        print(f"ERROR !!!!!! UNABLE TO CHOSE OBJECT IN LIST {obj_list}")
+                # if shared and well-named objects are found, return the first one
+                if shared_fqdn_obj and not choosen_object:
+                    for o in shared_fqdn_obj:
+                        if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_fqdn_obj]:
+                            choosen_object = o
+                            if self._superverbose:
+                                self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with FQDN naming")
+                if interm_fqdn_obj and not choosen_object:
+                    choosen_object = interm_fqdn_obj[0]
+                    if self._superverbose:
+                        self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object with FQDN naming")
+                # else return the first found shared object
+                if shared_obj and not choosen_object:
+                    for o in shared_obj:
+                        if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_obj]:
+                            choosen_object = o
+                            if self._superverbose:
+                                self._console.log(f"Object {o[0].about()['name']} (context {o[1]}) choosen as it's a shared object")
+                if interm_obj and not choosen_object:
+                    choosen_object = interm_obj[0]
+                    if self._superverbose:
+                        self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object")
+        if not choosen_object:
+            print(f"ERROR !!!!!! UNABLE TO CHOSE OBJECT IN LIST {obj_list}")
+        else:
+            if self._apply_tiebreak_tag and not choosen_by_tiebreak:
+                tag_changed = False
+                if choosen_object[0].tag:
+                    if not self._tiebreak_tag in choosen_object[0].tag:
+                        choosen_object[0].tag.append(self._tiebreak_tag)
+                        tag_changed = True
+                else:
+                    choosen_object[0].tag = [self._tiebreak_tag]
+                    tag_changed = True
+                if self._superverbose and tag_changed:
+                    self._console.log(f"Adding tiebreak tag {self._tiebreak_tag} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]} ")
+                if self._apply_cleaning and tag_changed:
+                    choosen_object[0].apply()
+
+        return choosen_object
 
     def optimize_address_objects(self, location_name, progress, task):
         """
@@ -831,22 +910,24 @@ class PaloCleaner:
                     # find similar objects (same IP address) on upper level device-groups (including 'shared')
                     upward_objects = self.find_upward_obj_by_addr(location_name, obj.value)
                     # if upward duplicate objects are found
-                    if upward_objects:
+                    if len(upward_objects) > 1:
                         # find which one is the best to use
-                        replacement_obj, replacement_obj_location = self.find_best_replacement_addr_obj(upward_objects)
-                        # print(f"Object {obj.about()['name']} ({obj.value}) can be replaced by {replacement_obj[0].about()['name']} ({replacement_obj[0].value}) on {replacement_obj[1]}")
-                        #print(
-                        #    f"[{location_name}] Replacing ({obj}, {location}) --by--> ({replacement_obj.about()['name']}, {replacement_obj_location})")
-                        if self._superverbose:
-                            self._console.log(f"   * Replacing {obj.about()['name']} ({obj.__class__.__name__}) at location {location_name} by {replacement_obj.about()['name']} at location {replacement_obj_location}", style="green italic")
-                        # call replace_object method with current object and the one with which to replace it
-                        #self.replace_object(location_name, (obj, location), (replacement_obj, replacement_obj_location))
-                        #self.replace_object_in_groups(location_name, (obj, location), (replacement_obj, replacement_obj_location))
-                        self._replacements[location_name]['Address'][obj.about()['name']] = {
-                            'source': (obj, location),
-                            'replacement': (replacement_obj, replacement_obj_location),
-                            'blocked': False
-                        }
+                        replacement_obj, replacement_obj_location = self.find_best_replacement_addr_obj(upward_objects, location_name)
+                        #if replacement_obj != obj and replacement_obj_location != location:
+                        if replacement_obj != obj:
+                            # print(f"Object {obj.about()['name']} ({obj.value}) can be replaced by {replacement_obj[0].about()['name']} ({replacement_obj[0].value}) on {replacement_obj[1]}")
+                            #print(
+                            #    f"[{location_name}] Replacing ({obj}, {location}) --by--> ({replacement_obj.about()['name']}, {replacement_obj_location})")
+                            if self._superverbose:
+                                self._console.log(f"   * Replacing {obj.about()['name']} ({obj.__class__.__name__}) at location {location_name} by {replacement_obj.about()['name']} at location {replacement_obj_location}", style="green italic")
+                            # call replace_object method with current object and the one with which to replace it
+                            #self.replace_object(location_name, (obj, location), (replacement_obj, replacement_obj_location))
+                            #self.replace_object_in_groups(location_name, (obj, location), (replacement_obj, replacement_obj_location))
+                            self._replacements[location_name]['Address'][obj.about()['name']] = {
+                                'source': (obj, location),
+                                'replacement': (replacement_obj, replacement_obj_location),
+                                'blocked': False
+                            }
                 elif type(obj) == panos.objects.AddressGroup and location == location_name:
                     upward_objects = self.find_upward_obj_static_group(location_name, obj)
                     if upward_objects:

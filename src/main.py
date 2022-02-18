@@ -65,6 +65,20 @@ def parse_cli_args():
         default = 0
     )
 
+    parser.add_argument(
+        "--tiebreak-tag",
+        action = "store",
+        help = "Tag used to choose preferred replacement object in case of multiple ones (overrides default choice)",
+        default = None
+    )
+
+    parser.add_argument(
+        "--apply-tiebreak-tag",
+        action = "store_true",
+        help = "Applies the tag defined on the --tiebreak-tag argument to objects choosen by the choice algorithm",
+        default = False
+    )
+
     return parser.parse_args()
 
 
@@ -72,20 +86,15 @@ def main():
     # Get script start parameters list and values
     start_cli_args = parse_cli_args()
 
+    # if the --apply-tiebreak-tag has been used without the --tiebreak-tag argument value, raise en error and exit
+    if start_cli_args.apply_tiebreak_tag and not start_cli_args.tiebreak_tag:
+        print("\n ERROR - --apply-tiebreak-tag has been called without --tiebreak-tag \n")
+        exit(0)
+
     # Instantiate the PaloCleaner object (connection to Panorama)
     cleaner = PaloCleaner(**start_cli_args.__dict__)
     cleaner.start()
 
-    """
-
-    # Start objects optimization for all DeviceGroup not having child
-    for dg in [k for k, v in cleaner.reverse_dg_hierarchy(cleaner.get_pano_dg_hierarchy()).items() if not v]:
-        if dg in analysis_perimeter['direct'] + analysis_perimeter['indirect']:
-            print(f"Starting objects optimization processing for {dg}")
-            cleaner.optimize_address_objects(dg)
-
-    cleaner.remove_objects(analysis_perimeter, start_cli_args.delete_upward_objects)
-    """
 # entry point
 if __name__ == "__main__":
     main()
