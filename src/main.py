@@ -1,4 +1,6 @@
 import argparse
+import os
+import time
 from PaloCleaner import PaloCleaner
 
 def parse_cli_args():
@@ -62,21 +64,28 @@ def parse_cli_args():
         "--max-days-since-hit",
         action = "store",
         help = "Don't apply any change to rules not being hit since more than X days",
-        default = 0
+        default = 0,
     )
 
     parser.add_argument(
         "--tiebreak-tag",
         action = "store",
         help = "Tag used to choose preferred replacement object in case of multiple ones (overrides default choice)",
-        default = None
+        default = None,
     )
 
     parser.add_argument(
         "--apply-tiebreak-tag",
         action = "store_true",
         help = "Applies the tag defined on the --tiebreak-tag argument to objects choosen by the choice algorithm",
-        default = False
+        default = False,
+    )
+
+    parser.add_argument(
+        "--no-report" ,
+        action = "store_true",
+        help = "Does not generates job reports",
+        default = False,
     )
 
     return parser.parse_args()
@@ -91,8 +100,17 @@ def main():
         print("\n ERROR - --apply-tiebreak-tag has been called without --tiebreak-tag \n")
         exit(0)
 
+    # create the report directory if requested
+    report_folder = None
+    if not start_cli_args.no_report:
+        report_folder = os.path.dirname(os.path.abspath(__file__)).replace('/src', '')
+        report_folder += '/reports/'
+        report_folder += str(int(time.time()))
+        print(f"Report folder will be {report_folder}")
+        os.mkdir(report_folder)
+
     # Instantiate the PaloCleaner object (connection to Panorama)
-    cleaner = PaloCleaner(**start_cli_args.__dict__)
+    cleaner = PaloCleaner(report_folder, **start_cli_args.__dict__)
     cleaner.start()
 
 # entry point

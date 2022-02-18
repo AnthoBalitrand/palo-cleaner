@@ -37,7 +37,7 @@ repl_map = {
 
 
 class PaloCleaner:
-    def __init__(self, **kwargs):
+    def __init__(self, report_folder, **kwargs):
         self._panorama_url = kwargs['panorama_url']
         self._panorama_user = kwargs['api_user']
         self._panorama_password = kwargs['api_password']
@@ -46,6 +46,8 @@ class PaloCleaner:
         self._apply_cleaning = kwargs['apply_cleaning']
         self._tiebreak_tag = kwargs['tiebreak_tag']
         self._apply_tiebreak_tag = kwargs['apply_tiebreak_tag']
+        self._no_report = kwargs['no_report']
+        self._report_folder = report_folder
         self._panorama = None
         self._objects = dict()
         self._addr_namesearch = dict()
@@ -61,7 +63,7 @@ class PaloCleaner:
         self._max_change_timestamp = int(time.time()) - int(kwargs['max_days_since_change']) * 86400 if kwargs['max_days_since_change'] else None
         self._max_hit_timestamp = int(time.time()) - int(kwargs['max_days_since_hit']) * 86400 if kwargs['max_days_since_hit'] else None
         self._need_opstate = self._max_change_timestamp or self._max_hit_timestamp
-        self._console = Console()
+        self._console = Console(record=True if not self._no_report else False)
         self._replacements = dict()
         self._panorama_devices = dict()
         self._hitcounts = dict()
@@ -186,6 +188,8 @@ class PaloCleaner:
                 progress.remove_task(dg_optimize_task)
             #self.clean_local_object_set("shared", progress, None)
         # self.reverse_dg_hierarchy(self.get_pano_dg_hierarchy(), print_result=True)
+        if not self._no_report:
+            self._console.save_html(self._report_folder+'/report.html')
 
     def get_devicegroups(self):
         """
