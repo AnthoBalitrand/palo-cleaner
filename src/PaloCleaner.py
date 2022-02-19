@@ -93,7 +93,7 @@ class PaloCleaner:
                 self._console.log(f"Error while connecting to Panorama : {e.message}", style="red")
                 return 0
             except Exception as e:
-                self._console.log("Unknown error occured while connecting to Panorama", style="red")
+                self._console.log("Unknown error occurred while connecting to Panorama", style="red")
                 return 0
 
             status.update("Parsing device groups list")
@@ -232,7 +232,6 @@ class PaloCleaner:
         """
         Reverses the PanoramaDeviceGroupHierarchy dict
         (permits to have list of childs for each parent, instead of parent for each child)
-        TODO : add colors to device-groups not concerned by the cleaning
 
         :param pano_hierarchy: (dict) PanoramaDeviceGroupHierarchy fetch result
         :param print_result: (bool) To print or not the reversed hierarchy on stdout
@@ -373,7 +372,6 @@ class PaloCleaner:
     def fetch_rulebase(self, context, location_name):
         """
         Downloads rulebase for the requested context
-        TODO : fetch all rulebases (security, NAT, authentication...)
 
         :param context: (Panorama or DeviceGroup) instance to be used for fetch operation
         :param location_name: (string) Name of the location (Panorama or DeviceGroup name)
@@ -384,21 +382,14 @@ class PaloCleaner:
         if location_name not in self._rulebases.keys():
             self._rulebases[location_name] = dict()
 
-        # context object given as parameter is stored for further usage
         self._rulebases[location_name]['context'] = context
-        pre_rulebase = PreRulebase()
-        context.add(pre_rulebase)
-        self._rulebases[location_name]['pre_security'] = SecurityRule.refreshall(pre_rulebase, add=True)
-        self._rulebases[location_name]['pre_nat'] = NatRule.refreshall(pre_rulebase, add=True)
-        self._rulebases[location_name]['pre_authentication'] = AuthenticationRule.refreshall(pre_rulebase, add=True)
-        post_rulebase = PostRulebase()
-        context.add(post_rulebase)
-        self._rulebases[location_name]['post_security'] = SecurityRule.refreshall(post_rulebase, add=True)
-        self._rulebases[location_name]['post_nat'] = NatRule.refreshall(post_rulebase, add=True)
-        self._rulebases[location_name]['post_authentication'] = AuthenticationRule.refreshall(post_rulebase, add=True)
-        default_rulebase = Rulebase()
-        context.add(default_rulebase)
-        self._rulebases[location_name]['default_security'] = SecurityRule.refreshall(default_rulebase, add=True)
+        for ruletype in repl_map:
+            rulebases = [PreRulebase(), PostRulebase()]
+            rulebases += [Rulebase()] if ruletype is SecurityRule else []
+            for rb in rulebases:
+                context.add(rb)
+                self._rulebases[location_name][rb.__class__.__name__+"_"+ruletype.__name__] = ruletype.refreshall(rb, add=True)
+                context.remove(rb)
 
     def fetch_hitcounts(self, context, location_name):
         dg_firewalls = Firewall.refreshall(context)
@@ -1062,8 +1053,8 @@ class PaloCleaner:
                     expand=True)
 
                 tab_headers = {
-                    "security": ["Name", "src_addr", "dest_addr", "action", "last_modif", "last_hit", "changed"],
-                    "nat": ["Name", "src_addr", "dest_addr", "src_trans", "dest_trans", "last_modif", "last_hit", "changed"]
+                    "SecurityRule": ["Name", "src_addr", "dest_addr", "action", "last_modif", "last_hit", "changed"],
+                    "NatRule": ["Name", "src_addr", "dest_addr", "src_trans", "dest_trans", "last_modif", "last_hit", "changed"]
                 }
 
                 for c_name in tab_headers[rulebase_name.split('_')[1]]:
