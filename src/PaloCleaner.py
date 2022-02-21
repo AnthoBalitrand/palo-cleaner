@@ -1007,41 +1007,55 @@ class PaloCleaner:
         # TODO : delete object if replacement object has the same name EXCEPT IF USED ON A RULE WHICH CANNOT BE DELETED !
 
     def replace_object_in_rulebase(self, location_name, progress, task):
-
-        ruletype_fields_map = {
-            panos.policies.SecurityRule: ["source", "destination"],
-            panos.policies.NatRule: ["source", "destination"],
-            panos.policies.AuthenticationRule: ["source_addresses", "destination_addresses"]
-        }
-        """
         ruletype_fields_map = {x: list() for x in repl_map}
         for ruletype in ruletype_fields_map:
-            for obj_type, fields in repl_map.get(ruletype):
+            for obj_type, fields in repl_map.get(ruletype).items():
                 for f in fields:
                     ruletype_fields_map[ruletype].append(f[0] if type(f) is list else f)
-        """
+
+        tab_headers = dict()
+        for rule_type in repl_map:
+            tab_headers[rule_type.__name__] = ['Name']
+            for field_type, field_names in repl_map[rule_type].items():
+                for field in field_names:
+                    tab_headers[rule_type.__name__].append(field[0] if type(field) is list else field)
+            tab_headers[rule_type.__name__] += ["rule_modification_timestamp", "last_hit_timestamp", "changed"]
+
         def replace_in_rule(rule):
             replacements_done = dict()
             replacements_count = 0
-            for row in ruletype_fields_map.get(type(rule)):
-                replacements_done[row] = list()
-                for o in getattr(rule, row):
-                    if (replacement := self._replacements[location_name]['Address'].get(o)):
-                        #source_obj_instance, source_obj_location = replacement['source']
-                        replacement_obj_instance, replacement_obj_location = replacement['replacement']
-                        if o != (repl_name := replacement_obj_instance.about()['name']):
-                            # replacement type 2 = removed
-                            # replacement type 3 = added
-                            replacements_done[row].append((o, 2))
-                            replacements_done[row].append((repl_name, 3))
-                        else:
-                            # replacement type 1 = same name different location
-                            replacements_done[row].append((o, 1))
-                        replacements_count += 1
-                    else:
-                        # replacement type 0 = no replacement
-                        replacements_done[row].append((o, 0))
-            return replacements_done, replacements_count
+            # this field counts the highest number of replacements on a given field, for the loop which will display
+            # the replacements in a Table object
+            max_replace = 0
+            for obj_type in repl_map.get(type(rule)):
+                replacements_done[obj_type] = dict()
+                for field_name in [x[0] if type(x) is list else x for x in repl_map[type(rule)][obj_type]]:
+                    replacements_done[obj_type][field_name] = list()
+                    current_field_replacements_count = 0
+                    # TODO : adapt check to field type (not list ??)
+                    if (not_null_field := getattr(rule, field_name)):
+                        for o in not_null_field:
+                            if (replacement := self._replacements[location_name][obj_type].get(o)):
+                                #source obj_instance, source_obj_location = replacement['source']
+                                replacement_obj_instance, replacement_obj_location = replacement['replacement']
+                                if o != (repl_name := replacement_obj_instance.about()['name']):
+                                    # replacement type 2 = removed
+                                    # replacement type 3 = added
+                                    replacements_done[obj_type][field_name].append((o, 2))
+                                    replacements_done[obj_type][field_name].append((repl_name, 3))
+                                    current_field_replacements_count += 2
+                                else:
+                                    # replacement type 1 = same name different location
+                                    replacements_done[obj_type][field_name].append((o, 1))
+                                    current_field_replacements_count += 1
+                                replacements_count += 1
+                            else:
+                                # replacement type 0 = no replacement
+                                replacements_done[obj_type][field_name].append((o, 0))
+                                current_field_replacements_count += 1
+                    if current_field_replacements_count > max_replace:
+                        max_replace = current_field_replacements_count
+            return replacements_done, replacements_count, max_replace
 
         def format_for_table(repl_name, repl_type):
             type_map = {0: '', 1: 'yellow', 2: 'red', 3: 'green'}
@@ -1062,19 +1076,13 @@ class PaloCleaner:
                     border_style="not dim",
                     expand=True)
 
-                tab_headers = {
-                    "SecurityRule": ["Name", "src_addr", "dest_addr", "action", "last_modif", "last_hit", "changed"],
-                    "NatRule": ["Name", "src_addr", "dest_addr", "src_trans", "dest_trans", "last_modif", "last_hit", "changed"]
-                }
-
                 for c_name in tab_headers[rulebase_name.split('_')[1]]:
                     rulebase_table.add_column(c_name)
 
                 for r in rulebase:
                     in_timestamp_boundaries = False
-                    replacements_in_rule, replacements_count = replace_in_rule(r)
+                    replacements_in_rule, replacements_count, max_replace = replace_in_rule(r)
                     if replacements_count:
-
                         total_replacements += replacements_count
 
                         # if rule is disabled or if the job does not needs to rely on rule timestamps
@@ -1093,40 +1101,22 @@ class PaloCleaner:
                                 in_timestamp_boundaries = True
                             # else, for each object used on the rule, protect them to make sure they'll not be deleted later by the job
                             else:
-                                for field in ruletype_fields_map[type(r)]:
-                                    for object_name in getattr(r, field):
-                                        if object_name in self._replacements[location_name]["Address"]:
-                                            self._replacements[location_name]["Address"][object_name]["blocked"] = True
+                                for obj_type, fields in repl_map[type(r)].items():
+                                    for f in [x[0] if type(x) is list else x for x in fields]:
+                                        for object_name in getattr(r, f):
+                                            if object_name in self._replacements[location_name][obj_type]:
+                                                self._replacements[location_name][obj_type][object_name]["blocked"] = True
 
-                        if type(r) is SecurityRule:
-                            for table_add_loop in range((max_iter := max([len(y) for x, y in replacements_in_rule.items()]))):
-                                rulebase_table.add_row(
-                                    r.name if table_add_loop == 0 else "",
-                                    format_for_table(*replacements_in_rule['source'][table_add_loop]) if table_add_loop < len(replacements_in_rule['source']) else "",
-                                    format_for_table(*replacements_in_rule['destination'][table_add_loop]) if table_add_loop < len(replacements_in_rule['destination']) else "",
-                                    r.action if table_add_loop == 0 else "",
-                                    str(rule_modification_timestamp),
-                                    str(last_hit_timestamp),
-                                    "Y" if in_timestamp_boundaries else "N",
-                                    end_section=True if table_add_loop == max_iter - 1 else False
-                                )
-                        elif type(r) is NatRule:
-                            for table_add_loop in range((max_iter := max([len(y) for x, y in replacements_in_rule.items()]))):
-                                rulebase_table.add_row(
-                                    r.name if table_add_loop == 0 else "",
-                                    format_for_table(
-                                        *replacements_in_rule['source'][table_add_loop]) if table_add_loop < len(
-                                        replacements_in_rule['source']) else "",
-                                    format_for_table(
-                                        *replacements_in_rule['destination'][table_add_loop]) if table_add_loop < len(
-                                        replacements_in_rule['destination']) else "",
-                                    "",
-                                    "",
-                                    str(rule_modification_timestamp),
-                                    str(last_hit_timestamp),
-                                    "Y" if in_timestamp_boundaries else "N",
-                                    end_section=True if table_add_loop == max_iter - 1 else False
-                                )
+                        for table_add_loop in range(max_replace):
+                            row_values = list()
+                            row_values.append(r.name if table_add_loop == 0 else ""),
+                            for obj_type, fields in repl_map.get(type(r)).items():
+                                for f in [x[0] if type(x) is list else x for x in fields]:
+                                    row_values.append(format_for_table(*replacements_in_rule[obj_type][f][table_add_loop]) if table_add_loop < len(replacements_in_rule[obj_type][f]) else "")
+                            row_values.append(str(rule_modification_timestamp) if table_add_loop == 0 else "")
+                            row_values.append(str(last_hit_timestamp) if table_add_loop == 0 else "")
+                            row_values.append("Y" if in_timestamp_boundaries else "N")
+                            rulebase_table.add_row(*row_values, end_section=True if table_add_loop == max_replace - 1 else False)
 
                 if total_replacements:
                     self._console.log(rulebase_table)
