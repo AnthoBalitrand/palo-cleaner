@@ -173,6 +173,7 @@ class PaloCleaner:
                 self._console.log(f"{dg.about()['name']} used objects set processed")
                 progress.remove_task(dg_fetch_task)
 
+            """
             # 26012022 - cleaning only leafs device groups (DG without childs)
             dg_to_clean = [context_name for context_name, dg in perimeter if not self._reversed_tree.get(context_name)]
             for context_name in dg_to_clean:
@@ -186,6 +187,26 @@ class PaloCleaner:
                 self.clean_local_object_set(context_name, progress, dg_optimize_task)
                 self._console.log(f"{context_name} used objects set cleaned")
                 progress.remove_task(dg_optimize_task)
+            """
+
+            for depth in self._depthed_tree:
+                for context_name in self._depthed_tree.get(depth):
+                    if context_name in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']:
+                        # OBJECTS OPTIMIZATION
+                        dg_optimize_task = progress.add_task(f"{context_name} - Optimizing objects", total=len(self._used_objects_sets[context_name]))
+                        self.optimize_address_objects(context_name, progress, dg_optimize_task)
+                        self._console.log(f"{context_name} objects optimization done")
+
+                        # OBJECTS REPLACEMENT IN GROUPS
+                        self.replace_object_in_groups(context_name, progress, dg_optimize_task)
+                        self._console.log(f"{context_name} objects replaced in groups")
+
+                        # OBJECTS REPLACEMENT IN RULEBASES
+                        self.replace_object_in_rulebase(context_name, progress, dg_optimize_task)
+                        self._console.log(f"{context_name} objects replaced in rulebases")
+
+                        progress.remove_task(dg_optimize_task)
+
             #self.clean_local_object_set("shared", progress, None)
         # self.reverse_dg_hierarchy(self.get_pano_dg_hierarchy(), print_result=True)
         if not self._no_report:
@@ -810,6 +831,26 @@ class PaloCleaner:
 
         return found_upward_objects
 
+    def find_upward_obj_group(self, base_location_name, obj_group):
+        found_upward_objects = list()
+        upward_devicegroup = self._stored_pano_hierarchy.get(base_location_name)
+        if not upward_devicegroup:
+            upward_devicegroup = 'shared'
+        for obj in self._objects[upward_devicegroup]['Address']:
+            if type(obj) is panos.objects.AddressGroup:
+                if obj_group.static_value and obj.static_value:
+                    if sorted(obj.static_value) == sorted(obj_group.static_value):
+                        found_upward_objects.append((obj, upward_devicegroup))
+                elif obj_group.dynamic_value and obj.dynamic_value:
+                    if obj_group.dynamic_value == obj.dynamic_value:
+                        found_upward_objects.append((obj, upward_devicegroup))
+
+        if upward_devicegroup != 'shared':
+            found_upward_objects += self.find_upward_obj_group(upward_devicegroup, obj_group)
+
+        return found_upward_objects
+
+
     def find_best_replacement_addr_obj(self, obj_list, base_location):
         """
         Get a list of tuples (object, location) and returns the best to be used based on location and naming criterias
@@ -928,7 +969,7 @@ class PaloCleaner:
                                 'blocked': False
                             }
                 elif type(obj) == panos.objects.AddressGroup and location == location_name:
-                    upward_objects = self.find_upward_obj_static_group(location_name, obj)
+                    upward_objects = self.find_upward_obj_group(location_name, obj)
                     if upward_objects:
                         replacement_obj, replacement_obj_location = upward_objects[0]
                         self._console.log(
@@ -941,7 +982,6 @@ class PaloCleaner:
                 progress.update(task, advance=1)
 
     def replace_object_in_groups(self, location_name, progress, task):
-
         replacements_done = dict()
 
         for replacement_name, replacement in self._replacements[location_name]['Address'].items():
@@ -969,7 +1009,7 @@ class PaloCleaner:
 
             # replacing object on current location static groups
             for checked_object in self._objects[location_name]['Address']:
-                if type(checked_object) is panos.objects.AddressGroup:
+                if type(checked_object) is panos.objects.AddressGroup and checked_object.static_value:
                     changed = False
                     matched = False
                     try:
@@ -1003,8 +1043,6 @@ class PaloCleaner:
                 else:
                     group_table.add_row(f"[yellow]! {replaced_item[0]}[/yellow]")
             self._console.log(group_table)
-
-        # TODO : delete object if replacement object has the same name EXCEPT IF USED ON A RULE WHICH CANNOT BE DELETED !
 
     def replace_object_in_rulebase(self, location_name, progress, task):
         ruletype_fields_map = {x: list() for x in repl_map}
