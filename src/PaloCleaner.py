@@ -384,16 +384,20 @@ class PaloCleaner:
 
         self._rulebases[location_name]['context'] = context
         for ruletype in repl_map:
+
             rulebases = [PreRulebase(), PostRulebase()]
-            rulebases += [Rulebase()] if ruletype is SecurityRule else []
+            if ruletype is SecurityRule:
+                rulebases += [Rulebase()]
+
             for rb in rulebases:
                 context.add(rb)
-                self._rulebases[location_name][rb.__class__.__name__+"_"+ruletype.__name__] = ruletype.refreshall(rb, add=True)
+                self._rulebases[location_name][rb.__class__.__name__+"_"+ruletype.__name__] = \
+                    ruletype.refreshall(rb, add=True)
                 context.remove(rb)
 
     def fetch_hitcounts(self, context, location_name):
         dg_firewalls = Firewall.refreshall(context)
-        rulebases = ["security", "nat", "authentication"]
+        rulebases = [x.__name__ for x in repl_map]
         interest_counters = ["last_hit_timestamp", "rule_modification_timestamp"]
         self._hitcounts[location_name] = ({x: dict() for x in rulebases})
 
@@ -1009,7 +1013,13 @@ class PaloCleaner:
             panos.policies.NatRule: ["source", "destination"],
             panos.policies.AuthenticationRule: ["source_addresses", "destination_addresses"]
         }
-
+        """
+        ruletype_fields_map = {x: list() for x in repl_map}
+        for ruletype in ruletype_fields_map:
+            for obj_type, fields in repl_map.get(ruletype):
+                for f in fields:
+                    ruletype_fields_map[ruletype].append(f[0] if type(f) is list else f)
+        """
         def replace_in_rule(rule):
             replacements_done = dict()
             replacements_count = 0
