@@ -68,6 +68,7 @@ class PaloCleaner:
         self._replacements = dict()
         self._panorama_devices = dict()
         self._hitcounts = dict()
+        self._cleaning_counts = dict()
 
     def start(self):
         header_text = Text("""
@@ -207,6 +208,8 @@ class PaloCleaner:
 
         if not self._no_report:
             self._console.save_html(self._report_folder+'/report.html')
+
+        print(self._cleaning_counts)
 
     def get_devicegroups(self):
         """
@@ -1166,7 +1169,7 @@ class PaloCleaner:
                         # if rule is disabled or if the job does not needs to rely on rule timestamps
                         # or if the hitcounts for a rule cannot be found (ie : new rule not yet pushed on device)
                         # then just consider that the rule can be modified (in_timestamp_boundaries = True)
-                        if (r.disabled or not self._need_opstate or not (rule_counters := self._hitcounts.get(location_name, dict()).get(hitcount_rb_name, dict()).get(r.name))) and not "rule 7" in r.name:
+                        if (r.disabled or not self._need_opstate or not (rule_counters := self._hitcounts.get(location_name, dict()).get(hitcount_rb_name, dict()).get(r.name))):
                             in_timestamp_boundaries = True
                             rule_modification_timestamp = 0 if self._need_opstate else "N/A"
                             last_hit_timestamp = 0 if self._need_opstate else "N/A"
@@ -1210,7 +1213,9 @@ class PaloCleaner:
                     self._console.log(rulebase_table)
 
     def clean_local_object_set(self, location_name, progress, task):
-        # removing replaced objects from useed_objects_set for current location_name
+        self._cleaning_counts[location_name] = {x: {'removed': 0, 'replaced': 0} for x in self._replacements.get(location_name, list())}
+
+        # removing replaced objects from used_objects_set for current location_name
         for type in self._replacements.get(location_name, list()):
             for name, infos in self._replacements[location_name][type].items():
                 if not infos['blocked']:
@@ -1218,6 +1223,8 @@ class PaloCleaner:
                         self._used_objects_sets[location_name].remove(infos['source'])
                         if self._superverbose:
                             self._console.log(f"[{location_name}] Removing unprotected object {name} (location {infos['source'][1]}) from used objects set")
+                        if infos['source'][1] == location_name:
+                            self._cleaning_counts[location_name][type]['replaced'] += 1
                     except ValueError:
                         self._console.log(f"ValueError when trying to remove {name} from used objects set at location {location_name} : object not found on object set")
                 elif self._superverbose:
@@ -1234,6 +1241,7 @@ class PaloCleaner:
                 for o in self._objects[location_name][type]:
                     if not (o, location_name) in self._used_objects_sets[location_name]:
                         self._console.log(f"Object {o.name} ({o.__class__.__name__}) can be deleted at location {location_name}")
+                        self._cleaning_counts[location_name][type]['removed'] += 1
 
     def gen_tree_depth(self, input_tree, start='shared', depth=1):
         """
