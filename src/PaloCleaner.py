@@ -768,40 +768,6 @@ class PaloCleaner:
 
         return found_upward_objects
 
-    def find_upward_obj_by_addr2(self, base_location_name, obj_addr):
-        """
-        Find AddressObject having the same IP given as obj_addr at upper levels, starting at base_location_name level
-        :param base_location_name: (string) Base location where to find objects upward
-        :param obj_addr: (string) IP address of the objects for which we want to find duplicates at upper levels
-        :return: (list) of tuples (AddressObject, location) of objects found on upper levels
-        """
-
-        # call to hostify_address submethod to remove /32 at the end
-        obj_addr = self.hostify_address(obj_addr)
-        # initialize the list which will contains found objects
-        found_upward_objects = list()
-        # find name of the parent device-group (related to base_location_name)
-        upward_devicegroup = self._stored_pano_hierarchy.get(base_location_name)
-        # if there's no parent, then parent is 'shared' level
-        if not upward_devicegroup:
-            upward_devicegroup = 'shared'
-        # for each object existing at found upper level
-        for obj in self._addr_ipsearch[upward_devicegroup].get(obj_addr, list()):
-            found_upward_objects.append((obj, upward_devicegroup))
-        """
-        for obj in self._objects[upward_devicegroup]['address_obj']:
-            # if current object has the same IP address than the searched one
-            if self.hostify_address(obj.value) == obj_addr:
-                # add tuple for the found object to the found_upward_objects list
-                found_upward_objects.append((obj, upward_devicegroup))
-        """
-        # if we are not yet at the 'shared' level
-        if upward_devicegroup != 'shared':
-            # call the current function recursively to find upward objects
-            found_upward_objects += self.find_upward_obj_by_addr(upward_devicegroup, obj_addr)
-        # returns list of tuple containing all found objects
-        return found_upward_objects
-
     def find_upward_obj_static_group(self, base_location_name, obj_group):
         found_upward_objects = list()
         upward_devicegroup = self._stored_pano_hierarchy.get(base_location_name)
