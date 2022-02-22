@@ -38,7 +38,8 @@ def parse_cli_args():
     parser.add_argument(
         "--apply-cleaning",
         action = "store_true",
-        help = "Apply cleaning operation"
+        help = "Apply cleaning operation",
+        default = False,
     )
 
     parser.add_argument(

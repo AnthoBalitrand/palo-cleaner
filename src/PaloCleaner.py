@@ -54,6 +54,7 @@ class PaloCleaner:
         self._tag_namesearch = dict()
         self._addr_ipsearch = dict()
         self._service_namesearch = dict()
+        self._service_valuesearch = dict()
         self._used_objects_sets = dict()
         self._rulebases = dict()
         self._stored_pano_hierarchy = None
@@ -152,7 +153,10 @@ class PaloCleaner:
                 self._console.log(f"{context_name} rulebases downloaded ({self.count_rules(context_name)} rules found)")
                 # downloading hitcounts for leafs
                 if self._need_opstate and not self._reversed_tree.get(context_name):
-                    progress.update(download_task, description=f"Downloading {context_name} hitcounts (connecting to devices)")
+                    progress.update(
+                        download_task,
+                        description=f"Downloading {context_name} hitcounts (connecting to devices)"
+                    )
                     self.fetch_hitcounts(dg, context_name)
                     self._console.log(f"{context_name} hit counts downloaded for all rulebases")
 
@@ -167,8 +171,10 @@ class PaloCleaner:
             progress.remove_task(shared_fetch_task)
 
             for (context_name, dg) in perimeter:
-                dg_fetch_task = progress.add_task(f"{dg.about()['name']} - Processing used objects location",
-                                                  total=self.count_rules(dg.about()['name']))
+                dg_fetch_task = progress.add_task(
+                    f"{dg.about()['name']} - Processing used objects location",
+                    total=self.count_rules(dg.about()['name'])
+                )
                 self.fetch_address_obj_set(dg.about()['name'], progress, dg_fetch_task)
                 self._console.log(f"{dg.about()['name']} used objects set processed")
                 progress.remove_task(dg_fetch_task)
@@ -177,8 +183,11 @@ class PaloCleaner:
                 for context_name in self._depthed_tree.get(depth):
                     if context_name in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']:
                         # OBJECTS OPTIMIZATION
-                        dg_optimize_task = progress.add_task(f"{context_name} - Optimizing objects", total=len(self._used_objects_sets[context_name]))
-                        self.optimize_address_objects(context_name, progress, dg_optimize_task)
+                        dg_optimize_task = progress.add_task(
+                            f"{context_name} - Optimizing objects",
+                            total=len(self._used_objects_sets[context_name])
+                        )
+                        self.optimize_objects(context_name, progress, dg_optimize_task)
                         self._console.log(f"{context_name} objects optimization done")
 
                         # OBJECTS REPLACEMENT IN GROUPS
@@ -376,6 +385,13 @@ class PaloCleaner:
             self._service_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Service']}
             if self._superverbose:
                 self._console.log(f"  {location_name} services namesearch structures initialized")
+
+        self._service_valuesearch[location_name] = dict()
+        for obj in self._objects[location_name]['Service']:
+            serv_string = self.stringify_service(obj)
+            if serv_string not in self._service_valuesearch[location_name].keys():
+                self._service_valuesearch[location_name][serv_string] = list()
+            self._service_valuesearch[location_name][serv_string].append(obj)
 
     def fetch_rulebase(self, context, location_name):
         """
@@ -752,8 +768,11 @@ class PaloCleaner:
             return address[:-3:]
         return address
 
-    def find_upward_obj_by_addr(self, base_location_name, obj_addr):
-        obj_addr = self.hostify_address(obj_addr)
+    def stringify_service(self, service):
+        return service.protocol.lower() + "/" + str(service.source_port) + "/" + str(service.destination_port)
+
+    def find_upward_obj_by_addr(self, base_location_name, obj):
+        obj_addr = self.hostify_address(obj.value)
         found_upward_objects = list()
         current_location_search = base_location_name
         reached_max = False
@@ -765,22 +784,6 @@ class PaloCleaner:
             current_location_search = self._stored_pano_hierarchy.get(current_location_search)
             if not current_location_search:
                 current_location_search = "shared"
-
-        return found_upward_objects
-
-    def find_upward_obj_static_group(self, base_location_name, obj_group):
-        found_upward_objects = list()
-        upward_devicegroup = self._stored_pano_hierarchy.get(base_location_name)
-        if not upward_devicegroup:
-            upward_devicegroup = 'shared'
-        for obj in self._objects[upward_devicegroup]['Address']:
-            if type(obj) is panos.objects.AddressGroup:
-                if obj.static_value:
-                    if sorted(obj.static_value) == sorted(obj_group.static_value):
-                        found_upward_objects.append((obj, upward_devicegroup))
-
-        if upward_devicegroup != 'shared':
-            found_upward_objects += self.find_upward_obj_static_group(upward_devicegroup, obj_group)
 
         return found_upward_objects
 
@@ -803,10 +806,26 @@ class PaloCleaner:
 
         return found_upward_objects
 
+    def find_upward_obj_service(self, base_location_name, obj_service):
+        obj_service_string = self.stringify_service(obj_service)
+        found_upward_objects = list()
+        current_location_search = base_location_name
+        reached_max = False
+        while not reached_max:
+            if current_location_search == "shared":
+                reached_max = True
+            for obj in self._service_valuesearch[current_location_search].get(obj_service_string, list()):
+                found_upward_objects.append((obj, current_location_search))
+            current_location_search = self._stored_pano_hierarchy.get(current_location_search)
+            if not current_location_search:
+                current_location_search = "shared"
+
+        return found_upward_objects
+
     def find_best_replacement_addr_obj(self, obj_list, base_location):
         """
         Get a list of tuples (object, location) and returns the best to be used based on location and naming criterias
-        TODO : WARNING, can have unpredictable results with nested device-groups
+        TODO : WARNING, can have unpredictable results with nested intermediate device-groups
         Will return the intermediate group replacement object if any
 
         :param obj_list: list((AddressObject, string)) List of tuples of AddressObject and location names
@@ -882,7 +901,84 @@ class PaloCleaner:
 
         return choosen_object
 
-    def optimize_address_objects(self, location_name, progress, task):
+    def find_best_replacement_service_obj(self, obj_list, base_location):
+        # TODO : WARNING, can have unpredictable results with nested intermediate device-groups
+        choosen_object = None
+        choosen_by_tiebreak = False
+        if len(obj_list) == 1:
+            choosen_object = obj_list[0]
+            if self._superverbose:
+                self._console.log(
+                    f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as there's no other existing for value {self.stringify_service(choosen_object[0])}")
+        else:
+            if self._tiebreak_tag:
+                for o in obj_list:
+                    if not choosen_object:
+                        try:
+                            if self._tiebreak_tag in o[0].tag:
+                                choosen_object = o
+                            if self._superverbose:
+                                self._console.log(
+                                    f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen by tiebreak")
+                        except:
+                            pass
+            if not choosen_object:
+                # create a list of shared objects from the obj_list
+                shared_obj = [x for x in obj_list if x[1] == 'shared']
+                # create a list of intermediate DG objects from the obj_list
+                interm_obj = [x for x in obj_list if x[1] not in ['shared', base_location]]
+                # create a list of objects having a name like "protocol_port" (ie = tcp_80)
+                standard_obj = [x for x in obj_list if
+                                x[0].name == x[0].protocol.lower() + '_' + str(x[0].destination_port)]
+
+                shared_standard_obj = list(set(shared_obj) & set(standard_obj))
+                interm_standard_obj = list(set(interm_obj) & set(standard_obj))
+
+                if shared_standard_obj and not choosen_object:
+                    for o in shared_standard_obj:
+                        if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_standard_obj]:
+                            choosen_object = o
+                            if self._superverbose:
+                                self._console.log(
+                                    f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with standard naming")
+                if interm_standard_obj and not choosen_object:
+                    choosen_object = interm_standard_obj[0]
+                    if self._superverbose:
+                        self._console.log(
+                            f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object with standard naming")
+                if shared_obj and not choosen_object:
+                    for o in shared_obj:
+                        if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_obj]:
+                            choosen_object = o
+                            if self._superverbose:
+                                self._console.log(
+                                    f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object")
+                if interm_obj and not choosen_object:
+                    choosen_object = interm_obj[0]
+                    if self._superverbose:
+                        self._console.log(
+                            f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object")
+        if not choosen_object:
+            print(f"ERROR !!!!!!! UNABLE TO CHOOSE SERVICE IN LIST {obj_list}")
+        else:
+            if self._apply_tiebreak_tag and not choosen_by_tiebreak:
+                tag_changed = False
+                if choosen_object[0].tag:
+                    if not self._tiebreak_tag in choosen_object[0].tag:
+                        choosen_object[0].tag.append(self._tiebreak_tag)
+                        tag_changed = True
+                else:
+                    choosen_object[0].tag = [self._tiebreak_tag]
+                    tag_changed = True
+                if self._superverbose and tag_changed:
+                    self._console.log(
+                        f"Adding tiebreak tag {self._tiebreak_tag} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]}")
+                if self._apply_cleaning and tag_changed:
+                    choosen_object[0].apply()
+
+        return choosen_object
+
+    def optimize_objects(self, location_name, progress, task):
         """
         Start object optimization processing for device-group given as argument
 
@@ -892,42 +988,33 @@ class PaloCleaner:
 
         # for each object and location found on the _used_objects_set for the current location
         self._replacements[location_name] = {'Address': dict(), 'Service': dict(), 'Tag': dict()}
-        for obj_type in [panos.objects.AddressObject, panos.objects.AddressGroup]:
+        find_maps = {AddressObject: self.find_upward_obj_by_addr, AddressGroup: self.find_upward_obj_group, ServiceObject: self.find_upward_obj_service}
+        for obj_type in [panos.objects.AddressObject, panos.objects.AddressGroup, panos.objects.ServiceObject]:
             # TODO : check performance of the following statement
             for (obj, location) in [(o, l) for (o, l) in self._used_objects_sets[location_name] if type(o) is obj_type]:
-                # if the current object type is AddressObject and exists at the current location level
-                # TODO : find objects at upward locations even if the used object is not local (can be at an intermediate level)
-                # TODO 2 : processing for both types of objects can probably be merged
-                if type(obj) == panos.objects.AddressObject:
-                    # find similar objects (same IP address) on upper level device-groups (including 'shared')
-                    upward_objects = self.find_upward_obj_by_addr(location_name, obj.value)
-                    # if upward duplicate objects are found
-                    if len(upward_objects) > 1:
-                        # find which one is the best to use
-                        replacement_obj, replacement_obj_location = self.find_best_replacement_addr_obj(upward_objects, location_name)
-                        #if replacement_obj != obj and replacement_obj_location != location:
-                        if replacement_obj != obj:
-                            # print(f"Object {obj.about()['name']} ({obj.value}) can be replaced by {replacement_obj[0].about()['name']} ({replacement_obj[0].value}) on {replacement_obj[1]}")
-                            #print(
-                            #    f"[{location_name}] Replacing ({obj}, {location}) --by--> ({replacement_obj.about()['name']}, {replacement_obj_location})")
-                            if self._superverbose:
-                                self._console.log(f"   * Replacing {obj.about()['name']} ({obj.__class__.__name__}) at location {location_name} by {replacement_obj.about()['name']} at location {replacement_obj_location}", style="green italic")
-                            # call replace_object method with current object and the one with which to replace it
-                            #self.replace_object(location_name, (obj, location), (replacement_obj, replacement_obj_location))
-                            #self.replace_object_in_groups(location_name, (obj, location), (replacement_obj, replacement_obj_location))
+                upward_objects = find_maps.get(type(obj))(location_name, obj)
+                if len(upward_objects) > 1:
+                    if type(obj) is AddressObject:
+                        replacement_obj, replacement_obj_location = self.find_best_replacement_addr_obj(upward_objects,
+                                                                                                        location_name)
+                    elif type(obj) is ServiceObject:
+                        replacement_obj, replacement_obj_location = self.find_best_replacement_service_obj(upward_objects,
+                                                                                                           location_name)
+                    else:
+                        # TODO : find best upward matching object for AddressGroups
+                        replacement_obj, replacement_obj_location = upward_objects[0]
+                    if replacement_obj != obj:
+                        self._console.log(
+                            f"   Replacing {obj.about()['name']} ({obj.__class__.__name__}) at location {location_name} by {replacement_obj.about()['name']} at location {replacement_obj_location}",
+                            style="green italic")
+                        if type(obj) in [AddressObject, AddressGroup]:
                             self._replacements[location_name]['Address'][obj.about()['name']] = {
                                 'source': (obj, location),
                                 'replacement': (replacement_obj, replacement_obj_location),
                                 'blocked': False
                             }
-                elif type(obj) == panos.objects.AddressGroup:
-                    upward_objects = self.find_upward_obj_group(location_name, obj)
-                    if len(upward_objects) > 1:
-                        replacement_obj, replacement_obj_location = upward_objects[0]
-                        if replacement_obj != obj:
-                            self._console.log(
-                                f"   Replacing {obj.about()['name']} ({obj.__class__.__name__}) at location {location_name} by {replacement_obj.about()['name']} at location {replacement_obj_location}")
-                            self._replacements[location_name]['Address'][obj.about()['name']] = {
+                        elif type(obj) is ServiceObject:
+                            self._replacements[location_name]['Service'][obj.about()['name']] = {
                                 'source': (obj, location),
                                 'replacement': (replacement_obj, replacement_obj_location),
                                 'blocked': False
@@ -1079,7 +1166,7 @@ class PaloCleaner:
                         # if rule is disabled or if the job does not needs to rely on rule timestamps
                         # or if the hitcounts for a rule cannot be found (ie : new rule not yet pushed on device)
                         # then just consider that the rule can be modified (in_timestamp_boundaries = True)
-                        if (r.disabled or not self._need_opstate or not (rule_counters := self._hitcounts.get(location_name, dict()).get(hitcount_rb_name, dict()).get(r.name))):
+                        if (r.disabled or not self._need_opstate or not (rule_counters := self._hitcounts.get(location_name, dict()).get(hitcount_rb_name, dict()).get(r.name))) and not "rule 7" in r.name:
                             in_timestamp_boundaries = True
                             rule_modification_timestamp = 0 if self._need_opstate else "N/A"
                             last_hit_timestamp = 0 if self._need_opstate else "N/A"
@@ -1105,11 +1192,19 @@ class PaloCleaner:
                             row_values.append(r.name if table_add_loop == 0 else ""),
                             for obj_type, fields in repl_map.get(type(r)).items():
                                 for f in [x[0] if type(x) is list else x for x in fields]:
-                                    row_values.append(format_for_table(*replacements_in_rule[obj_type][f][table_add_loop]) if table_add_loop < len(replacements_in_rule[obj_type][f]) else "")
+                                    row_values.append(
+                                        format_for_table(*replacements_in_rule[obj_type][f][table_add_loop])
+                                        if table_add_loop < len(replacements_in_rule[obj_type][f])
+                                        else ""
+                                    )
                             row_values.append(str(rule_modification_timestamp) if table_add_loop == 0 else "")
                             row_values.append(str(last_hit_timestamp) if table_add_loop == 0 else "")
                             row_values.append("Y" if in_timestamp_boundaries else "N")
-                            rulebase_table.add_row(*row_values, end_section=True if table_add_loop == max_replace - 1 else False)
+                            rulebase_table.add_row(
+                                *row_values, end_section=True
+                                if table_add_loop == max_replace - 1
+                                else False
+                            )
 
                 if total_replacements:
                     self._console.log(rulebase_table)
