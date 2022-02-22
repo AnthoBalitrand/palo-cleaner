@@ -60,8 +60,8 @@ class PaloCleaner:
         self._removable_objects = list()
         self._tag_referenced = set()
         self._superverbose = kwargs['superverbose']
-        self._max_change_timestamp = int(time.time()) - int(kwargs['max_days_since_change']) * 86400 if kwargs['max_days_since_change'] else None
-        self._max_hit_timestamp = int(time.time()) - int(kwargs['max_days_since_hit']) * 86400 if kwargs['max_days_since_hit'] else None
+        self._max_change_timestamp = int(time.time()) - int(kwargs['max_days_since_change']) * 86400 if kwargs['max_days_since_change'] else 0
+        self._max_hit_timestamp = int(time.time()) - int(kwargs['max_days_since_hit']) * 86400 if kwargs['max_days_since_hit'] else 0
         self._need_opstate = self._max_change_timestamp or self._max_hit_timestamp
         self._console = Console(record=True if not self._no_report else False)
         self._replacements = dict()
@@ -173,23 +173,7 @@ class PaloCleaner:
                 self._console.log(f"{dg.about()['name']} used objects set processed")
                 progress.remove_task(dg_fetch_task)
 
-            """
-            # 26012022 - cleaning only leafs device groups (DG without childs)
-            dg_to_clean = [context_name for context_name, dg in perimeter if not self._reversed_tree.get(context_name)]
-            for context_name in dg_to_clean:
-                dg_optimize_task = progress.add_task(f"{context_name} - Optimizing objects", total=len(self._used_objects_sets[context_name]))
-                self.optimize_address_objects(context_name, progress, dg_optimize_task)
-                self._console.log(f"{context_name} objects optimization done")
-                self.replace_object_in_groups(context_name, progress, dg_optimize_task)
-                self._console.log(f"{context_name} objects replaced in groups")
-                self.replace_object_in_rulebase(context_name, progress, dg_optimize_task)
-                self._console.log(f"{context_name} objects replaced in rulebases")
-                self.clean_local_object_set(context_name, progress, dg_optimize_task)
-                self._console.log(f"{context_name} used objects set cleaned")
-                progress.remove_task(dg_optimize_task)
-            """
-
-            for depth in self._depthed_tree:
+            for depth in sorted(self._depthed_tree, reverse=True):
                 for context_name in self._depthed_tree.get(depth):
                     if context_name in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']:
                         # OBJECTS OPTIMIZATION
@@ -205,10 +189,13 @@ class PaloCleaner:
                         self.replace_object_in_rulebase(context_name, progress, dg_optimize_task)
                         self._console.log(f"{context_name} objects replaced in rulebases")
 
+                        # OBJECTS CLEANING FOR FULLY INCLUDED DEVICE GROUPS
+                        if context_name in self._analysis_perimeter['full']:
+                            self.clean_local_object_set(context_name, progress, dg_optimize_task)
+                            self._console.log(f"{context_name} objects cleaned (fully included)")
+
                         progress.remove_task(dg_optimize_task)
 
-            #self.clean_local_object_set("shared", progress, None)
-        # self.reverse_dg_hierarchy(self.get_pano_dg_hierarchy(), print_result=True)
         if not self._no_report:
             self._console.save_html(self._report_folder+'/report.html')
 
@@ -850,7 +837,6 @@ class PaloCleaner:
 
         return found_upward_objects
 
-
     def find_best_replacement_addr_obj(self, obj_list, base_location):
         """
         Get a list of tuples (object, location) and returns the best to be used based on location and naming criterias
@@ -946,7 +932,7 @@ class PaloCleaner:
                 # if the current object type is AddressObject and exists at the current location level
                 # TODO : find objects at upward locations even if the used object is not local (can be at an intermediate level)
                 # TODO 2 : processing for both types of objects can probably be merged
-                if type(obj) == panos.objects.AddressObject and location == location_name:
+                if type(obj) == panos.objects.AddressObject:
                     # find similar objects (same IP address) on upper level device-groups (including 'shared')
                     upward_objects = self.find_upward_obj_by_addr(location_name, obj.value)
                     # if upward duplicate objects are found
@@ -968,17 +954,18 @@ class PaloCleaner:
                                 'replacement': (replacement_obj, replacement_obj_location),
                                 'blocked': False
                             }
-                elif type(obj) == panos.objects.AddressGroup and location == location_name:
+                elif type(obj) == panos.objects.AddressGroup:
                     upward_objects = self.find_upward_obj_group(location_name, obj)
-                    if upward_objects:
+                    if len(upward_objects) > 1:
                         replacement_obj, replacement_obj_location = upward_objects[0]
-                        self._console.log(
-                            f"   Replacing {obj.about()['name']} ({obj.__class__.__name__}) at location {location_name} by {replacement_obj.about()['name']} at location {replacement_obj_location}")
-                        self._replacements[location_name]['Address'][obj.about()['name']] = {
-                            'source': (obj, location),
-                            'replacement': (replacement_obj, replacement_obj_location),
-                            'blocked': False
-                        }
+                        if replacement_obj != obj:
+                            self._console.log(
+                                f"   Replacing {obj.about()['name']} ({obj.__class__.__name__}) at location {location_name} by {replacement_obj.about()['name']} at location {replacement_obj_location}")
+                            self._replacements[location_name]['Address'][obj.about()['name']] = {
+                                'source': (obj, location),
+                                'replacement': (replacement_obj, replacement_obj_location),
+                                'blocked': False
+                            }
                 progress.update(task, advance=1)
 
     def replace_object_in_groups(self, location_name, progress, task):
@@ -1122,17 +1109,17 @@ class PaloCleaner:
                     replacements_in_rule, replacements_count, max_replace = replace_in_rule(r)
                     if replacements_count:
                         total_replacements += replacements_count
-
+                        rule_counters = dict()
                         # if rule is disabled or if the job does not needs to rely on rule timestamps
                         # or if the hitcounts for a rule cannot be found (ie : new rule not yet pushed on device)
                         # then just consider that the rule can be modified (in_timestamp_boundaries = True)
-                        if r.disabled or not self._need_opstate or not (rule_counters := self._hitcounts.get(location_name, dict()).get(hitcount_rb_name, dict()).get(r.name)):
+                        if (r.disabled or not self._need_opstate or not (rule_counters := self._hitcounts.get(location_name, dict()).get(hitcount_rb_name, dict()).get(r.name))):
                             in_timestamp_boundaries = True
                             rule_modification_timestamp = 0 if self._need_opstate else "N/A"
                             last_hit_timestamp = 0 if self._need_opstate else "N/A"
                         else:
-                            rule_modification_timestamp = rule_counters.get('rule_modification_timestamp')
-                            last_hit_timestamp = rule_counters.get('last_hit_timestamp')
+                            rule_modification_timestamp = rule_counters.get('rule_modification_timestamp', 0)
+                            last_hit_timestamp = rule_counters.get('last_hit_timestamp', 0)
                             # if the rule last modification and last hit timestamps are above the minimums requested,
                             # then consider that it can be updated (in_timestamp_boundaries = True)
                             if rule_modification_timestamp > self._max_change_timestamp and last_hit_timestamp > self._max_hit_timestamp:
@@ -1140,10 +1127,12 @@ class PaloCleaner:
                             # else, for each object used on the rule, protect them to make sure they'll not be deleted later by the job
                             else:
                                 for obj_type, fields in repl_map[type(r)].items():
-                                    for f in [x[0] if type(x) is list else x for x in fields]:
-                                        for object_name in getattr(r, f):
-                                            if object_name in self._replacements[location_name][obj_type]:
-                                                self._replacements[location_name][obj_type][object_name]["blocked"] = True
+                                    for f in fields:
+                                        if (field_values := getattr(r, f[0]) if type(f) is list else [getattr(r, f)]):
+                                            for object_name in field_values:
+                                                if object_name in self._replacements[location_name][obj_type]:
+                                                    self._replacements[location_name][obj_type][object_name][
+                                                        "blocked"] = True
 
                         for table_add_loop in range(max_replace):
                             row_values = list()
@@ -1160,138 +1149,30 @@ class PaloCleaner:
                     self._console.log(rulebase_table)
 
     def clean_local_object_set(self, location_name, progress, task):
+        # removing replaced objects from useed_objects_set for current location_name
         for type in self._replacements.get(location_name, list()):
             for name, infos in self._replacements[location_name][type].items():
                 if not infos['blocked']:
                     try:
                         self._used_objects_sets[location_name].remove(infos['source'])
                         if self._superverbose:
-                            self._console.log(f"[{location_name}] Removing object {name} (location {infos['source'][1]}) from used objects set")
+                            self._console.log(f"[{location_name}] Removing unprotected object {name} (location {infos['source'][1]}) from used objects set")
                     except ValueError:
-                        self._console.log(
-                            f"ValueError when trying to remove {name} from used objects sets at location {location_name} : object not found on object set")
-                    except:
-                        self._console.log(
-                            f"Unknown Error when trying to remove {name} from used objects sets at location {location_name}")
-                else:
-                    self._console.log(f"Not removing {name} as it is blocked by hitcounts at location {location_name}")
+                        self._console.log(f"ValueError when trying to remove {name} from used objects set at location {location_name} : object not found on object set")
+                elif self._superverbose:
+                    self._console.log(f"[{location_name}] Not removing {name} (location {infos['source'][1]}) from used objects set, as protected by hitcount")
+
+        # adding childs device groups objects
+        for child_dg in self._reversed_tree.get(location_name):
+            self._used_objects_sets[location_name] = self._used_objects_sets[location_name].union(set([x for x in self._used_objects_sets[child_dg] if x[1] != child_dg]))
+            if self._superverbose:
+                self._console.log(f"[{location_name}] Added used objects on child {child_dg} before cleaning")
 
         for type in self._objects[location_name]:
             if type != "context":
                 for o in self._objects[location_name][type]:
                     if not (o, location_name) in self._used_objects_sets[location_name]:
                         self._console.log(f"Object {o.name} ({o.__class__.__name__}) can be deleted at location {location_name}")
-
-
-    def replace_object(self, location_name, ref_obj, replacement_obj):
-        """
-        Method in charge of replacing an object wherever it is used on rulebases and groups at a defined location
-        TODO : handle deletion of tags when replaced by shared ones
-
-        :param location_name: (string) Name of the location where the object has been seen used
-        :param ref_obj: ((AddressObject, string)) To-be-replaced object instance and its location name
-        :param replacement_obj: ((AddressObject, string)) Replacement object instance and its location name
-        :return:
-        """
-        """
-        # Get all useful values from replaced and replacement objects
-        ref_obj_instance, ref_obj_location = ref_obj
-        ref_obj_name = ref_obj_instance.about()['name']
-        replacement_obj_instance, replacement_obj_location = replacement_obj
-        replacement_obj_name = replacement_obj_instance.about()['name']
-
-        # If the initial object is referenced on DAGs, make sure to replicate tags on replacement object
-        if ref_obj in self._tag_referenced:
-            ref_obj_instance, ref_obj_location = ref_obj
-            for t in ref_obj_instance.tag:
-                # for each tag in the tag-referenced object, check if this tag exists as a shared object
-                if not any((x for x in self._objects['shared']['tag'] if x.name == t)):
-                    tag_instance, tag_location = self.get_relative_object_location(t, location_name, obj_type="tag")
-                    print(
-                        f'[shared] Create tag {t} (copy from {tag_location}) to be used on ({replacement_obj_name}, {replacement_obj_location})')
-                    try:
-                        if self._apply_cleaning:
-                            self._panorama.add(tag_instance).create()
-                        self._objects['shared']['tag'].append(tag_instance)
-                        self._used_objects_sets['shared'].add((tag_instance, 'shared'))
-                    except Exception as e:
-                        print(f"Exception while creating tag {t} as shared : {e}")
-                print(
-                    f"[{replacement_obj_location}] Adding tag {t} to ({replacement_obj_name}, {replacement_obj_location})")
-                replacement_obj_instance.tag.append(t)
-                if self._apply_cleaning:
-                    replacement_obj_instance.apply()
-        """
-        # If the initial and the replacement objects have different names
-        if ref_obj_name != replacement_obj_name:
-            # fetch all items of the _rulebases cached data for the concerned location
-            for l, rb in self._rulebases[location_name].items():
-                if l == 'context':
-                    continue
-                # for each rule of the current rulebase
-                for r in rb:
-                    replace_in_source = False
-                    replace_in_destination = False
-                    replace_in_source_translation_translated_addresses = False
-                    replace_in_destination_translated_address = False
-                    # check if initial object needs to be replaced in rule source or destination
-                    if ref_obj_name in r.source:
-                        replace_in_source = True
-                    if ref_obj_name in r.destination:
-                        replace_in_destination = True
-                    if 'nat' in l:
-                        if r.source_translation_translated_addresses:
-                            if ref_obj_name in r.source_translation_translated_addresses:
-                                replace_in_source_translation_translated_addresses = True
-                        if r.destination_translated_address:
-                            if ref_obj_name == r.destination_translated_address:
-                                replace_in_destination_translated_address = True
-                    # if object reference needs to be replaced on current rule source, remove initial reference and add new one
-                    if replace_in_source:
-                        r.source.remove(ref_obj_name)
-                        r.source.append(replacement_obj_name)
-                        print(f"    -- Replaced as source on rule {r.name}")
-                        # print(f"{ref_obj_name} (inherited from {ref_obj_location}) has been replaced by {replacement_obj_name} (inherited from {replacement_obj_location}) on rule {r.name} as source")
-                    # if object reference needs to be replacent on current rule destination, remove initial reference and add new one
-                    if replace_in_destination:
-                        r.destination.remove(ref_obj_name)
-                        r.destination.append(replacement_obj_name)
-                        print(f"    -- Replaced as destination on rule {r.name}")
-                        # print(f"{ref_obj_name} (inherited from {ref_obj_location}) has been replaced by {replacement_obj_name} (inherited from {replacement_obj_location}) on rule {r.name} as destination")
-                    if replace_in_source_translation_translated_addresses:
-                        r.source_translation_translated_addresses.remove(ref_obj_name)
-                        r.destination.append(replacement_obj_name)
-                    if replace_in_destination_translated_address:
-                        r.destination_translated_address = replacement_obj_name
-                    # apply change if anything has been changed
-                    if replace_in_source or replace_in_destination or replace_in_source_translation_translated_addresses or replace_in_destination_translated_address:
-                        if self._apply_cleaning:
-                            r.apply()
-            # fetch all AddressGroup objects for the concerned location
-            # after checking that there are existing AddressGroups on this location
-            if self._objects[location_name]['address_group']:
-                for g in self._objects[location_name]['address_group']:
-                    replace = False
-                    # if reference to the initial object is found on the group members
-                    if g.static_value:
-                        if ref_obj_name in g.static_value:
-                            replace = True
-                        # replace the found reference by the new object name
-                        if replace:
-                            g.static_value.remove(ref_obj_name)
-                            g.static_value.append(replacement_obj_name)
-                            print(f"    -- Replaced on static group {g.name}")
-                            # print(f"{ref_obj_name} (inherited from {ref_obj_location} has been replaced by {replacement_obj_name} (inherited from {replacement_obj_location}) on group {g.name}")
-                            # apply change if anything ha been changed
-                            if self._apply_cleaning:
-                                g.apply()
-        # if initial object and replacement objects have the same name, deleting the initial object will make the reference
-        # directly pointing to the replacement object
-        else:
-            print(f"    -- Can be deleted as chosen replacement object has the same name")
-            # print(f"{ref_obj_name} (inherited from {ref_obj_location}) can be deleted and will be directly replaced by same-name object {replacement_obj_name} (inherited from {replacement_obj_location})")
-        # add objects to the deletion list
-        self._removable_objects.append(ref_obj)
 
     def gen_tree_depth(self, input_tree, start='shared', depth=1):
         """
