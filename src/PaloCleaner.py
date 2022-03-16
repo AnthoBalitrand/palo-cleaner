@@ -121,7 +121,8 @@ class PaloCleaner:
                 TimeElapsedColumn(),
                 TextColumn("[progress.description]{task.description}"),
                 console=self._console,
-                transient=True
+                transient=True,
+                disable=self._console.record
         ) as progress:
 
             download_task = progress.add_task("", total=len(perimeter) + 1)
@@ -206,10 +207,10 @@ class PaloCleaner:
 
                         progress.remove_task(dg_optimize_task)
 
+        self._console.log(Panel(self.generate_hierarchy_tree(result=True)))
+
         if not self._no_report:
             self._console.save_html(self._report_folder+'/report.html')
-
-        print(self._cleaning_counts)
 
     def get_devicegroups(self):
         """
@@ -248,7 +249,7 @@ class PaloCleaner:
             if fw.state.connected:
                 self._panorama_devices[getattr(fw, "serial")] = fw
 
-    def generate_hierarchy_tree(self):
+    def generate_hierarchy_tree(self, result=False):
         """
         Reverses the PanoramaDeviceGroupHierarchy dict
         (permits to have list of childs for each parent, instead of parent for each child)
@@ -262,6 +263,9 @@ class PaloCleaner:
             line_value = "+ "
             line_value += "F " if "shared" in self._analysis_perimeter['full'] else "P "
             line_value += "shared"
+            if result and 'shared' in self._analysis_perimeter['full']:
+                line_value += "   "
+                line_value += ' '.join([f"{k} : {v['removed']}/{v['replaced']}" for k, v in self._cleaning_counts['shared'].items()])
             hierarchy_tree = Tree(line_value, style="red")
         elif 'shared' in self._analysis_perimeter['indirect']:
             line_value = "* "
@@ -278,11 +282,19 @@ class PaloCleaner:
                             line_value = "+ "
                             line_value += "F " if d in self._analysis_perimeter['full'] else "P "
                             line_value += d
+                            if result and d in self._analysis_perimeter['full']:
+                                line_value += "   "
+                                line_value += ' '.join([f"{k} : {v['removed']}/{v['replaced']}" for k, v in
+                                                        self._cleaning_counts[d].items()])
                             leaf = tree_branch.add(line_value, style="red")
                         elif d in self._analysis_perimeter['indirect']:
                             line_value = "* "
                             line_value += "F " if d in self._analysis_perimeter['full'] else "P "
                             line_value += d
+                            if result and d in self._analysis_perimeter['full']:
+                                line_value += "   "
+                                line_value += ' '.join([f"{k} : {v['removed']}/{v['replaced']}" for k, v in
+                                                        self._cleaning_counts[d].items()])
                             leaf = tree_branch.add(line_value, style="yellow")
                         else:
                             leaf = tree_branch.add("- " + d, style="green")
@@ -391,10 +403,11 @@ class PaloCleaner:
 
         self._service_valuesearch[location_name] = dict()
         for obj in self._objects[location_name]['Service']:
-            serv_string = self.stringify_service(obj)
-            if serv_string not in self._service_valuesearch[location_name].keys():
-                self._service_valuesearch[location_name][serv_string] = list()
-            self._service_valuesearch[location_name][serv_string].append(obj)
+            if type(obj) is ServiceObject:
+                serv_string = self.stringify_service(obj)
+                if serv_string not in self._service_valuesearch[location_name].keys():
+                    self._service_valuesearch[location_name][serv_string] = list()
+                self._service_valuesearch[location_name][serv_string].append(obj)
 
     def fetch_rulebase(self, context, location_name):
         """
@@ -424,8 +437,11 @@ class PaloCleaner:
 
     def fetch_hitcounts(self, context, location_name):
         dg_firewalls = Firewall.refreshall(context)
-        rulebases = [x.__name__ for x in repl_map]
+        rulebases = [x.__name__.replace('Rule', '').lower() for x in repl_map]
         interest_counters = ["last_hit_timestamp", "rule_modification_timestamp"]
+        # 23022022 - Seems that hit timestamps can only be get from device
+        # while last modification timestamp has to be get from Panorama
+        #interest_counters = ["last_hit_timestamp"]
         self._hitcounts[location_name] = ({x: dict() for x in rulebases})
 
         for fw in dg_firewalls:
@@ -441,11 +457,19 @@ class PaloCleaner:
                 for rulebase in rulebases:
                     ans = rb.opstate.hit_count.refresh(rulebase, all_rules=True)
                     for rule, counters in ans.items():
+                        print(f"{rule} : {counters.last_hit_timestamp} - {counters.rule_modification_timestamp}")
                         if not (res := self._hitcounts[location_name][rulebase].get(rule)):
-                            self._hitcounts[location_name][rulebase][rule] = ({x: getattr(counters, x) for x in interest_counters})
+                            self._hitcounts[location_name][rulebase][rule] = {x: countval if (countval := getattr(counters, x)) else 0 for x in interest_counters}
+                            #print(f"Initialized hit counts for rule {rule}")
+                            #print(self._hitcounts[location_name][rulebase][rule])
                         else:
                             for ic in interest_counters:
-                                self._hitcounts[location_name][rulebase][rule][ic] = max(getattr(res, ic), getattr(counters, ic))
+                                if (countval := getattr(counters, ic)):
+                                    #print(f"For rule {rule} updating counter {ic} from {countval} to {countval} ?")
+                                    self._hitcounts[location_name][rulebase][rule][ic] = max(res[ic], countval)
+        #print(self._hitcounts[location_name])
+        #for rule, hitcounts in self._hitcounts[location_name]['security'].items():
+            #print(f"{rule} : {hitcounts}")
 
     def validate_tiebreak_tag(self):
         """
@@ -809,6 +833,21 @@ class PaloCleaner:
 
         return found_upward_objects
 
+    def find_upward_obj_service_group(self, base_location_name, obj_group):
+        found_upward_objects = list()
+        upward_devicegroup = self._stored_pano_hierarchy.get(base_location_name)
+        if not upward_devicegroup:
+            upward_devicegroup = 'shared'
+        for obj in self._objects[upward_devicegroup]['Service']:
+            if type(obj) is panos.objects.ServiceGroup:
+                if sorted(obj_group.value) == sorted(obj.value):
+                    found_upward_objects.append((obj, upward_devicegroup))
+
+        if upward_devicegroup != 'shared':
+            found_upward_objects += self.find_upward_obj_service_group(upward_devicegroup, obj_group)
+
+        return found_upward_objects
+
     def find_upward_obj_service(self, base_location_name, obj_service):
         obj_service_string = self.stringify_service(obj_service)
         found_upward_objects = list()
@@ -870,10 +909,6 @@ class PaloCleaner:
                             choosen_object = o
                             if self._superverbose:
                                 self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with FQDN naming")
-                if interm_fqdn_obj and not choosen_object:
-                    choosen_object = interm_fqdn_obj[0]
-                    if self._superverbose:
-                        self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object with FQDN naming")
                 # else return the first found shared object
                 if shared_obj and not choosen_object:
                     for o in shared_obj:
@@ -881,26 +916,41 @@ class PaloCleaner:
                             choosen_object = o
                             if self._superverbose:
                                 self._console.log(f"Object {o[0].about()['name']} (context {o[1]}) choosen as it's a shared object")
-                if interm_obj and not choosen_object:
-                    choosen_object = interm_obj[0]
+                if interm_fqdn_obj and not choosen_object:
+                    temp_object_level = 999
+                    for o in interm_fqdn_obj:
+                        location_level = [k for k, v in self._depthed_tree.items() if o[1] in v][0]
+                        if location_level < temp_object_level:
+                            temp_object_level = location_level
+                            choosen_object = o
                     if self._superverbose:
-                        self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object")
+                        self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object with FQDN naming (level = {temp_object_level})")
+                if interm_obj and not choosen_object:
+                    temp_object_level = 999
+                    for o in interm_obj:
+                        location_level = [k for k, v in self._depthed_tree.items() if o[1] in v][0]
+                        if location_level < temp_object_level:
+                            temp_object_level = location_level
+                            choosen_object = o
+                    if self._superverbose:
+                        self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object (level = {temp_object_level})")
         if not choosen_object:
-            print(f"ERROR !!!!!! UNABLE TO CHOSE OBJECT IN LIST {obj_list}")
-        else:
-            if self._apply_tiebreak_tag and not choosen_by_tiebreak:
-                tag_changed = False
-                if choosen_object[0].tag:
-                    if not self._tiebreak_tag in choosen_object[0].tag:
-                        choosen_object[0].tag.append(self._tiebreak_tag)
-                        tag_changed = True
-                else:
-                    choosen_object[0].tag = [self._tiebreak_tag]
+            self._console.log(f"ERROR : Unable to choose an object in the following list for address {obj_list[0][0].value} : {obj_list}. Returning the first one by default", style="red")
+            choosen_object = obj_list[0]
+
+        if self._apply_tiebreak_tag and not choosen_by_tiebreak:
+            tag_changed = False
+            if choosen_object[0].tag:
+                if not self._tiebreak_tag in choosen_object[0].tag:
+                    choosen_object[0].tag.append(self._tiebreak_tag)
                     tag_changed = True
-                if self._superverbose and tag_changed:
-                    self._console.log(f"Adding tiebreak tag {self._tiebreak_tag} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]} ")
-                if self._apply_cleaning and tag_changed:
-                    choosen_object[0].apply()
+            else:
+                choosen_object[0].tag = [self._tiebreak_tag]
+                tag_changed = True
+            if self._superverbose and tag_changed:
+                self._console.log(f"Adding tiebreak tag {self._tiebreak_tag} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]} ")
+            if self._apply_cleaning and tag_changed:
+                choosen_object[0].apply()
 
         return choosen_object
 
@@ -944,11 +994,6 @@ class PaloCleaner:
                             if self._superverbose:
                                 self._console.log(
                                     f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with standard naming")
-                if interm_standard_obj and not choosen_object:
-                    choosen_object = interm_standard_obj[0]
-                    if self._superverbose:
-                        self._console.log(
-                            f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object with standard naming")
                 if shared_obj and not choosen_object:
                     for o in shared_obj:
                         if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_obj]:
@@ -956,28 +1001,44 @@ class PaloCleaner:
                             if self._superverbose:
                                 self._console.log(
                                     f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object")
-                if interm_obj and not choosen_object:
-                    choosen_object = interm_obj[0]
+                if interm_standard_obj and not choosen_object:
+                    temp_object_level = 999
+                    for o in interm_standard_obj:
+                        location_level = [k for k, v in self._depthed_tree.items() if o[1] in v][0]
+                        if location_level < temp_object_level:
+                            temp_object_level = location_level
+                            choosen_object = o
                     if self._superverbose:
                         self._console.log(
-                            f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object")
+                            f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object with standard naming (level = {temp_object_level})")
+                if interm_obj and not choosen_object:
+                    temp_object_level = 999
+                    for o in interm_obj:
+                        location_level = [k for k, v in self._depthed_tree.items() if o[1] in v][0]
+                        if location_level < temp_object_level:
+                            temp_object_level = location_level
+                            choosen_object = o
+                    if self._superverbose:
+                        self._console.log(
+                            f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object (level = {temp_object_level})")
         if not choosen_object:
-            print(f"ERROR !!!!!!! UNABLE TO CHOOSE SERVICE IN LIST {obj_list}")
-        else:
-            if self._apply_tiebreak_tag and not choosen_by_tiebreak:
-                tag_changed = False
-                if choosen_object[0].tag:
-                    if not self._tiebreak_tag in choosen_object[0].tag:
-                        choosen_object[0].tag.append(self._tiebreak_tag)
-                        tag_changed = True
-                else:
-                    choosen_object[0].tag = [self._tiebreak_tag]
+            self._console.log(f"ERROR : Unable to choose an object in the following list for service {self.stringify_service(obj_list[0][0])} : {obj_list}. Returning the first one by default", style="red")
+            choosen_object = obj_list[0]
+
+        if self._apply_tiebreak_tag and not choosen_by_tiebreak:
+            tag_changed = False
+            if choosen_object[0].tag:
+                if not self._tiebreak_tag in choosen_object[0].tag:
+                    choosen_object[0].tag.append(self._tiebreak_tag)
                     tag_changed = True
-                if self._superverbose and tag_changed:
-                    self._console.log(
-                        f"Adding tiebreak tag {self._tiebreak_tag} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]}")
-                if self._apply_cleaning and tag_changed:
-                    choosen_object[0].apply()
+            else:
+                choosen_object[0].tag = [self._tiebreak_tag]
+                tag_changed = True
+            if self._superverbose and tag_changed:
+                self._console.log(
+                    f"Adding tiebreak tag {self._tiebreak_tag} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]}")
+            if self._apply_cleaning and tag_changed:
+                choosen_object[0].apply()
 
         return choosen_object
 
@@ -991,7 +1052,13 @@ class PaloCleaner:
 
         # for each object and location found on the _used_objects_set for the current location
         self._replacements[location_name] = {'Address': dict(), 'Service': dict(), 'Tag': dict()}
-        find_maps = {AddressObject: self.find_upward_obj_by_addr, AddressGroup: self.find_upward_obj_group, ServiceObject: self.find_upward_obj_service}
+        find_maps = {
+            AddressObject: self.find_upward_obj_by_addr,
+            AddressGroup: self.find_upward_obj_group,
+            ServiceObject: self.find_upward_obj_service,
+            ServiceGroup: self.find_upward_obj_service_group
+        }
+
         for obj_type in [panos.objects.AddressObject, panos.objects.AddressGroup, panos.objects.ServiceObject]:
             # TODO : check performance of the following statement
             for (obj, location) in [(o, l) for (o, l) in self._used_objects_sets[location_name] if type(o) is obj_type]:
@@ -1016,7 +1083,7 @@ class PaloCleaner:
                                 'replacement': (replacement_obj, replacement_obj_location),
                                 'blocked': False
                             }
-                        elif type(obj) is ServiceObject:
+                        elif type(obj) in [ServiceObject, ServiceGroup]:
                             self._replacements[location_name]['Service'][obj.about()['name']] = {
                                 'source': (obj, location),
                                 'replacement': (replacement_obj, replacement_obj_location),
@@ -1110,12 +1177,12 @@ class PaloCleaner:
             max_replace = 0
             for obj_type in repl_map.get(type(rule)):
                 replacements_done[obj_type] = dict()
-                for field_name in [x[0] if type(x) is list else x for x in repl_map[type(rule)][obj_type]]:
+                for field_name, field_type in [(x[0], list) if type(x) is list else (x, str) for x in repl_map[type(rule)][obj_type]]:
                     replacements_done[obj_type][field_name] = list()
                     current_field_replacements_count = 0
                     # TODO : adapt check to field type (not list ??)
                     if (not_null_field := getattr(rule, field_name)):
-                        for o in not_null_field:
+                        for o in not_null_field if field_type is list else [not_null_field]:
                             if (replacement := self._replacements[location_name][obj_type].get(o)):
                                 #source obj_instance, source_obj_location = replacement['source']
                                 replacement_obj_instance, replacement_obj_location = replacement['replacement']
@@ -1149,7 +1216,7 @@ class PaloCleaner:
         for rulebase_name, rulebase in self._rulebases[location_name].items():
             if rulebase_name != "context" and len(rulebase) > 0:
                 total_replacements = 0
-                hitcount_rb_name = rulebase_name.split('_')[1]
+                hitcount_rb_name = rulebase_name.split('_')[1].replace('Rule', '').lower()
 
                 rulebase_table = Table(
                     title=f"{location_name} : {rulebase_name} (len : {len(rulebase)})",
@@ -1202,7 +1269,10 @@ class PaloCleaner:
                                     )
                             row_values.append(str(rule_modification_timestamp) if table_add_loop == 0 else "")
                             row_values.append(str(last_hit_timestamp) if table_add_loop == 0 else "")
-                            row_values.append("Y" if in_timestamp_boundaries else "N")
+                            if table_add_loop == 0:
+                                row_values.append("Y" if in_timestamp_boundaries else "N")
+                            else:
+                                row_values.append("")
                             rulebase_table.add_row(
                                 *row_values, end_section=True
                                 if table_add_loop == max_replace - 1
@@ -1221,9 +1291,10 @@ class PaloCleaner:
                 if not infos['blocked']:
                     try:
                         self._used_objects_sets[location_name].remove(infos['source'])
+                        self._used_objects_sets[location_name].add(infos['replacement'])
                         if self._superverbose:
                             self._console.log(f"[{location_name}] Removing unprotected object {name} (location {infos['source'][1]}) from used objects set")
-                        if infos['source'][1] == location_name:
+                        if infos['source'][1] == location_name and infos['source'][0].name != infos['replacement'][0].name:
                             self._cleaning_counts[location_name][type]['replaced'] += 1
                     except ValueError:
                         self._console.log(f"ValueError when trying to remove {name} from used objects set at location {location_name} : object not found on object set")
