@@ -443,6 +443,17 @@ class PaloCleaner:
         # while last modification timestamp has to be get from Panorama
         #interest_counters = ["last_hit_timestamp"]
         self._hitcounts[location_name] = ({x: dict() for x in rulebases})
+        min_member_major_version = 0
+
+        def populate_hitcounts(rulebase_name, opstate):
+            for rule, counters in opstate.items():
+                if not (res := self._hitcounts[location_name][rulebase_name].get(rule)):
+                    self._hitcounts[location_name][rulebase_name][rule] = {
+                        x: countval if (countval := getattr(counters, x)) else 0 for x in interest_counters}
+                else:
+                    for ic in interest_counters:
+                        if (countval := getattr(counters, ic)):
+                            self._hitcounts[location_name][rulebase_name][rule][ic] = max(res[ic], countval)
 
         for fw in dg_firewalls:
             device = self._panorama_devices.get(getattr(fw, "serial"))
@@ -451,25 +462,27 @@ class PaloCleaner:
                 fw_ip = system_settings.ip_address
                 fw_vsys = getattr(fw, "vsys")
                 fw_conn = Firewall(fw_ip, self._panorama_user, self._panorama_password, vsys=fw_vsys)
-                print(f"Connecting to device {fw_ip} on vsys {fw_vsys} ({location_name})")
+                # TODO : timeout connection + retry ?
+                self._console.log(f"Connecting to firewall {fw_ip} on vsys {fw_vsys} ({location_name})")
+                fw_panos_version = fw_conn.refresh_system_info().version
+                if (current_major_version := int(fw_panos_version.split('.')[0])) > min_member_major_version:
+                    min_member_major_version = current_major_version
+                if self._superverbose:
+                    self._console.log(f"Detected PAN-OS version on {fw_ip} : {fw_panos_version}")
                 rb = Rulebase()
                 fw_conn.add(rb)
                 for rulebase in rulebases:
                     ans = rb.opstate.hit_count.refresh(rulebase, all_rules=True)
-                    for rule, counters in ans.items():
-                        print(f"{rule} : {counters.last_hit_timestamp} - {counters.rule_modification_timestamp}")
-                        if not (res := self._hitcounts[location_name][rulebase].get(rule)):
-                            self._hitcounts[location_name][rulebase][rule] = {x: countval if (countval := getattr(counters, x)) else 0 for x in interest_counters}
-                            #print(f"Initialized hit counts for rule {rule}")
-                            #print(self._hitcounts[location_name][rulebase][rule])
-                        else:
-                            for ic in interest_counters:
-                                if (countval := getattr(counters, ic)):
-                                    #print(f"For rule {rule} updating counter {ic} from {countval} to {countval} ?")
-                                    self._hitcounts[location_name][rulebase][rule][ic] = max(res[ic], countval)
-        #print(self._hitcounts[location_name])
-        #for rule, hitcounts in self._hitcounts[location_name]['security'].items():
-            #print(f"{rule} : {hitcounts}")
+                    populate_hitcounts(rulebase, ans)
+
+        if min_member_major_version < 9:
+            # if we did not found any member firewall with PANOS >= 9, we need to get the rule modification timestamp from Panorama for this context
+            self._console.log(f"Not found any member with PAN-OS version >= 9 for context {location_name}. Getting rule modification timestamp from Panorama")
+            for rb_type in [PreRulebase(), PostRulebase()]:
+                context.add(rb_type)
+                for rulebase in rulebases:
+                    ans = rb_type.opstate.hit_count.refresh(rulebase, all_rules=True)
+                    populate_hitcounts(rulebase, ans)
 
     def validate_tiebreak_tag(self):
         """
@@ -1132,10 +1145,11 @@ class PaloCleaner:
                             matched = True
 
                         if matched:
-                            self._console.log(f"    [{location_name}] Replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} on {checked_object.about()['name']!r} ({checked_object.__class__.__name__})", style="yellow italic")
+                            if self._superverbose:
+                                self._console.log(f"    [{location_name}] Replacing {source_obj_instance.about()['name']!r} ({source_obj_location}) by {replacement_obj_instance.about()['name']!r} ({replacement_obj_location}) on {checked_object.about()['name']!r} ({checked_object.__class__.__name__})", style="yellow italic")
                             if checked_object.name not in replacements_done:
                                 replacements_done[checked_object.name] = list()
-                            replacements_done[checked_object.name].append((source_obj_instance.about()['name'], replacement_obj_instance.about()['name']))
+                            replacements_done[checked_object.name].append((source_obj_instance.about()['name'], source_obj_location, replacement_obj_instance.about()['name'], replacement_obj_location))
                     except ValueError:
                         continue
                     except Exception as e:
@@ -1147,11 +1161,11 @@ class PaloCleaner:
             group_table = Table(style="dim", border_style="not dim", expand=False)
             group_table.add_column(changed_group_name)
             for replaced_item in replacements_done[changed_group_name]:
-                if replaced_item[0] != replaced_item[1]:
-                    group_table.add_row(f"[red]- {replaced_item[0]}[/red]")
-                    group_table.add_row(f"[green]+ {replaced_item[1]}[/green]")
+                if replaced_item[0] != replaced_item[2]:
+                    group_table.add_row(f"[red]- {replaced_item[0]} ({replaced_item[1]})[/red]")
+                    group_table.add_row(f"[green]+ {replaced_item[2]} ({replaced_item[3]})[/green]")
                 else:
-                    group_table.add_row(f"[yellow]! {replaced_item[0]}[/yellow]")
+                    group_table.add_row(f"[yellow]! {replaced_item[0]} ({replaced_item[1]} --> {replaced_item[3]})[/yellow]")
             self._console.log(group_table)
 
     def replace_object_in_rulebase(self, location_name, progress, task):
@@ -1274,9 +1288,9 @@ class PaloCleaner:
                             else:
                                 row_values.append("")
                             rulebase_table.add_row(
-                                *row_values, end_section=True
-                                if table_add_loop == max_replace - 1
-                                else False
+                                *row_values,
+                                end_section=True if table_add_loop == max_replace - 1 else False,
+                                style="dim" if r.disabled else None,
                             )
 
                 if total_replacements:
