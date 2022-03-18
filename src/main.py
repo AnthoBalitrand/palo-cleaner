@@ -1,5 +1,6 @@
-import getpass
 import argparse
+import os
+import time
 from PaloCleaner import PaloCleaner
 
 def parse_cli_args():
@@ -30,19 +31,62 @@ def parse_cli_args():
     parser.add_argument(
         "--api-password",
         action = "store",
-        help = "Password to use for API connection to Panorama"
+        help = "Password to use for API connection to Panorama",
+        default = ""
     )
 
     parser.add_argument(
         "--apply-cleaning",
         action = "store_true",
-        help = "Apply cleaning operation"
+        help = "Apply cleaning operation",
+        default = False,
     )
 
     parser.add_argument(
         "--delete-upward-objects",
         action = "store_true",
         help = "Deletes upward unused objects (shared + intermediates) if all childs are analyzed"
+    )
+
+    parser.add_argument(
+        "--superverbose",
+        action = "store_true",
+        help = "Enables super-verbose logs. WARNING --> lots of outputs to STDOUT !"
+    )
+
+    parser.add_argument(
+        "--max-days-since-change",
+        action = "store",
+        help = "Don't apply any change to rules not having be modified since more than X days",
+        default = 0
+    )
+
+    parser.add_argument(
+        "--max-days-since-hit",
+        action = "store",
+        help = "Don't apply any change to rules not being hit since more than X days",
+        default = 0,
+    )
+
+    parser.add_argument(
+        "--tiebreak-tag",
+        action = "store",
+        help = "Tag used to choose preferred replacement object in case of multiple ones (overrides default choice)",
+        default = None,
+    )
+
+    parser.add_argument(
+        "--apply-tiebreak-tag",
+        action = "store_true",
+        help = "Applies the tag defined on the --tiebreak-tag argument to objects choosen by the choice algorithm",
+        default = False,
+    )
+
+    parser.add_argument(
+        "--no-report" ,
+        action = "store_true",
+        help = "Does not generates job reports",
+        default = False,
     )
 
     return parser.parse_args()
@@ -52,58 +96,23 @@ def main():
     # Get script start parameters list and values
     start_cli_args = parse_cli_args()
 
-    # If password has not been provided in the command arguments, ask for it with getpass.getpass
-    if not start_cli_args.api_password:
-        pano_api_password = getpass.getpass(f"Password for API user {start_cli_args.api_user} : ")
-    else:
-        pano_api_password = start_cli_args.api_password
+    # if the --apply-tiebreak-tag has been used without the --tiebreak-tag argument value, raise en error and exit
+    if start_cli_args.apply_tiebreak_tag and not start_cli_args.tiebreak_tag:
+        print("\n ERROR - --apply-tiebreak-tag has been called without --tiebreak-tag \n")
+        exit(0)
+
+    # create the report directory if requested
+    report_folder = None
+    if not start_cli_args.no_report:
+        report_folder = os.path.dirname(os.path.abspath(__file__)).replace('/src', '')
+        report_folder += '/reports/'
+        report_folder += str(int(time.time()))
+        print(f"Report folder will be {report_folder}")
+        os.mkdir(report_folder)
 
     # Instantiate the PaloCleaner object (connection to Panorama)
-    cleaner = PaloCleaner(start_cli_args.panorama_url,
-                start_cli_args.api_user,
-                pano_api_password,
-                start_cli_args.device_groups,
-                start_cli_args.apply_cleaning)
-
-    # Print and get the reverse DG hierarchy parsed on Panorama
-    reversed_tree = cleaner.reverse_dg_hierarchy(cleaner.get_pano_dg_hierarchy(), print_result=True)
-
-    analysis_perimeter = cleaner.get_perimeter(reversed_tree)
-
-    # Download objects and rulebase for Panorama (shared context)
-    print("\n\nDownloading Panorama objects... ", end="")
-    cleaner.fetch_objects(cleaner._panorama, 'shared')
-    print("Downloading Panorama predefined objects... ", end="")
-    cleaner.fetch_objects(cleaner._panorama, 'predefined')
-    print("Downloading Panorama rulebases... ", end="")
-    cleaner.fetch_rulebase(cleaner._panorama, 'shared')
-
-    # Download objects and rulebase for all device groups
-    for dg in cleaner.get_devicegroups():
-        context_name = dg.about()['name']
-        if context_name in analysis_perimeter['direct'] + analysis_perimeter['indirect']:
-            print(f"Downloading {context_name} objects... ", end="")
-            cleaner.fetch_objects(dg, context_name)
-            print(f"Downloading {context_name} rulebases... ", end="")
-            cleaner.fetch_rulebase(dg, context_name)
-
-    # Get used address objects set for Panorama (shared context)
-    print(f"Parsing used address objects set for shared... ", end="")
-    cleaner.fetch_address_obj_set('shared', )
-
-    # Get used address objects set for all device groups
-    for dg in cleaner.get_devicegroups():
-        if dg.about()['name'] in analysis_perimeter['direct'] + analysis_perimeter['indirect']:
-            print(f"Parsing used address objects set for {dg}... ", end="")
-            cleaner.fetch_address_obj_set(dg.about()['name'])
-
-    # Start objects optimization for all DeviceGroup not having child
-    for dg in [k for k, v in cleaner.reverse_dg_hierarchy(cleaner.get_pano_dg_hierarchy()).items() if not v]:
-        if dg in analysis_perimeter['direct'] + analysis_perimeter['indirect']:
-            print(f"Starting objects optimization processing for {dg}")
-            cleaner.optimize_address_objects(dg)
-
-    cleaner.remove_objects(analysis_perimeter, start_cli_args.delete_upward_objects)
+    cleaner = PaloCleaner(report_folder, **start_cli_args.__dict__)
+    cleaner.start()
 
 # entry point
 if __name__ == "__main__":
