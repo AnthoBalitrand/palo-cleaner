@@ -17,6 +17,11 @@ from panos.device import SystemSettings
 import re
 import time
 
+"""
+Below is a representation of the different types of rules being processed, and for each of them, the name of each 
+field (+ format : string "" or ["list"]) containing each type of object 
+"""
+
 repl_map = {
     SecurityRule: {
         "Address": [["source"], ["destination"]],
@@ -38,6 +43,13 @@ repl_map = {
 
 class PaloCleaner:
     def __init__(self, report_folder, **kwargs):
+        """
+        PaloCleaner class initialization function
+
+        :param report_folder: (string) The path to the folder where to store the operation report
+        :param kwargs: (dict) Dict of arguments provided by argparse
+        """
+
         self._panorama_url = kwargs['panorama_url']
         self._panorama_user = kwargs['api_user']
         self._panorama_password = kwargs['api_password']
@@ -71,6 +83,11 @@ class PaloCleaner:
         self._cleaning_counts = dict()
 
     def start(self):
+        """
+        First function called after __init__, which starts the processing
+
+        :return:
+        """
         header_text = Text("""
 
   ___      _        ___ _                       
@@ -82,9 +99,12 @@ class PaloCleaner:
 
 """)
         self._console.print(header_text, style="green", justify="left")
+
+        # if the API user password has not been provided within the CLI start command, prompt the user
         while self._panorama_password == "":
             self._panorama_password = Prompt.ask(f"Please provide the password for API user {self._panorama_user!r} ",
                                                  password=True)
+
         with self._console.status("Connecting to Panorama...", spinner="dots12") as status:
             try:
                 self._panorama = Panorama(self._panorama_url, self._panorama_user, self._panorama_password)
@@ -98,6 +118,9 @@ class PaloCleaner:
                 self._console.log("Unknown error occurred while connecting to Panorama", style="red")
                 return 0
 
+            # get the full device-groups hierarchy and displays is in the console with color code to identity which
+            # device-groups will be concerned by the cleaning process
+
             status.update("Parsing device groups list")
             hierarchy_tree = self.generate_hierarchy_tree()
             time.sleep(1)
@@ -110,6 +133,7 @@ class PaloCleaner:
             self._console.log(Panel(hierarchy_tree))
             time.sleep(1)
 
+        # "perimeter" is a list containing the name only of each device-group included in the cleaning process
         perimeter = [(dg.about()['name'], dg) for dg in self.get_devicegroups() if
                      dg.about()['name'] in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']]
 
@@ -153,7 +177,9 @@ class PaloCleaner:
                 progress.update(download_task, description=f"Downloading {context_name} rulebases")
                 self.fetch_rulebase(dg, context_name)
                 self._console.log(f"{context_name} rulebases downloaded ({self.count_rules(context_name)} rules found)")
-                # downloading hitcounts for leafs
+
+                # if opstate (hit counts) has to be cared, download to each device member of the device-group
+                # if this device-group has no child device-group
                 if self._need_opstate and not self._reversed_tree.get(context_name):
                     progress.update(
                         download_task,
@@ -224,8 +250,7 @@ class PaloCleaner:
     def get_pano_dg_hierarchy(self):
         """
         Get DeviceGroupHierarchy from Panorama
-        Returns cached value if already called
-        :return: (dict)
+        :return:
         """
 
         if not self._stored_pano_hierarchy:
@@ -244,6 +269,11 @@ class PaloCleaner:
             self.gen_tree_depth(self._reversed_tree)
 
     def get_panorama_managed_devices(self):
+        """
+        Get the list of managed devices by Panorama
+        And stores it in a dict where they key is the firewall SN, and the value is the panos.Firewall object
+        :return:
+        """
         devices = self._panorama.refresh_devices(expand_vsys=False, include_device_groups=False)
         for fw in devices:
             if fw.state.connected:
@@ -339,6 +369,13 @@ class PaloCleaner:
         return {'direct': directly_included, 'indirect': indirectly_included, 'full': fully_included}
 
     def count_objects(self, location_name):
+        """
+        Returns the global count of all objects (Address, Tag, Service) for the provided location
+
+        :param location_name: (string) Name of the location (shared or device-group name) where to count objects
+        :return: (int) Total number of objects for the requested location
+        """
+
         counter = 0
         try:
             for t, l in self._objects.get(location_name, dict()).items():
@@ -347,6 +384,13 @@ class PaloCleaner:
             return counter
 
     def count_rules(self, location_name):
+        """
+        Returns the global count of all rules for all rulebases for the provided location
+
+        :param location_name: (string) Name of the location (shared or device-group) where to count the rules
+        :return: (int) Total number of rules for the requested location
+        """
+
         counter = 0
         try:
             for b, l in self._rulebases.get(location_name, dict()).items():
@@ -436,6 +480,19 @@ class PaloCleaner:
                 context.remove(rb)
 
     def fetch_hitcounts(self, context, location_name):
+        """
+        Get the hitcounts for all rules at the requested location
+        last_hit_timestamp can only be get from the devices (not from Panorama)
+        rule_modification_timestamp can be get from the devices running PAN-OS 9+
+
+        If no devices are running PAN-OS 9+ for the concerned device-group, the rule_modification_timestamps
+        is get from Panorama
+
+        :param context: (panos.DeviceGroup) DeviceGroup object
+        :param location_name: (string) The location name (= DeviceGroup name)
+        :return:
+        """
+
         dg_firewalls = Firewall.refreshall(context)
         rulebases = [x.__name__.replace('Rule', '').lower() for x in repl_map]
         interest_counters = ["last_hit_timestamp", "rule_modification_timestamp"]
@@ -1198,22 +1255,22 @@ class PaloCleaner:
                     if (not_null_field := getattr(rule, field_name)):
                         for o in not_null_field if field_type is list else [not_null_field]:
                             if (replacement := self._replacements[location_name][obj_type].get(o)):
-                                #source obj_instance, source_obj_location = replacement['source']
+                                source_obj_instance, source_obj_location = replacement['source']
                                 replacement_obj_instance, replacement_obj_location = replacement['replacement']
                                 if o != (repl_name := replacement_obj_instance.about()['name']):
                                     # replacement type 2 = removed
                                     # replacement type 3 = added
-                                    replacements_done[obj_type][field_name].append((o, 2))
-                                    replacements_done[obj_type][field_name].append((repl_name, 3))
+                                    replacements_done[obj_type][field_name].append((f"{o} ({source_obj_location})", 2))
+                                    replacements_done[obj_type][field_name].append((f"{repl_name} ({replacement_obj_location})", 3))
                                     current_field_replacements_count += 2
                                 else:
                                     # replacement type 1 = same name different location
-                                    replacements_done[obj_type][field_name].append((o, 1))
+                                    replacements_done[obj_type][field_name].append((f"{o} ({source_obj_location} --> {replacement_obj_location})", 1))
                                     current_field_replacements_count += 1
                                 replacements_count += 1
                             else:
                                 # replacement type 0 = no replacement
-                                replacements_done[obj_type][field_name].append((o, 0))
+                                replacements_done[obj_type][field_name].append((f"{o}", 0))
                                 current_field_replacements_count += 1
                     if current_field_replacements_count > max_replace:
                         max_replace = current_field_replacements_count
