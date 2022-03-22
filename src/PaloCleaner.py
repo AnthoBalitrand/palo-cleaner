@@ -178,7 +178,7 @@ class PaloCleaner:
                 self.fetch_rulebase(dg, context_name)
                 self._console.log(f"{context_name} rulebases downloaded ({self.count_rules(context_name)} rules found)")
 
-                # if opstate (hit counts) has to be cared, download to each device member of the device-group
+                # if opstate (hit counts) has to be cared, download on each device member of the device-group
                 # if this device-group has no child device-group
                 if self._need_opstate and not self._reversed_tree.get(context_name):
                     progress.update(
@@ -192,9 +192,10 @@ class PaloCleaner:
 
             progress.remove_task(download_task)
 
+            # Processing used objects set at location "shared"
             shared_fetch_task = progress.add_task("Shared - Processing used objects location",
                                                   total=self.count_rules('shared'))
-            self.fetch_address_obj_set("shared", progress, shared_fetch_task)
+            self.fetch_used_obj_set("shared", progress, shared_fetch_task)
             self._console.log("shared used objects set processed")
             progress.remove_task(shared_fetch_task)
 
@@ -203,7 +204,7 @@ class PaloCleaner:
                     f"{dg.about()['name']} - Processing used objects location",
                     total=self.count_rules(dg.about()['name'])
                 )
-                self.fetch_address_obj_set(dg.about()['name'], progress, dg_fetch_task)
+                self.fetch_used_obj_set(dg.about()['name'], progress, dg_fetch_task)
                 self._console.log(f"{dg.about()['name']} used objects set processed")
                 progress.remove_task(dg_fetch_task)
 
@@ -639,9 +640,20 @@ class PaloCleaner:
         # return list of tuples containing all found objects and their respective location
         return found_objects
 
-    def fetch_address_obj_set(self, location_name, progress, task):
+    def fetch_used_obj_set(self, location_name, progress, task):
+        """
+        This function generates a "set" of used objects of each type (Address, AddressGroup, Tag, Service, ServiceGroup...)
+        at each requested location.
+        This set is a set of tuples of (panos.Object, location (str))
+        Group objects are explored (recursively) to find all members, which are of course also considered as used.
 
-        def gen_condition_expression(condition_string, field_name):
+        :param location_name: (str) The location name where to start used objects exploration
+        :param progress: (rich.Progress) The rich Progress object to update during progression
+        :param task: (rich.Task) The rich Task object to update during progression
+        :return:
+        """
+
+        def gen_condition_expression(condition_string: str, field_name: str):
             """
             Transforms a DAG objects match condition in an executable python statement
             :param condition_string: (string) Condition got from the DAG object
@@ -655,11 +667,18 @@ class PaloCleaner:
             condition = "cond_expr_result = " + condition2
             return condition
 
-        def shorten_object_type(object_type):
+        def shorten_object_type(object_type: str):
+            """
+            (Overkill function) which returns a panos.Object type, after removing the "Group" and "Object" characters
+
+            :param object_type: (str) panos.Object.__class__.__name__
+            :return: (str) the panos.Object type name without "Group" nor "Object"
+            """
+
             return object_type.replace('Group', '').replace('Object', '')
 
         def flatten_object(used_object: panos.objects, object_location: str, usage_base: str,
-                           referencer_type: str = None, referencer_name: str = None, recursion_level: int = 1, ):
+                           referencer_type: str = None, referencer_name: str = None, recursion_level: int = 1):
             """
             Recursively called function, charged of returning the obj_set (list of (panos.objects, location)) for a given rule
             (first call is from a loop iterating over the different rules of a rulebase at a given location)
@@ -668,15 +687,20 @@ class PaloCleaner:
 
             :param used_object: (panos.object) The used object (found with get_relative_object_location)
             :param object_location: (string) The location where the used objects has been found by get_relative_object_location
-            :param usage_base: (string) The location where the object has been found used
+            :param usage_base: (string) The location where the object has been found used (from where it has to be flattened)
             :param referencer_type: (string) The type (class.__name__) of the object where the reference to used_object has been found
-            :param referencer_name: (string) The name of the where the reference to used_object has been found
+            :param referencer_name: (string) The name of the object where the reference to used_object has been found
+                (can be a rule, an AddressGroup...)
+            :param recursion_level: (int) The level of recursion for this call to the flatten_object function
+                (is used for log outputs, prepending * recursion_level times at the beginning of each log message)
+            :return:
             """
 
+            # Initializes an empty list which will contain tuples of (panos.Object, location_name) of the flattened group content
             obj_set = list()
 
-            # If used_object has been resolved at the time of calling the flatten_object function, mark it as resolved (in cache) for the "usage_base" location (adding its name)
-            # and add the (object, location) tuple to the obj_set list
+            # If used_object has been resolved at the time of calling the flatten_object function, mark it as resolved
+            # (in cache) for the "usage_base" location (adding its name) and add the (object, location) tuple to the obj_set list
             if not isinstance(used_object, type(None)):
                 if self._superverbose:
                     self._console.log(
@@ -685,9 +709,11 @@ class PaloCleaner:
                 resolved_cache[usage_base][shorten_object_type(used_object.__class__.__name__)].append(
                     used_object.name)
 
+                # adding the resolved (used_object, object_location) itself to the obj_set list
                 obj_set.append((used_object, object_location))
 
-            # if the resolved object is a "simple" object (not needing recursive search), just display a log indicating that search is over
+            # if the resolved object is a "simple" object (not needing recursive search), just display a log indicating
+            # that search is over for this one
             if type(used_object) in [panos.objects.AddressObject, panos.objects.ServiceObject, panos.objects.Tag]:
                 if self._superverbose:
                     self._console.log(
@@ -695,13 +721,19 @@ class PaloCleaner:
                         style="green italic")
 
             # if the resolved object needs recursive search for members (AddressGroup), let's go
+            # here for an AddressGroup
             elif type(used_object) is panos.objects.AddressGroup:
-                # in case of a static group, just call the flatten_object function recursively for each member (which can be only at the group level or below)
+                # in case of a static group, just call the flatten_object function recursively for each member
+                # (which can be only at the group level or below)
                 if used_object.static_value:
                     if self._superverbose:
                         self._console.log(
                             f"  {'*' * recursion_level} Object {used_object.name!r} (static AddressGroup) used on {usage_base!r} (ref by {referencer_type} {referencer_name!r}) has been found on location {object_location}",
                             style="green italic")
+
+                    # for each static group member, call the current function recursively
+                    # (if the member has not already been resolved for the current location, which means that it would
+                    # already have been flattened)
                     for group_member in used_object.static_value:
                         if group_member not in resolved_cache[usage_base]['Address']:
                             if self._superverbose:
@@ -709,10 +741,20 @@ class PaloCleaner:
                                     f"  {'*' * recursion_level} Found group member of AddressGroup {used_object.name!r} : {group_member!r}",
                                     style="green italic")
 
-                            obj_set += flatten_object(*self.get_relative_object_location(group_member,
-                                                                                         usage_base),
-                                                      usage_base, used_object.__class__.__name__, used_object.name,
-                                                      recursion_level + 1)
+                            # call to the flatten_object function with the following parameters :
+                            # panos.Object found for the requested object name (returned by a call to get_relative_object_location)
+                            # location of this object (returned by a call to get_relative_object_location)
+                            # usage_base = the location where the object is used (can be below the real location of the object)
+                            # used_object.__class__.__name__ = the object type where the member has been found used (AddressGroup, actually)
+                            # used_object.name = the name of the object where the member has been found (= the group name, actually)
+                            # recursion_level = the current recursion_level + 1
+
+                            obj_set += flatten_object(
+                                *self.get_relative_object_location(group_member,usage_base),
+                                usage_base,
+                                used_object.__class__.__name__,
+                                used_object.name,
+                                recursion_level + 1)
 
                     # TODO : find a way to protect upward group members for modification if they are overriden below
                     """
@@ -726,24 +768,50 @@ class PaloCleaner:
                                                   referencer_name, recursion_level)
                     """
 
-                # in case of a dynamic group, the group condition is converted to an executable Python statement, for members to be found using their tags
+                # in case of a dynamic group, the group condition is converted to an executable Python statement,
+                # for members to be found using their tags
                 # for dynamic groups, members can be at any location, upward starting from the usage_base location
                 elif used_object.dynamic_value:
                     if self._superverbose:
                         self._console.log(
                             f"  {'*' * recursion_level} Object {used_object.name!r} (dynamic AddressGroup) used on {usage_base!r} (ref by {referencer_type} {referencer_name!r}) has been found on location {object_location}",
                             style="green italic")
+
+                    # call to the gen_condition_expression function, which will convert the DAG value into an executable
+                    # python condition
                     executable_condition = gen_condition_expression(used_object.dynamic_value, "obj_tags")
+
+                    # for each object matched by the get_relative_object_location_by_tag (using the generated Python expression)
+                    # (= for each object matched by the DAG)
                     for referenced_object, referenced_object_location in self.get_relative_object_location_by_tag(
                             executable_condition, usage_base):
                         if self._superverbose:
                             self._console.log(
                                 f"  {'*' * recursion_level} Found group member of dynamic AddressGroup {used_object.name!r} : {referenced_object.name!r}",
                                 style="green italic")
+
+                        # for each dynamic group member, call the current function recursively
+                        # (if the member has not already been resolved for the current location, which means that it would
+                        # already have been flattened)
                         if referenced_object.name not in resolved_cache[usage_base]['Address']:
-                            obj_set += flatten_object(referenced_object, referenced_object_location, usage_base,
-                                                      used_object.__class__.__name__, used_object.name,
-                                                      recursion_level + 1)
+                            # call to the flatten_object function with the following parameters :
+                            # referenced_object = the panos.Object found by the get_relative_object_location_by_tag
+                            # referenced_object_location = the location of this object (returned by a call to get_relative_object_location_by_tag)
+                            # usage_base = the location where the object is used (can be below the real location of the object)
+                            # used_object.__class__.__name__ = the object type where the member has been found used (AddressGroup, actually)
+                            # used_object.name = the name of the object where the member has been found (= the group name, actually)
+                            # recursion_level = the current recursion_level + 1
+
+                            obj_set += flatten_object(
+                                referenced_object,
+                                referenced_object_location,
+                                usage_base,
+                                used_object.__class__.__name__,
+                                used_object.name,
+                                recursion_level + 1)
+
+                            # add the found referenced_object and its location to the _tag_referenced dict
+                            # TODO : why ? (don't remember)
                             self._tag_referenced.add((referenced_object, referenced_object_location))
                         else:
                             if self._superverbose:
@@ -751,7 +819,7 @@ class PaloCleaner:
                                     f"  {'*' * recursion_level} Address Object {referenced_object.name!r} already resolved in context {usage_base}",
                                     style="yellow")
 
-            # do the same with ServiceGroups than for static AddressGroups
+            # or here for ServiceGroup
             elif type(used_object) is panos.objects.ServiceGroup:
                 if used_object.value:
                     if self._superverbose:
@@ -762,9 +830,12 @@ class PaloCleaner:
                             if self._superverbose:
                                 self._console.log(
                                     f"  {'*' * recursion_level} Found group member of ServiceGroup {used_object.name} : {group_member}")
-                            obj_set += flatten_object(*self.get_relative_object_location(group_member, usage_base),
-                                                      usage_base, used_object.__class__.__name__, used_object.name,
-                                                      recursion_level + 1)
+                            obj_set += flatten_object(
+                                *self.get_relative_object_location(group_member, usage_base),
+                                usage_base,
+                                used_object.__class__.__name__,
+                                used_object.name,
+                                recursion_level + 1)
 
             # checking if the resolved objects has tags (which needs to be added to the used_object_set too)
             # checking is used_object is not None permits to avoid cases where unsupported objects are used on the rule
@@ -779,15 +850,35 @@ class PaloCleaner:
                                     f"  {'*' * recursion_level} Object {used_object.name} ({used_object.__class__.__name__}) uses tag {tag}",
                                     style="green italic")
                             if tag not in resolved_cache[usage_base]['Tag']:
+                                # call to the flatten_object function with the following parameters :
+                                # panos.Object (found by the get_relative_object_location function)
+                                # the location of this object (found by the get_relative_object_location function)
+                                # usage_base = the location where the object is used (can be below the real location of the object)
+                                # used_object.__class__.__name__ = the object type where the member has been found used (AddressGroup, actually)
+                                # used_object.name = the name of the object where the member has been found (= the group name, actually)
+                                # recursion_level = the current recursion_level (not incremented)
+
                                 obj_set += flatten_object(
                                     *self.get_relative_object_location(tag, object_location, obj_type="tag"),
-                                    usage_base, used_object.__class__.__name__, used_object.name)
+                                    usage_base,
+                                    used_object.__class__.__name__,
+                                    used_object.name,
+                                    recursion_level)
 
+            # return the populated obj_set (when fully flattened)
             return obj_set
 
+        # Initialized the location obj set list
         location_obj_set = list()
+
+        # This dict contains a list of names for each object type, for which the location has been already found
+        # This considerably improves processing time, avoiding to search again an object which has been already found
+        # among the upward locations
         resolved_cache = dict()
+        # TODO : remove the "location_name" key which is useless for this dict
         resolved_cache[location_name] = dict({'Address': list(), 'Service': list(), 'Tag': list()})
+
+        # Regex statements which permits to identify an AddressObject value to know if it represents an IP/mask or a range
         ip_regex = re.compile(r'^(\d{1,3}\.){3}\d{1,3}(\/\d{1,2})?$')
         range_regex = re.compile(r'^((\d{1,3}\.){3}\d{1,3}-?){2}$')
 
@@ -801,54 +892,77 @@ class PaloCleaner:
                 if self._superverbose:
                     self._console.log(f"[{location_name}] Processing used objects on rule {r.name!r}")
 
+                # Use the repl_map descriptor to find the different types of objects which can be found on the current
+                # rule based on its type.
+                # Initializes a dict where the key is the object type, and the value is an empty list
                 rule_objects = {x: [] for x in repl_map.get(type(r))}
 
+                # for each object type / field name in the repl_map descriptor for the current rule type
                 for obj_type, obj_fields in repl_map.get(type(r)).items():
+                    # for each rule field using the current object type
                     for field in obj_fields:
+                        # if the rule field is a string value, add the object to the rule_objects dict (on the corresponding
+                        # key matching the object type)
                         if type(field) is str:
                             if (to_add := getattr(r, field)):
                                 rule_objects[obj_type].append(to_add)
+                        # else if the rule field is a list, add this list to the rule_objects dict
                         else:
                             if (to_add := getattr(r, field[0])):
                                 rule_objects[obj_type] += to_add
 
+                    # for each object (of the current object type) used on the current rule
                     for obj in rule_objects[obj_type]:
+                        # if the object name is not in the resolved_cache, it needs to be resolved
                         if obj != 'any' and obj not in resolved_cache[location_name][obj_type]:
+                            # call to the flatten_object function with the following parameters :
+                            # panos.Object, location of this object (returned by a call to get_relative_object_location)
+                            # location_name = the current location (where the object is used)
+                            # r.__class__.__name__ = the rule type
+                            # r.name = the rule name
+
                             location_obj_set += (
-                                flattened := flatten_object(*self.get_relative_object_location(obj, location_name, obj_type),
-                                                            location_name, r.__class__.__name__, r.name)
+                                flattened := flatten_object(
+                                    *self.get_relative_object_location(obj, location_name, obj_type),
+                                    location_name,
+                                    r.__class__.__name__,
+                                    r.name)
                             )
 
-                            # matched if the object used has not been found by the get_relative_object_location
-                            # (flatten object will not return anything in such a case)
+                            # the following will be executed if the object used has not been found by the
+                            # get_relative_object_location call (flatten object will not return anything in such a case)
                             if not flattened:
                                 # can be in case of an IP address / subnet directly used on a rule
                                 if obj_type == "Address":
                                     if ip_regex.match(obj) or range_regex.match(obj):
+                                        # create a (temporary) new AddressObject (whose name is the same as the value)
+                                        # and add it to the location_obj_set
                                         location_obj_set += [(AddressObject(name=obj, value=obj), location_name)]
                                         self._console.log(
                                             f"  * Created AddressObject for address {obj} used on rule {r.name!r}",
                                             style="yellow")
 
-                                    # else for any type of un-supported object type
+                                    # else for any un-supported AddressObject type, log an error
                                     else:
                                         self._console.log(
-                                            f"  * Un-supported object type seems to be used on rule {r.name!r} ({obj})",
+                                            f"  * Un-supported AddressObject seems to be used on rule {r.name!r} ({obj})",
                                             style="red")
                                 elif obj_type == "Service":
                                     if not obj == "application-default":
                                         self._console.log(
-                                            f"  * Un-supported object type seems to be used on rule {r.name!r} ({obj})",
+                                            f"  * Un-supported ServiceObject seems to be used on rule {r.name!r} ({obj})",
                                             style="red")
                                 else:
                                     self._console.log(
                                         f"  * Un-supported object type seems to be used on rule {r.name!r} ({obj})",
                                         style="red")
+                        # else if the object is in the resolved_cache (and is not "any"), it means it has already been resolved
+                        # (if the object is "any", we don't care)
                         elif obj != 'any':
                             if self._superverbose:
                                 self._console.log(f" * {obj_type} Object {obj!r} already resolved in context {location_name}",
                                                   style="yellow")
-
+                # update progress bar for each processed rule
                 progress.update(task, advance=1)
 
         self._used_objects_sets[location_name] = set(location_obj_set)
