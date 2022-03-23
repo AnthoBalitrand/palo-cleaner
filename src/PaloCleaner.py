@@ -1,4 +1,5 @@
 import pan.xapi
+import rich.progress
 from rich.console import Console
 from rich.prompt import Prompt
 from rich.tree import Tree
@@ -199,6 +200,7 @@ class PaloCleaner:
             self._console.log("shared used objects set processed")
             progress.remove_task(shared_fetch_task)
 
+            # Processing used objects set for each location included in the analysis perimeter
             for (context_name, dg) in perimeter:
                 dg_fetch_task = progress.add_task(
                     f"{dg.about()['name']} - Processing used objects location",
@@ -208,8 +210,10 @@ class PaloCleaner:
                 self._console.log(f"{dg.about()['name']} used objects set processed")
                 progress.remove_task(dg_fetch_task)
 
-            for depth in sorted(self._depthed_tree, reverse=True):
-                for context_name in self._depthed_tree.get(depth):
+            # Starting objects usage optimization
+            # From the most "deep" device-group (far from shared), going up to the shared location
+            for depth, contexts in sorted(self._depthed_tree.items(), key=lambda x: x[0], reverse=True):
+                for context_name in contexts:
                     if context_name in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']:
                         # OBJECTS OPTIMIZATION
                         dg_optimize_task = progress.add_task(
@@ -227,7 +231,7 @@ class PaloCleaner:
                         self.replace_object_in_rulebase(context_name, progress, dg_optimize_task)
                         self._console.log(f"{context_name} objects replaced in rulebases")
 
-                        # OBJECTS CLEANING FOR FULLY INCLUDED DEVICE GROUPS
+                        # OBJECTS CLEANING (FOR FULLY INCLUDED DEVICE GROUPS ONLY)
                         if context_name in self._analysis_perimeter['full']:
                             self.clean_local_object_set(context_name, progress, dg_optimize_task)
                             self._console.log(f"{context_name} objects cleaned (fully included)")
@@ -562,7 +566,6 @@ class PaloCleaner:
         """
         Find referenced object by location (permits to get the referenced object on current location if
         existing at this level, or on upper levels of the device-groups hierarchy)
-        TODO : find a way to block recursive call if already on the "shared" context
 
         :param obj_name: (string) Name of the object to find
         :param reference_location: (string) Where to start to find the object (device-group name or 'shared')
@@ -602,10 +605,9 @@ class PaloCleaner:
 
     def get_relative_object_location_by_tag(self, executable_condition, reference_location):
         """
-        Find objects referenced by a dynamic group (based on their tags)
+        Find Address objects referenced by a dynamic group (based on their tags)
         Knowing that dynamic groups can reference any object up to the level at which they are used
         And not only up to the level where they are defined
-        TODO : what happen if upward object has the same name / tags than a matched local object ?
 
         :param executable_condition: (string) Executable python statement to match tags as configured on DAG
         :param reference_location: (string) Location where to start to find referenced objects (where the group is used)
@@ -617,17 +619,16 @@ class PaloCleaner:
         for obj in self._objects[reference_location]['Address']:
             # check if current object has tags
             if obj.tag:
-                # print(f"Object {obj} has tags !!!!!! ({obj.tag})")
-                # print(f"Condition is : {executable_condition!r}")
                 # initialize dict which will contain the results of the executable_condition execution
                 expr_result = dict()
+                # obj_tags is the variable name used when generating the condition expression
+                # (on the fetch_used_obj_set). Tags will be searched there.
                 obj_tags = obj.tag
                 # Execute the executable_condition with the locals() context
                 exec(executable_condition, locals(), expr_result)
                 cond_expr_result = expr_result['cond_expr_result']
                 # If the current object tags matches the executable_condition, add it to found_objects
                 if cond_expr_result:
-                    # print(f"AND THOSE TAGS HAVE BEEN MATCHED")
                     found_objects.append((obj, reference_location))
         # if we are not yet at the 'shared' level
         if reference_location != 'shared':
@@ -811,7 +812,9 @@ class PaloCleaner:
                                 recursion_level + 1)
 
                             # add the found referenced_object and its location to the _tag_referenced dict
-                            # TODO : why ? (don't remember)
+                            # this dict is used by the replace_object_in_group function, when an object referenced on
+                            # a DAG by a tag needs to be replaced. This tag will need to be added to the replacement
+                            # object for this new object to be matched by the DAG also
                             self._tag_referenced.add((referenced_object, referenced_object_location))
                         else:
                             if self._superverbose:
@@ -965,9 +968,10 @@ class PaloCleaner:
                 # update progress bar for each processed rule
                 progress.update(task, advance=1)
 
+        # add the processed object set for the current location to the globa _used_objects_set dict
         self._used_objects_sets[location_name] = set(location_obj_set)
 
-    def hostify_address(self, address):
+    def hostify_address(self, address: str):
         """
         Used to remove /32 at the end of an IP address
         :param address: (string) IP address to be modified
@@ -979,263 +983,433 @@ class PaloCleaner:
             return address[:-3:]
         return address
 
-    def stringify_service(self, service):
+    def stringify_service(self, service: panos.objects.ServiceObject):
+        """
+        Returns the "string" version of a service (for search purposes)
+        The format is (str) PROTOCOL/source_port/dest_port
+        IE : TCP/None/22 or UDP/1000/60
+
+        :param service: (panos.Service) A Service object
+        :return: (str) The "string" version of the provided object
+        """
+
         return service.protocol.lower() + "/" + str(service.source_port) + "/" + str(service.destination_port)
 
-    def find_upward_obj_by_addr(self, base_location_name, obj):
+    def find_upward_obj_by_addr(self, base_location_name: str, obj: panos.objects.AddressObject):
+        """
+        This function finds all Address objects on upward locations (from the base_location_name) having
+        the same value than the provided obj
+
+        :param base_location_name: (str) The location from which to start the duplicates objects search (going upward)
+        :param obj: (panos.objects.AddressObject) The base object for which we need to find duplicates
+        :return: [(panos.objects.AddressObject, str)] A list of tuples containing the duplicates objects and their
+            location, on upward locations
+        """
+
+        # Get the "host" value of the object value (removes the /32 at the end)
         obj_addr = self.hostify_address(obj.value)
+
+        # Initializes the list of found duplicates objects
         found_upward_objects = list()
         current_location_search = base_location_name
+
+        # This boolean is used to stop the search loop when the "shared" location has been reached
         reached_max = False
         while not reached_max:
             if current_location_search == "shared":
                 reached_max = True
+            # Get the list of all matching Address objects at the current search location
             for obj in self._addr_ipsearch[current_location_search].get(obj_addr, list()):
+                # add each of them to the result list as a tuple (AddressObject, current location name)
                 found_upward_objects.append((obj, current_location_search))
+            # Find the next search location (upward device group)
             current_location_search = self._stored_pano_hierarchy.get(current_location_search)
+            # If the result of the upward device-group name is "None", it means that the upward device-group is "shared"
             if not current_location_search:
                 current_location_search = "shared"
 
         return found_upward_objects
 
-    def find_upward_obj_group(self, base_location_name, obj_group):
-        found_upward_objects = list()
-        upward_devicegroup = self._stored_pano_hierarchy.get(base_location_name)
-        if not upward_devicegroup:
-            upward_devicegroup = 'shared'
-        for obj in self._objects[upward_devicegroup]['Address']:
-            if type(obj) is panos.objects.AddressGroup:
-                if obj_group.static_value and obj.static_value:
-                    if sorted(obj.static_value) == sorted(obj_group.static_value):
-                        found_upward_objects.append((obj, upward_devicegroup))
-                elif obj_group.dynamic_value and obj.dynamic_value:
-                    if obj_group.dynamic_value == obj.dynamic_value:
-                        found_upward_objects.append((obj, upward_devicegroup))
+    def find_upward_obj_group(self, base_location_name: str, ref_obj_group: panos.objects.AddressGroup):
+        """
+        This function finds all AddressGroup objects on upward locations (from the base_location_name) having
+        the same value (static members or DAG condition expression) than the provided group obj
 
-        if upward_devicegroup != 'shared':
-            found_upward_objects += self.find_upward_obj_group(upward_devicegroup, obj_group)
+        :param base_location_name: (str) The location from which to start the duplicates objects search (going upward)
+        :param obj: (panos.objects.AddressGroup) The base object for which we need to find duplicates
+        :return: [(panos.objects.AddressGroup, str)] A list of tuples containing the duplicates objects and their
+            location, on upward locations
+        """
+        # TODO : test if it works !!
 
-        return found_upward_objects
-
-    def find_upward_obj_service_group(self, base_location_name, obj_group):
-        found_upward_objects = list()
-        upward_devicegroup = self._stored_pano_hierarchy.get(base_location_name)
-        if not upward_devicegroup:
-            upward_devicegroup = 'shared'
-        for obj in self._objects[upward_devicegroup]['Service']:
-            if type(obj) is panos.objects.ServiceGroup:
-                if sorted(obj_group.value) == sorted(obj.value):
-                    found_upward_objects.append((obj, upward_devicegroup))
-
-        if upward_devicegroup != 'shared':
-            found_upward_objects += self.find_upward_obj_service_group(upward_devicegroup, obj_group)
-
-        return found_upward_objects
-
-    def find_upward_obj_service(self, base_location_name, obj_service):
-        obj_service_string = self.stringify_service(obj_service)
+        # Initializes the list of found duplicates objects
         found_upward_objects = list()
         current_location_search = base_location_name
+
+        # This boolean is used to stop the search loop when the "shared" location has been reached
         reached_max = False
         while not reached_max:
             if current_location_search == "shared":
                 reached_max = True
-            for obj in self._service_valuesearch[current_location_search].get(obj_service_string, list()):
-                found_upward_objects.append((obj, current_location_search))
+            # Iterate over the list of all Address objects at the current search location
+            for obj in self._objects[current_location_search]['Address']:
+                # If the current object has the AddressGroup type
+                if type(obj) is panos.objects.AddressGroup:
+                    # If this is a static group
+                    if ref_obj_group.static_value and obj.static_value:
+                        # And if it has the same members values
+                        if sorted(ref_obj_group.static_value) == sorted(obj.static_value):
+                            # Then add this object to the list of found duplicates as a tuple
+                            # (AddressGroup, current location name)
+                            found_upward_objects.append((obj, current_location_search))
+                    # If this is a dynamic group
+                    elif ref_obj_group.dynamic_value and obj.dynamic_value:
+                        # And if it has the same condition expression
+                        if ref_obj_group.dynamic_value == obj.dynamic_value:
+                            # Then add this object to the list of found duplicates as a tuple
+                            # (AddressGroup, current location name)
+                            found_upward_objects.append((obj, current_location_search))
+            # Find the next search location (upward device group)
             current_location_search = self._stored_pano_hierarchy.get(current_location_search)
+            # If the result of the upward device-group name is "None", it means that the upward device-group is "shared"
             if not current_location_search:
                 current_location_search = "shared"
 
         return found_upward_objects
 
-    def find_best_replacement_addr_obj(self, obj_list, base_location):
+    def find_upward_obj_service_group(self, base_location_name: str, obj_group: panos.objects.ServiceGroup):
+        """
+        This function finds all ServiceGroup objects on upward locations (from the base_location_name) having
+        the same value (static members) than the provided group obj
+
+        :param base_location_name: (str) The location from which to start the duplicates objects search (going upward)
+        :param obj: (panos.objects.ServiceGroup) The base object for which we need to find duplicates
+        :return: [(panos.objects.ServiceGroup, str)] A list of tuples containing the duplicates objects and their
+            location, on upward locations
+        """
+        # TODO : test if it works !!
+
+        # Initializes the list of found duplicates objects
+        found_upward_objects = list()
+        current_location_search = base_location_name
+
+        # This boolean is used to stop the search loop when the "shared" location has been reached
+        reached_max = False
+        while not reached_max:
+            if current_location_search == "shared":
+                reached_max = True
+            # Iterate over the list of all Service objects at the current search location
+            for obj in self._objects[current_location_search]['Service']:
+                # If the current object has the ServiceGroup type
+                if type(obj) is panos.objects.ServiceGroup:
+                    # If the static members of this ServiceGroup are the same thant the reference group object
+                    if sorted(obj_group.value) == sorted(obj.value):
+                        # Then add this object to the list of found duplicates as a tuple
+                        # (ServiceGroup, current location name)
+                        found_upward_objects.append((obj, current_location_search))
+            # Find the next search location (upward device group)
+            current_location_search = self._stored_pano_hierarchy.get(current_location_search)
+            # If the result of the upward device-group name is "None", it means that the upward device-group is "shared"
+            if not current_location_search:
+                current_location_search = "shared"
+
+        return found_upward_objects
+
+    def find_upward_obj_service(self, base_location_name: str, obj_service: panos.objects.ServiceObject):
+        """
+        This function finds all Service objects on upward locations (from the base_location_name) having
+        the same value than the provided obj
+
+        :param base_location_name: (str) The location from which to start the duplicates objects search (going upward)
+        :param obj: (panos.objects.ServiceObject) The base object for which we need to find duplicates
+        :return: [(panos.objects.ServiceObject, str)] A list of tuples containing the duplicates objects and their
+            location, on upward locations
+        """
+
+        # Get the "string" value of the Service object (to be able to search it quicker on the _service_valuesearch dict)
+        obj_service_string = self.stringify_service(obj_service)
+
+        # Initializes the list of found duplicates objects
+        found_upward_objects = list()
+        current_location_search = base_location_name
+
+        # This boolean is used to stop the search loop when the "shared" location has been reached
+        reached_max = False
+        while not reached_max:
+            if current_location_search == "shared":
+                reached_max = True
+            # Get the list of all matching Service objects at the current search location
+            for obj in self._service_valuesearch[current_location_search].get(obj_service_string, list()):
+                # Add each of them to the result list as a tuple (ServiceObject, current location name)
+                found_upward_objects.append((obj, current_location_search))
+            # Find the next search location (upward device group)
+            current_location_search = self._stored_pano_hierarchy.get(current_location_search)
+            # If the result of the upward device-group name is "None", it means that the upward device-group is "shared"
+            if not current_location_search:
+                current_location_search = "shared"
+
+        return found_upward_objects
+
+    def find_best_replacement_addr_obj(self, obj_list: list[(panos.objects.AddressObject, str)], base_location: str):
         """
         Get a list of tuples (object, location) and returns the best to be used based on location and naming criterias
         TODO : WARNING, can have unpredictable results with nested intermediate device-groups
+        TODO : test behavior when having only multiple matching objects at the base location (see changed line below)
         Will return the intermediate group replacement object if any
 
         :param obj_list: list((AddressObject, string)) List of tuples of AddressObject and location names
+        :param base_location: (str) The name of the location from where we need to find the best replacement object
         :return:
         """
+
         choosen_object = None
         choosen_by_tiebreak = False
+
+        """
         if len(obj_list) == 1:
             choosen_object = obj_list[0]
             if self._superverbose:
                 self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as there's no other existing for value {choosen_object[0].value}")
         else:
-            if self._tiebreak_tag:
-                for o in obj_list:
-                    if not choosen_object:
-                        try:
-                            if self._tiebreak_tag in o[0].tag:
-                                choosen_object = o
-                            if self._superverbose:
-                                self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen by tiebreak")
-                        except:
-                            pass
-            if not choosen_object:
-                # create a list of shared objects from the obj_list
-                shared_obj = [x for x in obj_list if x[1] == 'shared']
-                # create a list of intermediate DG objects from the obj_list
-                interm_obj = [x for x in obj_list if x[1] != 'shared' and x[1] != base_location]
-                # create a list of objects having name with multiple "." and ending with "corp" or "com" (probably FQDN)
-                fqdn_obj = [x for x in obj_list if
-                            len(x[0].about()['name'].split('.')) > 1 and x[0].about()['name'].split('.')[-1] in ['corp', 'com']]
-                # find objects being both shared and with FQDN-like naming
-                shared_fqdn_obj = list(set(shared_obj) & set(fqdn_obj))
-                interm_fqdn_obj = list(set(interm_obj) & set(fqdn_obj))
+        """
 
-                # if shared and well-named objects are found, return the first one
-                if shared_fqdn_obj and not choosen_object:
-                    for o in shared_fqdn_obj:
-                        if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_fqdn_obj]:
+        # If a tiebreak tag has been specified, this is the decision factor to choose the "best" object
+        # Not that if several objects have the tiebreak tag (which is not supposed to happen), the first one of the list
+        # will be chosen, which can leads to some randomness
+        if self._tiebreak_tag:
+            for o in obj_list:
+                if not choosen_object:
+                    try:
+                        if self._tiebreak_tag in o[0].tag:
                             choosen_object = o
-                            if self._superverbose:
-                                self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with FQDN naming")
-                # else return the first found shared object
-                if shared_obj and not choosen_object:
-                    for o in shared_obj:
-                        if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_obj]:
-                            choosen_object = o
-                            if self._superverbose:
-                                self._console.log(f"Object {o[0].about()['name']} (context {o[1]}) choosen as it's a shared object")
-                if interm_fqdn_obj and not choosen_object:
-                    temp_object_level = 999
-                    for o in interm_fqdn_obj:
-                        location_level = [k for k, v in self._depthed_tree.items() if o[1] in v][0]
-                        if location_level < temp_object_level:
-                            temp_object_level = location_level
-                            choosen_object = o
-                    if self._superverbose:
-                        self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object with FQDN naming (level = {temp_object_level})")
-                if interm_obj and not choosen_object:
-                    temp_object_level = 999
-                    for o in interm_obj:
-                        location_level = [k for k, v in self._depthed_tree.items() if o[1] in v][0]
-                        if location_level < temp_object_level:
-                            temp_object_level = location_level
-                            choosen_object = o
-                    if self._superverbose:
-                        self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object (level = {temp_object_level})")
+                        if self._superverbose:
+                            self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen by tiebreak")
+                    except:
+                        # This exception is matched when checking if the tiebreak tag is on the list of tags of an
+                        # object which has no tags
+                        pass
+
+        # If the tiebreak tag was not used to find the "best" object
+        if not choosen_object:
+            # create a list of shared objects from the obj_list
+            shared_obj = [x for x in obj_list if x[1] == 'shared']
+            # create a list of intermediate DG objects from the obj_list
+            # TODO : concerned line here
+            # interm_obj = [x for x in obj_list if x[1] != 'shared' and x[1] != base_location]
+            interm_obj = [x for x in obj_list if x[1] != 'shared']
+            # create a list of objects having name with multiple "." and ending with "corp" or "com" (probably FQDN)
+            fqdn_obj = [x for x in obj_list if
+                        len(x[0].about()['name'].split('.')) > 1 and x[0].about()['name'].split('.')[-1] in ['corp', 'com']]
+            # find objects being both shared and with FQDN-like naming
+            shared_fqdn_obj = list(set(shared_obj) & set(fqdn_obj))
+            interm_fqdn_obj = list(set(interm_obj) & set(fqdn_obj))
+
+            # if shared and well-named objects are found, return the first one
+            if shared_fqdn_obj and not choosen_object:
+                for o in shared_fqdn_obj:
+                    if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_fqdn_obj]:
+                        choosen_object = o
+                        if self._superverbose:
+                            self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with FQDN naming")
+            # else return the first found shared object
+            if shared_obj and not choosen_object:
+                for o in shared_obj:
+                    if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_obj]:
+                        choosen_object = o
+                        if self._superverbose:
+                            self._console.log(f"Object {o[0].about()['name']} (context {o[1]}) choosen as it's a shared object")
+            # Repeat the same logic for intermediate device-groups
+            if interm_fqdn_obj and not choosen_object:
+                temp_object_level = 999
+                # This code will permit to keep the "highest" device-group level matching object
+                # (nearest to the "shared" location)
+                for o in interm_fqdn_obj:
+                    location_level = [k for k, v in self._depthed_tree.items() if o[1] in v][0]
+                    if location_level < temp_object_level:
+                        temp_object_level = location_level
+                        choosen_object = o
+                if self._superverbose:
+                    self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object with FQDN naming (level = {temp_object_level})")
+            if interm_obj and not choosen_object:
+                temp_object_level = 999
+                for o in interm_obj:
+                    location_level = [k for k, v in self._depthed_tree.items() if o[1] in v][0]
+                    if location_level < temp_object_level:
+                        temp_object_level = location_level
+                        choosen_object = o
+                if self._superverbose:
+                    self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object (level = {temp_object_level})")
+        # If no best replacement object has been found at this point, display an alert and return the first one in the
+        # input list (can lead to random results)
         if not choosen_object:
             self._console.log(f"ERROR : Unable to choose an object in the following list for address {obj_list[0][0].value} : {obj_list}. Returning the first one by default", style="red")
             choosen_object = obj_list[0]
 
+        # If an object has not been chosen using the tiebreak tag, but the tiebreak tag adding has been requested,
+        # then add the tiebreak tag to the chosen object so that it will remain the preferred one for next executions
         if self._apply_tiebreak_tag and not choosen_by_tiebreak:
             tag_changed = False
+            # If the object already has some tags, adding the tiebreak tag to the list
             if choosen_object[0].tag:
                 if not self._tiebreak_tag in choosen_object[0].tag:
                     choosen_object[0].tag.append(self._tiebreak_tag)
                     tag_changed = True
+            # Else if the object has no tags, initialize the list with the tiebreak tag
             else:
                 choosen_object[0].tag = [self._tiebreak_tag]
                 tag_changed = True
             if self._superverbose and tag_changed:
                 self._console.log(f"Adding tiebreak tag {self._tiebreak_tag} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]} ")
+            # If cleaning application is requested and tag has been changed, apply it to Panorama
             if self._apply_cleaning and tag_changed:
                 choosen_object[0].apply()
 
+        # Returns the chosen object among the provided list
         return choosen_object
 
-    def find_best_replacement_service_obj(self, obj_list, base_location):
-        # TODO : WARNING, can have unpredictable results with nested intermediate device-groups
+    def find_best_replacement_service_obj(self, obj_list: list[(panos.objects.ServiceObject, str)], base_location: str):
+        """
+        Get a list of tuples (object, location) and returns the best to be used based on location and naming criterias
+        TODO : WARNING, can have unpredictable results with nested intermediate device-groups
+        TODO : test behavior when having only multiple matching objects at the base location (see changed line below)
+        Will return the intermediate group replacement object if any
+
+        :param obj_list: list((ServiceObject, string)) List of tuples of ServiceObject and location names
+        :param base_location: (str) The name of the location from where we need to find the best replacement object
+        :return:
+        """
+
         choosen_object = None
         choosen_by_tiebreak = False
+
+        """
         if len(obj_list) == 1:
             choosen_object = obj_list[0]
             if self._superverbose:
                 self._console.log(
                     f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as there's no other existing for value {self.stringify_service(choosen_object[0])}")
         else:
-            if self._tiebreak_tag:
-                for o in obj_list:
-                    if not choosen_object:
-                        try:
-                            if self._tiebreak_tag in o[0].tag:
-                                choosen_object = o
-                            if self._superverbose:
-                                self._console.log(
-                                    f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen by tiebreak")
-                        except:
-                            pass
-            if not choosen_object:
-                # create a list of shared objects from the obj_list
-                shared_obj = [x for x in obj_list if x[1] == 'shared']
-                # create a list of intermediate DG objects from the obj_list
-                interm_obj = [x for x in obj_list if x[1] not in ['shared', base_location]]
-                # create a list of objects having a name like "protocol_port" (ie = tcp_80)
-                standard_obj = [x for x in obj_list if
-                                x[0].name == x[0].protocol.lower() + '_' + str(x[0].destination_port)]
+        """
 
-                shared_standard_obj = list(set(shared_obj) & set(standard_obj))
-                interm_standard_obj = list(set(interm_obj) & set(standard_obj))
+        # If a tiebreak tag has been specified, this is the decision factor to choose the "best" object
+        # Not that if several objects have the tiebreak tag (which is not supposed to happen), the first one of the list
+        # will be chosen, which can leads to some randomness
+        if self._tiebreak_tag:
+            for o in obj_list:
+                if not choosen_object:
+                    try:
+                        if self._tiebreak_tag in o[0].tag:
+                            choosen_object = o
+                        if self._superverbose:
+                            self._console.log(
+                                f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen by tiebreak")
+                    except:
+                        # This exception is matched when checking if the tiebreak tag is on the list of tags of an
+                        # object which has no tags
+                        pass
 
-                if shared_standard_obj and not choosen_object:
-                    for o in shared_standard_obj:
-                        if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_standard_obj]:
-                            choosen_object = o
-                            if self._superverbose:
-                                self._console.log(
-                                    f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with standard naming")
-                if shared_obj and not choosen_object:
-                    for o in shared_obj:
-                        if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_obj]:
-                            choosen_object = o
-                            if self._superverbose:
-                                self._console.log(
-                                    f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object")
-                if interm_standard_obj and not choosen_object:
-                    temp_object_level = 999
-                    for o in interm_standard_obj:
-                        location_level = [k for k, v in self._depthed_tree.items() if o[1] in v][0]
-                        if location_level < temp_object_level:
-                            temp_object_level = location_level
-                            choosen_object = o
-                    if self._superverbose:
-                        self._console.log(
-                            f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object with standard naming (level = {temp_object_level})")
-                if interm_obj and not choosen_object:
-                    temp_object_level = 999
-                    for o in interm_obj:
-                        location_level = [k for k, v in self._depthed_tree.items() if o[1] in v][0]
-                        if location_level < temp_object_level:
-                            temp_object_level = location_level
-                            choosen_object = o
-                    if self._superverbose:
-                        self._console.log(
-                            f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object (level = {temp_object_level})")
+        # If the tiebreak tag was not used to find the "best" object
+        if not choosen_object:
+            # create a list of shared objects from the obj_list
+            shared_obj = [x for x in obj_list if x[1] == 'shared']
+            # create a list of intermediate DG objects from the obj_list
+            # TODO : concerned line here
+            # interm_obj = [x for x in obj_list if x[1] not in ['shared', base_location]]
+            interm_obj = [x for x in obj_list if x[1] != 'shared']
+            # create a list of objects having a name like "protocol_port" (ie = tcp_80)
+            standard_obj = [x for x in obj_list if
+                            x[0].name == x[0].protocol.lower() + '_' + str(x[0].destination_port)]
+
+            # Find objects being both shared and with standard naming for service objects
+            # or being at intermediate locations and with standard naming for service objects
+            shared_standard_obj = list(set(shared_obj) & set(standard_obj))
+            interm_standard_obj = list(set(interm_obj) & set(standard_obj))
+
+            # If shared and well-named objects are found, return the first one
+            if shared_standard_obj and not choosen_object:
+                for o in shared_standard_obj:
+                    if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_standard_obj]:
+                        choosen_object = o
+                        if self._superverbose:
+                            self._console.log(
+                                f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with standard naming")
+            # Else return the first found shared object
+            if shared_obj and not choosen_object:
+                for o in shared_obj:
+                    if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_obj]:
+                        choosen_object = o
+                        if self._superverbose:
+                            self._console.log(
+                                f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object")
+            # Repeat the same logic for intermediate device-groups
+            if interm_standard_obj and not choosen_object:
+                temp_object_level = 999
+                # This code will permit to keep the "highest" device-group level matching object
+                # (nearest to the "shared" location)
+                for o in interm_standard_obj:
+                    location_level = [k for k, v in self._depthed_tree.items() if o[1] in v][0]
+                    if location_level < temp_object_level:
+                        temp_object_level = location_level
+                        choosen_object = o
+                if self._superverbose:
+                    self._console.log(
+                        f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object with standard naming (level = {temp_object_level})")
+            if interm_obj and not choosen_object:
+                temp_object_level = 999
+                for o in interm_obj:
+                    location_level = [k for k, v in self._depthed_tree.items() if o[1] in v][0]
+                    if location_level < temp_object_level:
+                        temp_object_level = location_level
+                        choosen_object = o
+                if self._superverbose:
+                    self._console.log(
+                        f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object (level = {temp_object_level})")
+        # If no best replacement object has been found at this point, display an alert and return the first one in the
+        # input list (can lead to random results)
         if not choosen_object:
             self._console.log(f"ERROR : Unable to choose an object in the following list for service {self.stringify_service(obj_list[0][0])} : {obj_list}. Returning the first one by default", style="red")
             choosen_object = obj_list[0]
 
+        # If an object has not been chosen using the tiebreak tag, but the tiebreak tag adding has been requested,
+        # then add the tiebreak tag to the chosen object so that it will remain the preferred one for next executions
         if self._apply_tiebreak_tag and not choosen_by_tiebreak:
             tag_changed = False
+            # If the object already has some tags, adding the tiebreak tag to the list
             if choosen_object[0].tag:
                 if not self._tiebreak_tag in choosen_object[0].tag:
                     choosen_object[0].tag.append(self._tiebreak_tag)
                     tag_changed = True
+            # Else if the object has no tags, initialize the list with the tiebreak tag
             else:
                 choosen_object[0].tag = [self._tiebreak_tag]
                 tag_changed = True
             if self._superverbose and tag_changed:
                 self._console.log(
                     f"Adding tiebreak tag {self._tiebreak_tag} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]}")
+            # If cleaning application is requested and tag has been changed, apply it to Panorama
             if self._apply_cleaning and tag_changed:
                 choosen_object[0].apply()
 
+        # Returns the chosen object among the provided list
         return choosen_object
 
-    def optimize_objects(self, location_name, progress, task):
+    def optimize_objects(self, location_name: str, progress: rich.progress.Progress, task: rich.progress.Task):
         """
         Start object optimization processing for device-group given as argument
 
         :param location_name: (string) Location where to start objects optimization
+        :param progress: (rich.progress.Progress) The rich Progress to update while moving forward
+        :param task: (rich.progress.Task) The rich Task to update while moving forward
         :return:
         """
 
-        # for each object and location found on the _used_objects_set for the current location
+        # for each object and associated location found on the _used_objects_set for the current location
+
+        # Initializing a dict (on the global _replacements dict) which will contain information about the replacement
+        # done for each object type at the current location
         self._replacements[location_name] = {'Address': dict(), 'Service': dict(), 'Tag': dict()}
+
+        # This dict references the function to be used to match the best replacement for each object type
         find_maps = {
             AddressObject: self.find_upward_obj_by_addr,
             AddressGroup: self.find_upward_obj_group,
@@ -1243,24 +1417,43 @@ class PaloCleaner:
             ServiceGroup: self.find_upward_obj_service_group
         }
 
+        # for each object type in the list below
         for obj_type in [panos.objects.AddressObject, panos.objects.AddressGroup, panos.objects.ServiceObject]:
-            # TODO : check performance of the following statement
+            # for each object of the current type found at the current location
             for (obj, location) in [(o, l) for (o, l) in self._used_objects_sets[location_name] if type(o) is obj_type]:
+                # call the function able to find the best replacement object, for the current object type
+                # (the proper function is get from the find_maps dict defined above)
                 upward_objects = find_maps.get(type(obj))(location_name, obj)
+
+                # If there are more than 1 found object (as the current one will always be found)
+                # We need to find the best one (keep the current one or use one of the other duplicates ?)
                 if len(upward_objects) > 1:
+
+                    # If the object type is AddressObject, find the best replacement using the find_best_replacement_addr_obj function
                     if type(obj) is AddressObject:
                         replacement_obj, replacement_obj_location = self.find_best_replacement_addr_obj(upward_objects,
                                                                                                         location_name)
+                    # Else if the type is ServiceObject, find the best replacement using the find_best_replacement_service_obj function
                     elif type(obj) is ServiceObject:
                         replacement_obj, replacement_obj_location = self.find_best_replacement_service_obj(upward_objects,
                                                                                                            location_name)
                     else:
                         # TODO : find best upward matching object for AddressGroups
+                        # actually using the first object found
                         replacement_obj, replacement_obj_location = upward_objects[0]
+
+                    # if the chosen replacement object is different than the actual object
                     if replacement_obj != obj:
                         self._console.log(
                             f"   Replacing {obj.about()['name']} ({obj.__class__.__name__}) at location {location_name} by {replacement_obj.about()['name']} at location {replacement_obj_location}",
                             style="green italic")
+
+                        # Populating the global _replacements dict (for the current location, current object type) with
+                        # the details about the current object name, current object instance and location, and replacement
+                        # object instance and location
+                        # "blocked" is False at this time. It is used later to block a replacement for objects used on
+                        # rules having blocking opstates values (last hit timestamp / last change timestamp)
+
                         if type(obj) in [AddressObject, AddressGroup]:
                             self._replacements[location_name]['Address'][obj.about()['name']] = {
                                 'source': (obj, location),
@@ -1275,76 +1468,134 @@ class PaloCleaner:
                             }
                 progress.update(task, advance=1)
 
-    def replace_object_in_groups(self, location_name, progress, task):
+    def replace_object_in_groups(self, location_name: str, progress: rich.progress.Progress, task: rich.progress.Task):
+        """
+        This function replaces the objects for which a better duplicate has been found on the current location groups
+
+        :param location_name: (str) The name of the location where to replace objects in groups
+        :param progress: (rich.progress.Progress) The rich Progress object to update
+        :param task: (rich.progress.Task) The rich Task object to update
+        :return:
+        """
+
+        # Initializing a dict which will contain information about the replacements done on the different groups
+        # (when an object to be replaced has been found on a group), to display it on the result logs
         replacements_done = dict()
 
+        # for each replacement for object type "Address" (AddressObject, AddressGroup) at the current location level
         for replacement_name, replacement in self._replacements[location_name]['Address'].items():
+            # the source object name is the key on the _replacements dict
             source_obj = replacement_name
+            # the source_obj_instance and source_obj_location are found in the 'source' key of the dict item
             source_obj_instance, source_obj_location = replacement['source']
+            # the replacement_obj_instance and replacement_obj_location are found in the 'replacement' key of the dict item
             replacement_obj_instance, replacement_obj_location = replacement['replacement']
 
+            # if the source object has been referenced thanks to a tag (DAG member), the tags of the source object needs
+            # to be replicated on the replacement one, so that it will be still matched by the DAG
+            # TODO : replicate only the tags used by the DAG match
             if source_obj in self._tag_referenced:
+                # for each tag used on the source object instance
                 for tag in source_obj_instance.tag:
+                    # if the tag does not exists as a "shared" object
                     if not [x for x in self._objects['shared']['Tag'] if x.name == tag]:
-                        # tag used on referenced object does not exists as shared, so create it
+                        # find the original tag (on its actual location)
                         tag_instance, tag_location = self.get_relative_object_location(tag, location_name, obj_type="tag")
                         self._console.log(f"   [shared] Creating tag {tag!r} (copy from {tag_location}), to be used on ({replacement_obj_instance.about()['name']} at location {replacement_obj_location})")
+                        # if the cleaning application has been requested, create the new tag on Panorama
                         if self._apply_cleaning:
                             try:
                                 self._panorama.add(tag_instance).create()
                             except Exception as e:
                                 self._console.log(f"    [shared] Error while creating tag {tag!r} ! : {e.message}", style="red")
+                        # also add the new Tag object at the proper location (shared) on the local cache
                         self._objects['shared']['Tag'].append(tag_instance)
                         self._used_objects_sets['shared'].add((tag_instance, 'shared'))
+
                     self._console.log(f"    [{replacement_obj_location}] Adding tag {tag} to object {replacement_obj_instance.about()['name']!r} ({replacement_obj_instance.__class__.__name__})", style="yellow italic")
+                    # add the new tag to the replacement object
+                    # TODO : check if there's no issue when adding the tag to a replacement object which has no tags already
                     replacement_obj_instance.tag.append(tag)
+                    # if the cleaning application has been requested, apply the change to the replacement object
                     if self._apply_cleaning:
                         replacement_obj_instance.apply()
 
-            # replacing object on current location static groups
+            # for each Address type object in the current location objects
             for checked_object in self._objects[location_name]['Address']:
+                # if the type of the current object is a static AddressGroup
                 if type(checked_object) is panos.objects.AddressGroup and checked_object.static_value:
                     changed = False
                     matched = False
                     try:
+                        # if the name of the replacement object is different than the origin one, then the static
+                        # group members values needs to be updated
                         if source_obj_instance.about()['name'] != replacement_obj_instance.about()['name']:
                             checked_object.static_value.remove(source_obj_instance.about()['name'])
                             checked_object.static_value.append(replacement_obj_instance.about()['name'])
                             changed = True
                             matched = True
+                        # if the name of the replacement object is the same than the original one, the static
+                        # group members values remains the same
                         elif source_obj_instance.about()['name'] in checked_object.static_value:
                             matched = True
 
+                        # If the current object to be replaced has been matched as a member of a static group at the
+                        # current location level, add it to the replacements_done tracking dict
                         if matched:
                             if self._superverbose:
                                 self._console.log(f"    [{location_name}] Replacing {source_obj_instance.about()['name']!r} ({source_obj_location}) by {replacement_obj_instance.about()['name']!r} ({replacement_obj_location}) on {checked_object.about()['name']!r} ({checked_object.__class__.__name__})", style="yellow italic")
+                            # create a list (if not existing already) for the current static group object
+                            # which will contain the list of all replacements done on this group
                             if checked_object.name not in replacements_done:
                                 replacements_done[checked_object.name] = list()
+                            # then append the current replacement information to this list (as a tuple format)
                             replacements_done[checked_object.name].append((source_obj_instance.about()['name'], source_obj_location, replacement_obj_instance.about()['name'], replacement_obj_location))
+                    # TODO : check when this error is matched ?? (don't remember, but it probably needs to be here)
                     except ValueError:
                         continue
                     except Exception as e:
                         self._console.log(f"    [{location_name}] Unknown error while replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} on {checked_object.about()['name']!r} ({checked_object.__class__.__name__}) : {e.message}", style="red")
+                    # if the cleaning application has been requested, update the modified group on Panorama
                     if self._apply_cleaning and changed:
                         checked_object.apply()
 
+        # for each group on which a replacement has been done
         for changed_group_name in replacements_done:
+            # create a rich.Table, for which the header is the updated group name
             group_table = Table(style="dim", border_style="not dim", expand=False)
             group_table.add_column(changed_group_name)
+            # for each replacement done on the current group
             for replaced_item in replacements_done[changed_group_name]:
+                # if the name of the original and replacement objects are different, display the original object
+                # name in red, and the replacement one in green (as well as their respective location)
                 if replaced_item[0] != replaced_item[2]:
                     group_table.add_row(f"[red]- {replaced_item[0]} ({replaced_item[1]})[/red]")
                     group_table.add_row(f"[green]+ {replaced_item[2]} ({replaced_item[3]})[/green]")
+                # else if the name of the original and replacement objects are the same, just display the name in yellow
+                # as well as the original object and replacement object locations
                 else:
                     group_table.add_row(f"[yellow]! {replaced_item[0]} ({replaced_item[1]} --> {replaced_item[3]})[/yellow]")
+            # display the generated rich.Table in the console (and eventually on the exported report)
             self._console.log(group_table)
 
-    def replace_object_in_rulebase(self, location_name, progress, task):
+    def replace_object_in_rulebase(self, location_name: str, progress: rich.progress.Progress, task: rich.progress.Task):
+        """
+        This function replaces the objects which needs to be replaced on the different rulebases, at the provided location
+        :param location_name: (str) The name of the location where the Rulebases needs to be updated
+        :param progress: (rich.progress.Progress) The rich Progress object to update
+        :param task: (rich.progress.Task) The rich Task object to update
+        :return:
+        """
+
+        # Using the repl_map descriptor, create a dict for which the key is the rule type, and the value is a list
+        # of the fields to be updated for this kind of rules
+        # IE : {SecurityRule: ["source", "destination", "service", "tag"], NatRule: ["source", "destination", "source_translation_translated_address"....]}
         ruletype_fields_map = {x: list() for x in repl_map}
         for ruletype in ruletype_fields_map:
             for obj_type, fields in repl_map.get(ruletype).items():
                 for f in fields:
                     ruletype_fields_map[ruletype].append(f[0] if type(f) is list else f)
+
 
         tab_headers = dict()
         for rule_type in repl_map:
