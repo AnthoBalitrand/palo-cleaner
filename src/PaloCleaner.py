@@ -1160,8 +1160,6 @@ class PaloCleaner:
         return found_upward_objects
 
     def find_best_replacement_addr_obj(self, obj_list: list, base_location: str):
-        print(f"Call to find_best_replacement_addr_obj for {obj_list[0][0].value}")
-        print(obj_list)
         """
         Get a list of tuples (object, location) and returns the best to be used based on location and naming criterias
         TODO : WARNING, can have unpredictable results with nested intermediate device-groups
@@ -1679,7 +1677,12 @@ class PaloCleaner:
                                 # Else if the name of the replacement object is the same of the original one
                                 else:
                                     # replacement type 1 = same name different location
-                                    replacements_done[obj_type][field_name].append((f"{o} ({source_obj_location} --> {replacement_obj_location})", 1))
+                                    # this change will occur only if the object from the "lowest" location can be deleted
+                                    # (= device-group is fully included in the cleaning process)
+                                    if source_obj_location in self._analysis_perimeter["full"]:
+                                        replacements_done[obj_type][field_name].append((f"{o} ({source_obj_location} --> {replacement_obj_location})", 1))
+                                    else:
+                                        replacements_done[obj_type][field_name].append((f"{o}", 0))
                                     current_field_replacements_count += 1
                                 replacements_count += 1
                             else:
