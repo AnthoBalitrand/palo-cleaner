@@ -1605,18 +1605,6 @@ class PaloCleaner:
         """
 
         # Using the repl_map descriptor, create a dict for which the key is the rule type, and the value is a list
-        # of the fields to be updated for this kind of rules
-        # IE : {SecurityRule: ["source", "destination", "service", "tag"], NatRule: ["source", "destination", "source_translation_translated_address"....]}
-        # SEEMS NOT TO BE USED
-        """
-        ruletype_fields_map = {x: list() for x in repl_map}
-        for ruletype in ruletype_fields_map:
-            for obj_type, fields in repl_map.get(ruletype).items():
-                for f in fields:
-                    ruletype_fields_map[ruletype].append(f[0] if type(f) is list else f)
-        """
-
-        # Using the repl_map descriptor, create a dict for which the key is the rule type, and the value is a list
         # of the fields to be displayed / treated for this kind of rule
         # (Adding also the "Name" field, and timestamp-related information)
         tab_headers = dict()
