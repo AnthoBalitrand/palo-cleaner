@@ -821,6 +821,10 @@ class PaloCleaner:
                             # a DAG by a tag needs to be replaced. This tag will need to be added to the replacement
                             # object for this new object to be matched by the DAG also
                             self._tag_referenced.add((referenced_object, referenced_object_location))
+                            if self._superverbose:
+                                self._console.log(
+                                    f"  {'*' * recursion_level} Marking {referenced_object.name!r} as tag-referenced",
+                                    style="green italic")
                         else:
                             if self._superverbose:
                                 self._console.log(
@@ -1499,7 +1503,7 @@ class PaloCleaner:
             # if the source object has been referenced thanks to a tag (DAG member), the tags of the source object needs
             # to be replicated on the replacement one, so that it will be still matched by the DAG
             # TODO : replicate only the tags used by the DAG match
-            if source_obj in self._tag_referenced:
+            if (source_obj_instance, source_obj_location) in self._tag_referenced:
                 # for each tag used on the source object instance
                 for tag in source_obj_instance.tag:
                     # if the tag does not exists as a "shared" object
@@ -1519,8 +1523,10 @@ class PaloCleaner:
 
                     self._console.log(f"    [{replacement_obj_location}] Adding tag {tag} to object {replacement_obj_instance.about()['name']!r} ({replacement_obj_instance.__class__.__name__})", style="yellow italic")
                     # add the new tag to the replacement object
-                    # TODO : check if there's no issue when adding the tag to a replacement object which has no tags already
-                    replacement_obj_instance.tag.append(tag)
+                    if replacement_obj_instance.tag:
+                        replacement_obj_instance.tag.append(tag)
+                    else:
+                        replacement_obj_instance.tag = [tag]
                     # if the cleaning application has been requested, apply the change to the replacement object
                     if self._apply_cleaning:
                         replacement_obj_instance.apply()
