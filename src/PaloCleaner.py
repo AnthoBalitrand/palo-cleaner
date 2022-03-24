@@ -238,8 +238,11 @@ class PaloCleaner:
 
                         progress.remove_task(dg_optimize_task)
 
+        # Display the cleaning operation result (display again the hierarchy tree, but with the _cleaning_counts
+        # information (deleted / replaced objects of each type for each device-group)
         self._console.log(Panel(self.generate_hierarchy_tree(result=True)))
 
+        # If the --no-report argument was not used at startup, export the console content to an HTML report file
         if not self._no_report:
             self._console.save_html(self._report_folder+'/report.html')
 
@@ -471,7 +474,9 @@ class PaloCleaner:
         if location_name not in self._rulebases.keys():
             self._rulebases[location_name] = dict()
 
+        # create a "context" key on the current location dict which will contain the current location's DeviceGroup object
         self._rulebases[location_name]['context'] = context
+
         for ruletype in repl_map:
 
             rulebases = [PreRulebase(), PostRulebase()]
@@ -1590,13 +1595,18 @@ class PaloCleaner:
         # Using the repl_map descriptor, create a dict for which the key is the rule type, and the value is a list
         # of the fields to be updated for this kind of rules
         # IE : {SecurityRule: ["source", "destination", "service", "tag"], NatRule: ["source", "destination", "source_translation_translated_address"....]}
+        # SEEMS NOT TO BE USED
+        """
         ruletype_fields_map = {x: list() for x in repl_map}
         for ruletype in ruletype_fields_map:
             for obj_type, fields in repl_map.get(ruletype).items():
                 for f in fields:
                     ruletype_fields_map[ruletype].append(f[0] if type(f) is list else f)
+        """
 
-
+        # Using the repl_map descriptor, create a dict for which the key is the rule type, and the value is a list
+        # of the fields to be displayed / treated for this kind of rule
+        # (Adding also the "Name" field, and timestamp-related information)
         tab_headers = dict()
         for rule_type in repl_map:
             tab_headers[rule_type.__name__] = ['Name']
@@ -1605,29 +1615,61 @@ class PaloCleaner:
                     tab_headers[rule_type.__name__].append(field[0] if type(field) is list else field)
             tab_headers[rule_type.__name__] += ["rule_modification_timestamp", "last_hit_timestamp", "changed"]
 
-        def replace_in_rule(rule):
+        def replace_in_rule(rule: panos.policies.Rule):
+            """
+            This function will perform the changes (replacing objects with the best replacement found) on each rule
+
+            :param rule: (panos.policies.Rule) The rule on which the objects needs to be checked / replaced
+            :return:
+            """
+
+            # Initializing a dict which will contain information about the replacements done on the different fields of the rule
+            # (when an object to be replaced has been found), to display it on the result logs
             replacements_done = dict()
+
+            # This variable contains the total number of replacements done on the different fields of the current rule
             replacements_count = 0
-            # this field counts the highest number of replacements on a given field, for the loop which will display
-            # the replacements in a Table object
+
+            # This variable counts the highest number of replacements on a given field, for the loop which will display
+            # the replacements in a Table object (back to the replace_object_in_rulebase function calling the current one)
             max_replace = 0
+
+            # For each type of object (Address, Service, Tag...) which can be found on the current rule's type
             for obj_type in repl_map.get(type(rule)):
+                # Add a key to the replacements_done for the current object type (and initialize with an empty dict)
                 replacements_done[obj_type] = dict()
+
+                # iterate over each field containing the current object type, also getting the field_type from the repl_map
+                # (fields can be string values or [list of strings])
                 for field_name, field_type in [(x[0], list) if type(x) is list else (x, str) for x in repl_map[type(rule)][obj_type]]:
+                    # initialize a list of replacements done on each field of the rule (here with the current field)
                     replacements_done[obj_type][field_name] = list()
+
+                    # This variable stores the number of replacements done on the current field (used later to compare
+                    # with the max_replace value, use for proper sizing of the rich.Table rows)
                     current_field_replacements_count = 0
-                    # TODO : adapt check to field type (not list ??)
+
+                    # Get the value of the current field (put in on the not_null_field variable thanks to Walrus operator)
                     if (not_null_field := getattr(rule, field_name)):
+                        # Thanks to the field format obtained from the repl_map descriptor, iterate directly over the
+                        # not_null_field list (if it is already a list), or convert it to a list to iterate
                         for o in not_null_field if field_type is list else [not_null_field]:
+                            # Using the Walrus operator again to get the replacement information for the current object
+                            # (if there's any)
                             if (replacement := self._replacements[location_name][obj_type].get(o)):
+                                # Initializing the information about the source and replacement object
                                 source_obj_instance, source_obj_location = replacement['source']
                                 replacement_obj_instance, replacement_obj_location = replacement['replacement']
+                                # Checking if the name of the replacement object is different than the actual one
+                                # (and storing the name of the replacement object on the repl_name variable)
                                 if o != (repl_name := replacement_obj_instance.about()['name']):
+                                    # Add the replacement information to the replacements_done dict (for reporting)
                                     # replacement type 2 = removed
                                     # replacement type 3 = added
                                     replacements_done[obj_type][field_name].append((f"{o} ({source_obj_location})", 2))
                                     replacements_done[obj_type][field_name].append((f"{repl_name} ({replacement_obj_location})", 3))
                                     current_field_replacements_count += 2
+                                # Else if the name of the replacement object is the same of the original one
                                 else:
                                     # replacement type 1 = same name different location
                                     replacements_done[obj_type][field_name].append((f"{o} ({source_obj_location} --> {replacement_obj_location})", 1))
@@ -1637,11 +1679,27 @@ class PaloCleaner:
                                 # replacement type 0 = no replacement
                                 replacements_done[obj_type][field_name].append((f"{o}", 0))
                                 current_field_replacements_count += 1
+                    # Update the max_replace value with the highest current_field_replacements_count value
+                    # (if the current one is highest). This is used for proper display of the rich.Table rows for each
+                    # rule (making sure that the row size is adapted to the field having the highest number of changes
+                    # to be displayed)
                     if current_field_replacements_count > max_replace:
                         max_replace = current_field_replacements_count
+
+            # Returns the replacements_done dict, the total number of replacements for the current rule (replacements_count),
+            # and the max_replace value (highest number of replacements for a given field) for proper display on the output report
             return replacements_done, replacements_count, max_replace
 
         def format_for_table(repl_name, repl_type):
+            """
+            This function will return the proper formatting (color, string pattern) for the current change
+            It is used for generating the output Table for the rules changes on each rulebase
+
+            :param repl_name:
+            :param repl_type:
+            :return:
+            """
+
             type_map = {0: '', 1: 'yellow', 2: 'red', 3: 'green'}
             action_map = {0: ' ', 1: '!', 2: '-', 3: '+'}
             formatted_return = f"[{type_map[repl_type]}]" if repl_type > 0 else ""
@@ -1649,29 +1707,50 @@ class PaloCleaner:
             formatted_return += f"[/{type_map[repl_type]}]" if repl_type > 0 else ""
             return formatted_return
 
+        # for each rulebase at the current location
         for rulebase_name, rulebase in self._rulebases[location_name].items():
+            # if the current item is a rulebase (and not the context DeviceGroup object), and is not empty
             if rulebase_name != "context" and len(rulebase) > 0:
+                # initialize a variable which will count the number of replacements done for this rulebase
                 total_replacements = 0
+                # find the opstate hitcount name for the current rulebase type (panos-python stuff)
+                # IE : SecurityRule becomes "security", NatRule becomes "nat"
+                # Note also that the rulebase_name has the following value format : PreRulebase_SecurityRule (for example)
+                # so that name is also splitted after the "_" character
                 hitcount_rb_name = rulebase_name.split('_')[1].replace('Rule', '').lower()
 
+                # create a rich.Table object for the current rulebase information display
                 rulebase_table = Table(
                     title=f"{location_name} : {rulebase_name} (len : {len(rulebase)})",
                     style="dim",
                     border_style="not dim",
                     expand=True)
 
+                # add a column to the table for each field added to the tab_headers dict for the current rulebase type
                 for c_name in tab_headers[rulebase_name.split('_')[1]]:
                     rulebase_table.add_column(c_name)
 
+                # for each rule in the current rulebase
                 for r in rulebase:
+                    # this boolean variable will define is the rule timestamps are in the boundaries to allow modiications
+                    # (if opstate check is used for this processing, regarding last_hit_timestamp and last_change_timestamp)
                     in_timestamp_boundaries = False
+
+                    # call the replace_in_rule function for the current rule, which will reply with :
+                    # replacements_in_rule : dict with the details of replacements for the current rule
+                    # replacements_count : total number of replacements for the rule
+                    # max_replace : the highest number of replacements for a given field, for rich.Table rows sizing
                     replacements_in_rule, replacements_count, max_replace = replace_in_rule(r)
+
+                    # If there's at least one replacement on the current rule, it needs to be displayed and applied
                     if replacements_count:
+                        # Add the number of replacements for the current rule to the total number of replacements for
+                        # the current rulebase
                         total_replacements += replacements_count
-                        rule_counters = dict()
                         # if rule is disabled or if the job does not needs to rely on rule timestamps
                         # or if the hitcounts for a rule cannot be found (ie : new rule not yet pushed on device)
                         # then just consider that the rule can be modified (in_timestamp_boundaries = True)
+                        # Note that the rule hitcount information is stored on the rule_counters dict
                         if (r.disabled or not self._need_opstate or not (rule_counters := self._hitcounts.get(location_name, dict()).get(hitcount_rb_name, dict()).get(r.name))):
                             in_timestamp_boundaries = True
                             rule_modification_timestamp = 0 if self._need_opstate else "N/A"
@@ -1684,6 +1763,7 @@ class PaloCleaner:
                             if rule_modification_timestamp > self._max_change_timestamp and last_hit_timestamp > self._max_hit_timestamp:
                                 in_timestamp_boundaries = True
                             # else, for each object used on the rule, protect them to make sure they'll not be deleted later by the job
+                            # This protection is done by changing the "blocked" value to True on the "_replacements" dict
                             else:
                                 for obj_type, fields in repl_map[type(r)].items():
                                     for f in fields:
@@ -1693,56 +1773,107 @@ class PaloCleaner:
                                                     self._replacements[location_name][obj_type][object_name][
                                                         "blocked"] = True
 
+                        # Iterate up to the value of the max_replace variable (which is the highest number of
+                        # replacements for a given field of the current rule
+                        # This number is the "line number" in the current row (1 row = 1 rule)
                         for table_add_loop in range(max_replace):
+                            # row_values is the list of values for the current row (current rule) for the rich.Table
+                            # The values have to be put in the same order than the columns headers, defined in the
+                            # tab_headers variable
                             row_values = list()
-                            row_values.append(r.name if table_add_loop == 0 else ""),
+
+                            # First column contains the name of the rule
+                            row_values.append(r.name if table_add_loop == 0 else "")
+
+                            # For each object type (Address, Service, Tag...) / field name for the current rule
+                            # type (as defined on the repl_map descriptor)
                             for obj_type, fields in repl_map.get(type(r)).items():
+                                # For each field name for the current object type
                                 for f in [x[0] if type(x) is list else x for x in fields]:
+                                    # Call the format_for_table function, which will return the text to put on the
+                                    # current column for the current line in the current row
+                                    # (if the current line number is not above the number of replacements to be displayed
+                                    # for the current field)
+                                    # (yes, that's tricky)
                                     row_values.append(
                                         format_for_table(*replacements_in_rule[obj_type][f][table_add_loop])
                                         if table_add_loop < len(replacements_in_rule[obj_type][f])
                                         else ""
                                     )
+                            # if we are on the first line of the current row, display the rule interesting timestamps
                             row_values.append(str(rule_modification_timestamp) if table_add_loop == 0 else "")
                             row_values.append(str(last_hit_timestamp) if table_add_loop == 0 else "")
+                            # Display Y or N on the last column, depending if the current rule is indeed modified or not
+                            # (based on timestamp values)
                             if table_add_loop == 0:
                                 row_values.append("Y" if in_timestamp_boundaries else "N")
                             else:
                                 row_values.append("")
+                            # Add the current line to the rich.Table
+                            # The end_section parameter will be set to True if the current line is the last line for the
+                            # current row (moving to the next rule)
                             rulebase_table.add_row(
                                 *row_values,
                                 end_section=True if table_add_loop == max_replace - 1 else False,
                                 style="dim" if r.disabled else None,
                             )
 
+                # If there are replacements on the current rulebase, display the generated rich.Table on the console
                 if total_replacements:
                     self._console.log(rulebase_table)
 
-    def clean_local_object_set(self, location_name, progress, task):
-        self._cleaning_counts[location_name] = {x: {'removed': 0, 'replaced': 0} for x in self._replacements.get(location_name, list())}
+    def clean_local_object_set(self, location_name: str, progress: rich.progress.Progress, task: rich.progress.Task):
+        """
+        In charge of removing the unused objects at a given location (if this location is fully included in the analysis,
+        = all child device-groups also included)
+
+        :param location_name: (str) The name of the current location
+        :param progress: (rich.progress.Progress) The rich.Progress object to update while progressing
+        :param task: (rich.progress.Task) The rich.Task object to update while progressing
+        :return:
+        """
+
+        # Populating the global _cleaning_count object, which is used to display the number of objects
+        # cleaned / replaced on each device-group on the final report
+        self._cleaning_counts[location_name] = {
+            x: {'removed': 0, 'replaced': 0} for x in self._replacements.get(location_name, list())
+        }
 
         # removing replaced objects from used_objects_set for current location_name
         for type in self._replacements.get(location_name, list()):
             for name, infos in self._replacements[location_name][type].items():
+                # Remind that objects marked as "blocked" on the _replacements tracker should not be removed :
+                # They have not been replaced as expected, because used on rules where the opstate values
+                # (last_hit_timestamp and last_change_timestamp) are not in the allowed boundaries
                 if not infos['blocked']:
                     try:
+                        # For the current replacement, remove the original object from the _used_objects_set for the
+                        # current location, and replace it with the replacement object
                         self._used_objects_sets[location_name].remove(infos['source'])
                         self._used_objects_sets[location_name].add(infos['replacement'])
                         if self._superverbose:
                             self._console.log(f"[{location_name}] Removing unprotected object {name} (location {infos['source'][1]}) from used objects set")
+                        # If the name of the current replacement object is different than the replacement one, count it
+                        # as a replacement on the _cleaning_counts tracker
                         if infos['source'][1] == location_name and infos['source'][0].name != infos['replacement'][0].name:
                             self._cleaning_counts[location_name][type]['replaced'] += 1
+                    # This exception should never be raised but protects the execution
                     except ValueError:
                         self._console.log(f"ValueError when trying to remove {name} from used objects set at location {location_name} : object not found on object set")
                 elif self._superverbose:
                     self._console.log(f"[{location_name}] Not removing {name} (location {infos['source'][1]}) from used objects set, as protected by hitcount")
 
-        # adding childs device groups objects
+        # After cleaning the current device-group, adding the current location _used_objects_set values to the
+        # _used_objects_set of each child
+        # TODO : this one is not very logic, objects should be added to the parent, not to the childs. To test.
         for child_dg in self._reversed_tree.get(location_name):
             self._used_objects_sets[location_name] = self._used_objects_sets[location_name].union(set([x for x in self._used_objects_sets[child_dg] if x[1] != child_dg]))
             if self._superverbose:
                 self._console.log(f"[{location_name}] Added used objects on child {child_dg} before cleaning")
 
+        # Iterating over each object type / object for the current location, and check if each object is member
+        # (or still member, as the replaced ones have been suppressed) of the _used_objects_set for the same location
+        # If they are not, they can be deleted
         for type in self._objects[location_name]:
             if type != "context":
                 for o in self._objects[location_name][type]:
@@ -1759,6 +1890,7 @@ class PaloCleaner:
         :param depth: (int) Actual depth of analysis
         :return: (dict) Dict with keys being the depth of the devicegroups and value being list of device-group names
         """
+
         for loc in input_tree[start]:
             if depth not in self._depthed_tree.keys():
                 self._depthed_tree[depth] = list()
