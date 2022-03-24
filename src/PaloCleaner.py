@@ -487,7 +487,7 @@ class PaloCleaner:
                 context.add(rb)
                 self._rulebases[location_name][rb.__class__.__name__+"_"+ruletype.__name__] = \
                     ruletype.refreshall(rb, add=True)
-                context.remove(rb)
+                #context.remove(rb)
 
     def fetch_hitcounts(self, context, location_name):
         """
@@ -1160,6 +1160,8 @@ class PaloCleaner:
         return found_upward_objects
 
     def find_best_replacement_addr_obj(self, obj_list: list, base_location: str):
+        print(f"Call to find_best_replacement_addr_obj for {obj_list[0][0].value}")
+        print(obj_list)
         """
         Get a list of tuples (object, location) and returns the best to be used based on location and naming criterias
         TODO : WARNING, can have unpredictable results with nested intermediate device-groups
@@ -1216,14 +1218,15 @@ class PaloCleaner:
             # if shared and well-named objects are found, return the first one
             if shared_fqdn_obj and not choosen_object:
                 for o in shared_fqdn_obj:
-                    if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_fqdn_obj]:
+                    if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_fqdn_obj] and not choosen_object:
                         choosen_object = o
                         if self._superverbose:
                             self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with FQDN naming")
             # else return the first found shared object
             if shared_obj and not choosen_object:
                 for o in shared_obj:
-                    if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_obj]:
+                    if not choosen_object:
+                    #if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_obj] and not choosen_object:
                         choosen_object = o
                         if self._superverbose:
                             self._console.log(f"Object {o[0].about()['name']} (context {o[1]}) choosen as it's a shared object")
@@ -1233,19 +1236,21 @@ class PaloCleaner:
                 # This code will permit to keep the "highest" device-group level matching object
                 # (nearest to the "shared" location)
                 for o in interm_fqdn_obj:
-                    location_level = [k for k, v in self._depthed_tree.items() if o[1] in v][0]
-                    if location_level < temp_object_level:
-                        temp_object_level = location_level
-                        choosen_object = o
+                    if not choosen_object:
+                        location_level = [k for k, v in self._depthed_tree.items() if o[1] in v][0]
+                        if location_level < temp_object_level:
+                            temp_object_level = location_level
+                            choosen_object = o
                 if self._superverbose:
                     self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object with FQDN naming (level = {temp_object_level})")
             if interm_obj and not choosen_object:
                 temp_object_level = 999
                 for o in interm_obj:
-                    location_level = [k for k, v in self._depthed_tree.items() if o[1] in v][0]
-                    if location_level < temp_object_level:
-                        temp_object_level = location_level
-                        choosen_object = o
+                    if not choosen_object:
+                        location_level = [k for k, v in self._depthed_tree.items() if o[1] in v][0]
+                        if location_level < temp_object_level:
+                            temp_object_level = location_level
+                            choosen_object = o
                 if self._superverbose:
                     self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object (level = {temp_object_level})")
         # If no best replacement object has been found at this point, display an alert and return the first one in the
@@ -1524,7 +1529,8 @@ class PaloCleaner:
                     self._console.log(f"    [{replacement_obj_location}] Adding tag {tag} to object {replacement_obj_instance.about()['name']!r} ({replacement_obj_instance.__class__.__name__})", style="yellow italic")
                     # add the new tag to the replacement object
                     if replacement_obj_instance.tag:
-                        replacement_obj_instance.tag.append(tag)
+                        if not tag in replacement_obj_instance.tag:
+                            replacement_obj_instance.tag.append(tag)
                     else:
                         replacement_obj_instance.tag = [tag]
                     # if the cleaning application has been requested, apply the change to the replacement object
@@ -1621,11 +1627,12 @@ class PaloCleaner:
                     tab_headers[rule_type.__name__].append(field[0] if type(field) is list else field)
             tab_headers[rule_type.__name__] += ["rule_modification_timestamp", "last_hit_timestamp", "changed"]
 
-        def replace_in_rule(rule):
+        def replace_in_rule(rule, editable_rule):
             """
             This function will perform the changes (replacing objects with the best replacement found) on each rule
 
             :param rule: (panos.policies.Rule) The rule on which the objects needs to be checked / replaced
+            :param editable_rule: (bool) If the rule can be changed (based on opstate timestamps if used) or not
             :return:
             """
 
@@ -1657,6 +1664,10 @@ class PaloCleaner:
 
                     # Get the value of the current field (put in on the not_null_field variable thanks to Walrus operator)
                     if (not_null_field := getattr(rule, field_name)):
+                        # List of items to add or remove to / from the current field value if modified
+                        items_to_add = list()
+                        items_to_remove = list()
+
                         # Thanks to the field format obtained from the repl_map descriptor, iterate directly over the
                         # not_null_field list (if it is already a list), or convert it to a list to iterate
                         for o in not_null_field if field_type is list else [not_null_field]:
@@ -1675,6 +1686,8 @@ class PaloCleaner:
                                     replacements_done[obj_type][field_name].append((f"{o} ({source_obj_location})", 2))
                                     replacements_done[obj_type][field_name].append((f"{repl_name} ({replacement_obj_location})", 3))
                                     current_field_replacements_count += 2
+                                    items_to_remove.append(o)
+                                    items_to_add.append(repl_name)
                                 # Else if the name of the replacement object is the same of the original one
                                 else:
                                     # replacement type 1 = same name different location
@@ -1685,6 +1698,18 @@ class PaloCleaner:
                                 # replacement type 0 = no replacement
                                 replacements_done[obj_type][field_name].append((f"{o}", 0))
                                 current_field_replacements_count += 1
+
+                        # if the rule can be modified (and cleaning application has been requested), change the current
+                        # field value to the appropriate one, and apply the change
+                        if editable_rule and self._apply_cleaning:
+                            if field_type is not list:
+                                setattr(rule, field_name, items_to_add[0])
+                            else:
+                                any(not_null_field.remove(x) for x in items_to_remove)
+                                any(not_null_field.append(x) for x in items_to_add)
+                                setattr(rule, field_name, not_null_field)
+                            rule.apply()
+
                     # Update the max_replace value with the highest current_field_replacements_count value
                     # (if the current one is highest). This is used for proper display of the rich.Table rows for each
                     # rule (making sure that the row size is adapted to the field having the highest number of changes
@@ -1738,46 +1763,46 @@ class PaloCleaner:
 
                 # for each rule in the current rulebase
                 for r in rulebase:
-                    # this boolean variable will define is the rule timestamps are in the boundaries to allow modiications
+                    # this boolean variable will define is the rule timestamps are in the boundaries to allow modifications
                     # (if opstate check is used for this processing, regarding last_hit_timestamp and last_change_timestamp)
-                    in_timestamp_boundaries = False
+                    editable_rule = False
+                    rule_counters = self._hitcounts.get(location_name, dict()).get(hitcount_rb_name, dict()).get(r.name,
+                                                                                                                 dict())
+                    rule_modification_timestamp = rule_counters.get('rule_modification_timestamp', 0)
+                    last_hit_timestamp = rule_counters.get('last_hit_timestamp', 0)
+
+                    # if rule is disabled or if the job does not needs to rely on rule timestamps
+                    # or if the hitcounts for a rule cannot be found (ie : new rule not yet pushed on device)
+                    # then just consider that the rule can be modified (editable_rule = True)
+                    # Note that the rule hitcount information is stored on the rule_counters dict
+                    # TODO : validate if disabled rules are considered editable or not (issue #19)
+                    if r.disabled or not self._need_opstate or not rule_counters:
+                        editable_rule = True
+                    elif rule_modification_timestamp > self._max_hit_timestamp and last_hit_timestamp > self._max_hit_timestamp:
+                        editable_rule = True
 
                     # call the replace_in_rule function for the current rule, which will reply with :
                     # replacements_in_rule : dict with the details of replacements for the current rule
                     # replacements_count : total number of replacements for the rule
                     # max_replace : the highest number of replacements for a given field, for rich.Table rows sizing
-                    replacements_in_rule, replacements_count, max_replace = replace_in_rule(r)
+                    replacements_in_rule, replacements_count, max_replace = replace_in_rule(r, editable_rule)
 
                     # If there's at least one replacement on the current rule, it needs to be displayed and applied
                     if replacements_count:
                         # Add the number of replacements for the current rule to the total number of replacements for
                         # the current rulebase
                         total_replacements += replacements_count
-                        # if rule is disabled or if the job does not needs to rely on rule timestamps
-                        # or if the hitcounts for a rule cannot be found (ie : new rule not yet pushed on device)
-                        # then just consider that the rule can be modified (in_timestamp_boundaries = True)
-                        # Note that the rule hitcount information is stored on the rule_counters dict
-                        if (r.disabled or not self._need_opstate or not (rule_counters := self._hitcounts.get(location_name, dict()).get(hitcount_rb_name, dict()).get(r.name))):
-                            in_timestamp_boundaries = True
-                            rule_modification_timestamp = 0 if self._need_opstate else "N/A"
-                            last_hit_timestamp = 0 if self._need_opstate else "N/A"
-                        else:
-                            rule_modification_timestamp = rule_counters.get('rule_modification_timestamp', 0)
-                            last_hit_timestamp = rule_counters.get('last_hit_timestamp', 0)
-                            # if the rule last modification and last hit timestamps are above the minimums requested,
-                            # then consider that it can be updated (in_timestamp_boundaries = True)
-                            if rule_modification_timestamp > self._max_change_timestamp and last_hit_timestamp > self._max_hit_timestamp:
-                                in_timestamp_boundaries = True
-                            # else, for each object used on the rule, protect them to make sure they'll not be deleted later by the job
-                            # This protection is done by changing the "blocked" value to True on the "_replacements" dict
-                            else:
-                                for obj_type, fields in repl_map[type(r)].items():
-                                    for f in fields:
-                                        if (field_values := getattr(r, f[0]) if type(f) is list else [getattr(r, f)]):
-                                            for object_name in field_values:
-                                                if object_name in self._replacements[location_name][obj_type]:
-                                                    self._replacements[location_name][obj_type][object_name][
-                                                        "blocked"] = True
+
+                        # if the rule has changes but is not considered as editable (not in timestamp boundaries
+                        # regarding opstate timestamps), protect the rule objects from deletion
+                        if not editable_rule:
+                            for obj_type, fields in repl_map[type(r)].items():
+                                for f in fields:
+                                    if (field_values := getattr(r, f[0]) if type(f) is list else [getattr(r, f)]):
+                                        for object_name in field_values:
+                                            if object_name in self._replacements[location_name][obj_type]:
+                                                self._replacements[location_name][obj_type][object_name][
+                                                    "blocked"] = True
 
                         # Iterate up to the value of the max_replace variable (which is the highest number of
                         # replacements for a given field of the current rule
@@ -1812,7 +1837,7 @@ class PaloCleaner:
                             # Display Y or N on the last column, depending if the current rule is indeed modified or not
                             # (based on timestamp values)
                             if table_add_loop == 0:
-                                row_values.append("Y" if in_timestamp_boundaries else "N")
+                                row_values.append("Y" if editable_rule else "N")
                             else:
                                 row_values.append("")
                             # Add the current line to the rich.Table
