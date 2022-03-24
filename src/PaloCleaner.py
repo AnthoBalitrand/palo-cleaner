@@ -1155,7 +1155,7 @@ class PaloCleaner:
 
         return found_upward_objects
 
-    def find_best_replacement_addr_obj(self, obj_list: list[(panos.objects.AddressObject, str)], base_location: str):
+    def find_best_replacement_addr_obj(self, obj_list: list, base_location: str):
         """
         Get a list of tuples (object, location) and returns the best to be used based on location and naming criterias
         TODO : WARNING, can have unpredictable results with nested intermediate device-groups
@@ -1272,7 +1272,7 @@ class PaloCleaner:
         # Returns the chosen object among the provided list
         return choosen_object
 
-    def find_best_replacement_service_obj(self, obj_list: list[(panos.objects.ServiceObject, str)], base_location: str):
+    def find_best_replacement_service_obj(self, obj_list: list, base_location: str):
         """
         Get a list of tuples (object, location) and returns the best to be used based on location and naming criterias
         TODO : WARNING, can have unpredictable results with nested intermediate device-groups
@@ -1615,7 +1615,7 @@ class PaloCleaner:
                     tab_headers[rule_type.__name__].append(field[0] if type(field) is list else field)
             tab_headers[rule_type.__name__] += ["rule_modification_timestamp", "last_hit_timestamp", "changed"]
 
-        def replace_in_rule(rule: panos.policies.Rule):
+        def replace_in_rule(rule):
             """
             This function will perform the changes (replacing objects with the best replacement found) on each rule
 
@@ -1864,12 +1864,14 @@ class PaloCleaner:
                     self._console.log(f"[{location_name}] Not removing {name} (location {infos['source'][1]}) from used objects set, as protected by hitcount")
 
         # After cleaning the current device-group, adding the current location _used_objects_set values to the
-        # _used_objects_set of each child
-        # TODO : this one is not very logic, objects should be added to the parent, not to the childs. To test.
-        for child_dg in self._reversed_tree.get(location_name):
-            self._used_objects_sets[location_name] = self._used_objects_sets[location_name].union(set([x for x in self._used_objects_sets[child_dg] if x[1] != child_dg]))
-            if self._superverbose:
-                self._console.log(f"[{location_name}] Added used objects on child {child_dg} before cleaning")
+        # _used_objects_set of the parent.
+        # This will permit to protect used objects on the childs of the hierarchy to be deleted when they exist but are
+        # not used on the parents
+        parent_dg = self._stored_pano_hierarchy.get(location_name)
+        if not parent_dg:
+            parent_dg = "shared"
+        self._used_objects_sets[parent_dg] = self._used_objects_sets[parent_dg].union(self._used_objects_sets[location_name])
+
 
         # Iterating over each object type / object for the current location, and check if each object is member
         # (or still member, as the replaced ones have been suppressed) of the _used_objects_set for the same location
