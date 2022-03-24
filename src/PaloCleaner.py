@@ -222,21 +222,30 @@ class PaloCleaner:
                         )
                         self.optimize_objects(context_name, progress, dg_optimize_task)
                         self._console.log(f"{context_name} objects optimization done")
+                        progress.remove_task(dg_optimize_task)
 
                         # OBJECTS REPLACEMENT IN GROUPS
-                        self.replace_object_in_groups(context_name, progress, dg_optimize_task)
+                        dg_replaceingroups_task = progress.add_task(
+                            f"{context_name} - Replacing objects in groups",
+                            total=len(self._replacements[context_name]['Address'])
+                        )
+                        self.replace_object_in_groups(context_name, progress, dg_replaceingroups_task)
                         self._console.log(f"{context_name} objects replaced in groups")
+                        progress.remove_task(dg_replaceingroups_task)
 
                         # OBJECTS REPLACEMENT IN RULEBASES
-                        self.replace_object_in_rulebase(context_name, progress, dg_optimize_task)
+                        dg_replaceinrules_task = progress.add_task(
+                            f"{context_name} - Replacing objects in rules",
+                            total=self.count_rules(context_name)
+                        )
+                        self.replace_object_in_rulebase(context_name, progress, dg_replaceinrules_task)
                         self._console.log(f"{context_name} objects replaced in rulebases")
+                        progress.remove_task(dg_replaceinrules_task)
 
                         # OBJECTS CLEANING (FOR FULLY INCLUDED DEVICE GROUPS ONLY)
                         if context_name in self._analysis_perimeter['full']:
                             self.clean_local_object_set(context_name, progress, dg_optimize_task)
                             self._console.log(f"{context_name} objects cleaned (fully included)")
-
-                        progress.remove_task(dg_optimize_task)
 
         # Display the cleaning operation result (display again the hierarchy tree, but with the _cleaning_counts
         # information (deleted / replaced objects of each type for each device-group)
@@ -1405,7 +1414,7 @@ class PaloCleaner:
         # Returns the chosen object among the provided list
         return choosen_object
 
-    def optimize_objects(self, location_name: str, progress: rich.progress.Progress, task: rich.progress.Task):
+    def optimize_objects(self, location_name: str, progress: rich.progress.Progress, task: rich.progress.TaskID):
         """
         Start object optimization processing for device-group given as argument
 
@@ -1480,7 +1489,7 @@ class PaloCleaner:
                             }
                 progress.update(task, advance=1)
 
-    def replace_object_in_groups(self, location_name: str, progress: rich.progress.Progress, task: rich.progress.Task):
+    def replace_object_in_groups(self, location_name: str, progress: rich.progress.Progress, task: rich.progress.TaskID):
         """
         This function replaces the objects for which a better duplicate has been found on the current location groups
 
@@ -1574,6 +1583,8 @@ class PaloCleaner:
                     if self._apply_cleaning and changed:
                         checked_object.apply()
 
+            progress.update(task, advance=1)
+
         # for each group on which a replacement has been done
         for changed_group_name in replacements_done:
             # create a rich.Table, for which the header is the updated group name
@@ -1593,7 +1604,7 @@ class PaloCleaner:
             # display the generated rich.Table in the console (and eventually on the exported report)
             self._console.log(group_table)
 
-    def replace_object_in_rulebase(self, location_name: str, progress: rich.progress.Progress, task: rich.progress.Task):
+    def replace_object_in_rulebase(self, location_name: str, progress: rich.progress.Progress, task: rich.progress.TaskID):
         """
         This function replaces the objects which needs to be replaced on the different rulebases, at the provided location
         :param location_name: (str) The name of the location where the Rulebases needs to be updated
@@ -1840,11 +1851,13 @@ class PaloCleaner:
                                 style="dim" if r.disabled else None,
                             )
 
+                    progress.update(task, advance=1)
+
                 # If there are replacements on the current rulebase, display the generated rich.Table on the console
                 if total_replacements:
                     self._console.log(rulebase_table)
 
-    def clean_local_object_set(self, location_name: str, progress: rich.progress.Progress, task: rich.progress.Task):
+    def clean_local_object_set(self, location_name: str, progress: rich.progress.Progress, task: rich.progress.TaskID):
         """
         In charge of removing the unused objects at a given location (if this location is fully included in the analysis,
         = all child device-groups also included)
