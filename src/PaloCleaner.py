@@ -41,6 +41,15 @@ repl_map = {
     }
 }
 
+# Keep your big fingers away than this unless you really know what you are doing
+cleaning_order = {
+    1: {"Address": AddressGroup},
+    2: {"Service": ServiceGroup},
+    3: {"Address": AddressObject},
+    4: {"Service": ServiceObject},
+    5: {"Tag": Tag}
+}
+
 
 class PaloCleaner:
     def __init__(self, report_folder, **kwargs):
@@ -496,7 +505,6 @@ class PaloCleaner:
                 context.add(rb)
                 self._rulebases[location_name][rb.__class__.__name__+"_"+ruletype.__name__] = \
                     ruletype.refreshall(rb, add=True)
-                #context.remove(rb)
 
     def fetch_hitcounts(self, context, location_name):
         """
@@ -1868,6 +1876,44 @@ class PaloCleaner:
         :return:
         """
 
+        def parse_PanDeviceXapiError_references(dependencies_error_message: str) -> (dict, bool):
+            groupinfo_regex = re.compile(r'^.+?(?=->)-> (?P<location>.+?(?=->))-> address-group -> (?P<groupname>.+?(?=->))')
+            ruleinfo_regex = re.compile(r'^.+?(?=->)-> (?P<location>.+?(?=->))-> (?P<rbtype>.+?(?=->))-> (?P<rb>.+?(?=->))-> rules -> (?P<rulename>.+?(?=->))-> (?P<field>.+)')
+
+            dependencies = {"AddressGroups": list(), "Rules": list()}
+            matched_dependencies = 0
+
+            for dependency_line in dependencies_error_message.split('\n'):
+                dependency_line = dependency_line.strip()
+                try:
+                    grp_result = re.match(groupinfo_regex, dependency_line).groupdict()
+                    for k, v in grp_result.items():
+                        grp_result[k] = v.strip()
+                    dependencies["AddressGroups"].append(grp_result)
+                    matched_dependencies += 1
+                    continue
+                except AttributeError:
+                    pass
+
+                # This part should never be matched, as we are not supposed to try to delete an object which is used
+                # on a rule at this time
+                try:
+                    rule_result = re.match(ruleinfo_regex, dependency_line).groupdict()
+                    for k, v in rule_result.items():
+                        rule_result[k] = v.strip()
+                    rule_result['rule_location'] = ''.join([x[0].upper()+x[1::].lower() for x in rule_result['rbtype'].split('-')])
+                    rule_result['rule_location'] += "_" + rule_result['rb'][0].upper() + rule_result['rb'][1::] + "Rule"
+                    del(rule_result['rbtype'])
+                    del(rule_result['rb'])
+                    dependencies["Rules"].append(rule_result)
+                    matched_dependencies += 1
+                except AttributeError:
+                    pass
+
+            all_matched = True if matched_dependencies == len(dependencies_error_message.split('\n')) - 1 else False
+            return dependencies, all_matched
+
+
         # Populating the global _cleaning_count object, which is used to display the number of objects
         # cleaned / replaced on each device-group on the final report
         self._cleaning_counts[location_name] = {
@@ -1911,12 +1957,62 @@ class PaloCleaner:
         # Iterating over each object type / object for the current location, and check if each object is member
         # (or still member, as the replaced ones have been suppressed) of the _used_objects_set for the same location
         # If they are not, they can be deleted
-        for type in self._objects[location_name]:
+        # We start by the groups (removing all members before deleting the group, to avoid inter-dependency between groups)
+        # Then we delete AddressObjects and ServiceObjects, then Tags
+        for obj_item in [v for k, v in sorted(cleaning_order.items())]:
+            obj_type = list(obj_item.keys())[0]
+            obj_instance = obj_item[obj_type]
+            for o in self._objects[location_name][obj_type]:
+                if o.__class__.__name__ is obj_instance.__name__ and not (o, location_name) in self._used_objects_sets[location_name]:
+                    if self._apply_cleaning:
+                        delete_ok = False
+                        while not delete_ok:
+                            try:
+                                o.delete()
+                                self._console.log(f"INFO : Object {o.name} ({o.__class__.__name__}) has been successfuly deleted at location {location_name}")
+                                self._cleaning_counts[location_name][type]['removed'] += 1
+                                delete_ok = True
+                            except panos.errors.PanDeviceXapiError as e:
+                                dependencies, all_matched = parse_PanDeviceXapiError_references(e.message)
+                                if not all_matched:
+                                    self._console.log(f"ERROR : It seems that object {o.name} ({o.__class__.__name__}) is used somewhere in the configuration, on device-group {location_name}. It will not be deleted. Please check manually")
+                                    delete_ok = True
+                                    continue
+                                else:
+                                    # The following should never be matched, as we are not supposed to try to delete
+                                    # an object which is still used on a rule at this time of the process
+                                    # Keeping it for security purposes
+                                    for rule_dependency in dependencies["Rules"]:
+                                        self._console.log(f"ERROR : It seems that object {o.name} ({o.__class__.__name__}) is still used on the following rule : {rule_dependency['rule_location']} / {rule_dependency['rulename']}. It will not be deleted. Please check manually")
+                                        delete_ok = True
+                                    if delete_ok:
+                                        continue
+
+                                    for group_dependency in dependencies["AddressGroups"]:
+                                        if self._superverbose:
+                                            self._console.log(f"Group {o.name} ({o.__class__.__name__}) is still used on another group : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
+                                        referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'])
+                                        referencer_group.static_value.remove(o.name)
+                                        referencer_group.apply()
+                    else:
+                        self._console.log(
+                            f"Object {o.name} ({o.__class__.__name__}) can be deleted at location {location_name}")
+                        self._cleaning_counts[location_name][type]['removed'] += 1
+
+
+
+        """
+        for type in sorted(self._objects[location_name].items(), reverse=True):
             if type != "context":
                 for o in self._objects[location_name][type]:
                     if not (o, location_name) in self._used_objects_sets[location_name]:
                         self._console.log(f"Object {o.name} ({o.__class__.__name__}) can be deleted at location {location_name}")
                         self._cleaning_counts[location_name][type]['removed'] += 1
+                        if self._apply_cleaning:
+                            successful_delete = False
+        """
+
+
 
     def gen_tree_depth(self, input_tree, start='shared', depth=1):
         """
