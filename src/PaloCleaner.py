@@ -17,6 +17,7 @@ from panos.firewall import Firewall
 from panos.device import SystemSettings
 import re
 import time
+import functools
 
 """
 Below is a representation of the different types of rules being processed, and for each of them, the name of each 
@@ -50,7 +51,6 @@ cleaning_order = {
     5: {"Tag": Tag}
 }
 
-
 class PaloCleaner:
     def __init__(self, report_folder, **kwargs):
         """
@@ -83,14 +83,35 @@ class PaloCleaner:
         self._removable_objects = list()
         self._tag_referenced = set()
         self._superverbose = kwargs['superverbose']
+        self._verbosity = int(kwargs['verbosity'])
         self._max_change_timestamp = int(time.time()) - int(kwargs['max_days_since_change']) * 86400 if kwargs['max_days_since_change'] else 0
         self._max_hit_timestamp = int(time.time()) - int(kwargs['max_days_since_hit']) * 86400 if kwargs['max_days_since_hit'] else 0
         self._need_opstate = self._max_change_timestamp or self._max_hit_timestamp
         self._console = Console(record=True if not self._no_report else False)
+        self._console.log = self.loglevel_decorator(self._console.log)
         self._replacements = dict()
         self._panorama_devices = dict()
         self._hitcounts = dict()
         self._cleaning_counts = dict()
+
+    def loglevel_decorator(self, log_func):
+        """
+        This is a decorator for the rich.Console.log function which permits to log according to the loglevel configured
+        (each Console.log call will contain a "level" argument (if not, the log function will be returned), and the
+        log function will be returned (and thus executed) only if the "level" of the current call is below or equal to
+        the global loglevel asked when starting the script
+
+        :param log_func: A function (here, will be used only with the rich.Console.log function)
+        :return: (func) The called function after checking the loglevel
+        """
+        @functools.wraps(log_func)
+        def wrapper(*args, **kwargs):
+            if not kwargs.get('level'):
+                return log_func(*args, **kwargs)
+            elif kwargs.pop('level') <= self._verbosity:
+                return log_func(*args, **kwargs)
+
+        return wrapper
 
     def start(self):
         """
@@ -115,17 +136,18 @@ class PaloCleaner:
             self._panorama_password = Prompt.ask(f"Please provide the password for API user {self._panorama_user!r} ",
                                                  password=True)
 
+        self._console.print("\n\n")
         with self._console.status("Connecting to Panorama...", spinner="dots12") as status:
             try:
                 self._panorama = Panorama(self._panorama_url, self._panorama_user, self._panorama_password)
                 self.get_pano_dg_hierarchy()
                 time.sleep(1)
-                self._console.log("Panorama connection established")
+                self._console.log("[ Panorama ] Connection established")
             except PanXapiError as e:
-                self._console.log(f"Error while connecting to Panorama : {e.message}", style="red")
+                self._console.log(f"[ Panorama ] Error while connecting to Panorama : {e.message}", style="red")
                 return 0
             except Exception as e:
-                self._console.log("Unknown error occurred while connecting to Panorama", style="red")
+                self._console.log("[ Panorama ] Unknown error occurred while connecting to Panorama", style="red")
                 return 0
 
             # get the full device-groups hierarchy and displays is in the console with color code to identity which
@@ -134,13 +156,13 @@ class PaloCleaner:
             status.update("Parsing device groups list")
             hierarchy_tree = self.generate_hierarchy_tree()
             time.sleep(1)
-            self._console.log("Discovered hierarchy tree is the following :")
-            self._console.log(
+            self._console.print("Discovered hierarchy tree is the following :")
+            self._console.print(
                 "( [red] + are directly included [/red] / [yellow] * are indirectly included [/yellow] / [green] - are not included [/green] )")
-            self._console.log(
+            self._console.print(
                 " F (Fully included = cleaned) / P (Partially included = not cleaned) "
             )
-            self._console.log(Panel(hierarchy_tree))
+            self._console.print(Panel(hierarchy_tree))
             time.sleep(1)
 
         # "perimeter" is a list containing the name only of each device-group included in the cleaning process
@@ -158,65 +180,68 @@ class PaloCleaner:
                 transient=True,
                 disable=self._console.record
         ) as progress:
-
+            self._console.print(
+                Panel("[bold green]Downloading objects and analysing usage",
+                      style="green"),
+                justify="left")
             download_task = progress.add_task("", total=len(perimeter) + 1)
 
-            progress.update(download_task, description="Downloading Panorama shared objects")
+            progress.update(download_task, description="[Panorama] Downloading shared objects")
             self.fetch_objects(self._panorama, 'shared')
             self.fetch_objects(self._panorama, 'predefined')
-            self._console.log(f"Panorama objects downloaded ({self.count_objects('shared')} found)")
+            self._console.log(f"[ Panorama ] Shared objects downloaded ({self.count_objects('shared')} found)")
 
             # calling a function which will make sure that the tiebreak-tag exists (if requested as argument)
             # and will create it if it does not
             self.validate_tiebreak_tag()
 
-            progress.update(download_task, description="Downloading Panorama rulebases")
+            progress.update(download_task, description="[Panorama] Downloading shared rulebases")
             self.fetch_rulebase(self._panorama, 'shared')
-            self._console.log(f"Panorama rulebases downloaded ({self.count_rules('shared')} rules found)")
+            self._console.log(f"[ Panorama ] Shared rulebases downloaded ({self.count_rules('shared')} rules found)")
 
-            progress.update(download_task, description="Downloading Panorama managed devices information")
+            progress.update(download_task, description="[Panorama] Downloading managed devices information")
             self.get_panorama_managed_devices()
-            self._console.log(f"Panorama managed devices information downloaded (found {len(self._panorama_devices)} devices)")
+            self._console.log(f"[ Panorama ] Managed devices information downloaded (found {len(self._panorama_devices)} devices)")
 
             progress.update(download_task, advance=1)
 
             for (context_name, dg) in perimeter:
-                progress.update(download_task, description=f"Downloading {context_name} objects")
+                progress.update(download_task, description=f"[{context_name}] Downloading objects")
                 self.fetch_objects(dg, context_name)
-                self._console.log(f"{context_name} objects downloaded ({self.count_objects(context_name)} found)")
-                progress.update(download_task, description=f"Downloading {context_name} rulebases")
+                self._console.log(f"[ {context_name} ] Objects downloaded ({self.count_objects(context_name)} found)")
+                progress.update(download_task, description=f"[{context_name}] Downloading rulebases")
                 self.fetch_rulebase(dg, context_name)
-                self._console.log(f"{context_name} rulebases downloaded ({self.count_rules(context_name)} rules found)")
+                self._console.log(f"[ {context_name} ] Rulebases downloaded ({self.count_rules(context_name)} rules found)")
 
                 # if opstate (hit counts) has to be cared, download on each device member of the device-group
                 # if this device-group has no child device-group
                 if self._need_opstate and not self._reversed_tree.get(context_name):
                     progress.update(
                         download_task,
-                        description=f"Downloading {context_name} hitcounts (connecting to devices)"
+                        description=f"[{context_name}] Downloading hitcounts (connecting to devices)"
                     )
                     self.fetch_hitcounts(dg, context_name)
-                    self._console.log(f"{context_name} hit counts downloaded for all rulebases")
+                    self._console.log(f"[ {context_name} ] Hit counts downloaded for all rulebases")
 
                 progress.update(download_task, advance=1)
 
             progress.remove_task(download_task)
 
             # Processing used objects set at location "shared"
-            shared_fetch_task = progress.add_task("Shared - Processing used objects location",
+            shared_fetch_task = progress.add_task("[Panorama] Processing used objects location",
                                                   total=self.count_rules('shared'))
             self.fetch_used_obj_set("shared", progress, shared_fetch_task)
-            self._console.log("shared used objects set processed")
+            self._console.log("[ Panorama ] Used objects set processed")
             progress.remove_task(shared_fetch_task)
 
             # Processing used objects set for each location included in the analysis perimeter
             for (context_name, dg) in perimeter:
                 dg_fetch_task = progress.add_task(
-                    f"{dg.about()['name']} - Processing used objects location",
+                    f"[{dg.about()['name']}] Processing used objects location",
                     total=self.count_rules(dg.about()['name'])
                 )
                 self.fetch_used_obj_set(dg.about()['name'], progress, dg_fetch_task)
-                self._console.log(f"{dg.about()['name']} used objects set processed")
+                self._console.log(f"[ {dg.about()['name']} ] Used objects set processed")
                 progress.remove_task(dg_fetch_task)
 
             # Starting objects usage optimization
@@ -224,6 +249,8 @@ class PaloCleaner:
             for depth, contexts in sorted(self._depthed_tree.items(), key=lambda x: x[0], reverse=True):
                 for context_name in contexts:
                     if context_name in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']:
+                        self._console.log(Panel(f"[bold green]{context_name}", style="green"),
+                                          justify="center")
                         # OBJECTS OPTIMIZATION
                         dg_optimize_task = progress.add_task(
                             f"{context_name} - Optimizing objects",
@@ -453,8 +480,7 @@ class PaloCleaner:
             self._objects[location_name]['context'] = context
             self._objects[location_name]['Address'] = AddressObject.refreshall(context) + AddressGroup.refreshall(context)
             self._addr_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Address']}
-            if self._superverbose:
-                self._console.log(f"  {location_name} objects namesearch structures initialized")
+            self._console.log(f"[ {location_name} ] Objects namesearch structures initialized", level=2)
             self._addr_ipsearch[location_name] = dict()
             for obj in self._objects[location_name]['Address']:
                 if type(obj) is panos.objects.AddressObject:
@@ -462,14 +488,12 @@ class PaloCleaner:
                     if addr not in self._addr_ipsearch[location_name].keys():
                         self._addr_ipsearch[location_name][addr] = list()
                     self._addr_ipsearch[location_name][addr].append(obj)
-            if self._superverbose:
-                self._console.log(f"  {location_name} objects ipsearch structures initialized")
+            self._console.log(f"[ {location_name} ] Objects ipsearch structures initialized", level=2)
             self._objects[location_name]['Tag'] = Tag.refreshall(context)
             self._tag_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Tag']}
             self._objects[location_name]['Service'] = ServiceObject.refreshall(context) + ServiceGroup.refreshall(context)
             self._service_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Service']}
-            if self._superverbose:
-                self._console.log(f"  {location_name} services namesearch structures initialized")
+            self._console.log(f"[ {location_name} ] Services namesearch structures initialized", level=2)
 
         self._service_valuesearch[location_name] = dict()
         for obj in self._objects[location_name]['Service']:
@@ -478,6 +502,7 @@ class PaloCleaner:
                 if serv_string not in self._service_valuesearch[location_name].keys():
                     self._service_valuesearch[location_name][serv_string] = list()
                 self._service_valuesearch[location_name][serv_string].append(obj)
+        self._console.log(f"[ {location_name} ] Services valuesearch structures initialized", level=2)
 
     def fetch_rulebase(self, context, location_name):
         """
@@ -547,12 +572,11 @@ class PaloCleaner:
                 fw_vsys = getattr(fw, "vsys")
                 fw_conn = Firewall(fw_ip, self._panorama_user, self._panorama_password, vsys=fw_vsys)
                 # TODO : timeout connection + retry ?
-                self._console.log(f"Connecting to firewall {fw_ip} on vsys {fw_vsys} ({location_name})")
+                self._console.log(f"[ {location_name} ] Connecting to firewall {fw_ip} on vsys {fw_vsys}")
                 fw_panos_version = fw_conn.refresh_system_info().version
                 if (current_major_version := int(fw_panos_version.split('.')[0])) > min_member_major_version:
                     min_member_major_version = current_major_version
-                if self._superverbose:
-                    self._console.log(f"Detected PAN-OS version on {fw_ip} : {fw_panos_version}")
+                self._console.log(f"[ {location_name} ] Detected PAN-OS version on {fw_ip} : {fw_panos_version}", level=2)
                 rb = Rulebase()
                 fw_conn.add(rb)
                 for rulebase in rulebases:
@@ -561,7 +585,7 @@ class PaloCleaner:
 
         if min_member_major_version < 9:
             # if we did not found any member firewall with PANOS >= 9, we need to get the rule modification timestamp from Panorama for this context
-            self._console.log(f"Not found any member with PAN-OS version >= 9 for context {location_name}. Getting rule modification timestamp from Panorama")
+            self._console.log(f"[ {location_name} ] Not found any member with PAN-OS version >= 9. Getting rule modification timestamp from Panorama", level=2)
             for rb_type in [PreRulebase(), PostRulebase()]:
                 context.add(rb_type)
                 for rulebase in rulebases:
@@ -577,7 +601,7 @@ class PaloCleaner:
 
         if self._tiebreak_tag:
             if not self._tiebreak_tag in self._tag_namesearch['shared']:
-                self._console.log(f"Creating tiebreak tag {self._tiebreak_tag} on shared context")
+                self._console.log(f"[ Panorama ] Creating tiebreak tag {self._tiebreak_tag} on shared context")
                 tiebreak_tag = Tag(name=self._tiebreak_tag)
                 self._objects['shared']['Tag'].append(tiebreak_tag)
                 self._tag_namesearch['shared'][self._tiebreak_tag] = tiebreak_tag
@@ -918,8 +942,7 @@ class PaloCleaner:
                 continue
             # for each rule in the current rulebase
             for r in v:
-                if self._superverbose:
-                    self._console.log(f"[{location_name}] Processing used objects on rule {r.name!r}")
+                self._console.log(f"[ {location_name} ] Processing used objects on rule {r.name!r}", level=2)
 
                 # Use the repl_map descriptor to find the different types of objects which can be found on the current
                 # rule based on its type.
