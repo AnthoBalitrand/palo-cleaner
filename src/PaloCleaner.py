@@ -680,8 +680,15 @@ class PaloCleaner:
         elif not found_object and (obj_type == "Service" and reference_location == 'shared'):
             upward_dg = "predefined"
             found_object, found_location = self.get_relative_object_location(obj_name, upward_dg, obj_type)
-        # finally return the tuple of the found object and its location
 
+        # log an error message if the requested object has not been found at this step
+        if not found_object:
+            self._console.log(
+                f"[ {reference_location} ] ERROR Unable to find object {obj_name} (type {obj_type}) here and above",
+                level=2,
+            )
+
+        # finally return the tuple of the found object and its location
         return (found_object, found_location)
 
     def get_relative_object_location_by_tag(self, executable_condition, reference_location):
@@ -924,7 +931,7 @@ class PaloCleaner:
                         for tag in used_object.tag:
                             self._console.log(
                                     f"[ {usage_base} ] {'*' * recursion_level} Object {used_object.name} ({used_object.__class__.__name__}) uses tag {tag}",
-                                    style="green")
+                                    style="green", level=2)
                             if tag not in resolved_cache['Tag']:
                                 # call to the flatten_object function with the following parameters :
                                 # panos.Object (found by the get_relative_object_location function)
@@ -935,7 +942,7 @@ class PaloCleaner:
                                 # recursion_level = the current recursion_level (not incremented)
 
                                 obj_set += flatten_object(
-                                    *self.get_relative_object_location(tag, object_location, obj_type="tag"),
+                                    *self.get_relative_object_location(tag, object_location, obj_type="Tag"),
                                     usage_base,
                                     used_object.__class__.__name__,
                                     used_object.name,
@@ -987,7 +994,7 @@ class PaloCleaner:
                     # for each object (of the current object type) used on the current rule
                     for obj in rule_objects[obj_type]:
                         # if the object name is not in the resolved_cache, it needs to be resolved
-                        if obj != 'any' and obj not in resolved_cache[obj_type]:
+                        if obj not in ['any', 'application-default'] and obj not in resolved_cache[obj_type]:
                             # call to the flatten_object function with the following parameters :
                             # panos.Object, location of this object (returned by a call to get_relative_object_location)
                             # location_name = the current location (where the object is used)
@@ -1010,9 +1017,17 @@ class PaloCleaner:
                                     if ip_regex.match(obj) or range_regex.match(obj):
                                         # create a (temporary) new AddressObject (whose name is the same as the value)
                                         # and add it to the location_obj_set
-                                        location_obj_set += [(AddressObject(name=obj, value=obj), location_name)]
+                                        new_addr_obj = AddressObject(name=obj, value=obj)
+                                        # adding the new created object to the _addr_ipsearch datastructure for the
+                                        # current location level, else the replacement process will potentially find
+                                        # only 1 replacement object (if there's one), while the current one should be
+                                        # found also (replacement will be processed only if at least 2 objects are found)
+                                        if (host_addr := self.hostify_address(obj)) not in self._addr_ipsearch[location_name].keys():
+                                            self._addr_ipsearch[location_name][host_addr] = list()
+                                        self._addr_ipsearch[location_name][host_addr].append(new_addr_obj)
+                                        location_obj_set += [(new_addr_obj, location_name)]
                                         self._console.log(
-                                            f"  * Created AddressObject for address {obj} used on rule {r.name!r}",
+                                            f"[ {location_name} ] * Created AddressObject for address {obj} used on rule {r.name!r}",
                                             style="yellow")
 
                                     # else for any un-supported AddressObject type, log an error
@@ -1031,7 +1046,7 @@ class PaloCleaner:
                                         style="red")
                         # else if the object is in the resolved_cache (and is not "any"), it means it has already been resolved
                         # (if the object is "any", we don't care)
-                        elif obj != 'any':
+                        elif obj not in ['any', 'application-default']:
                             self._console.log(f"[ {location_name} ] * {obj_type} Object {obj!r} already resolved in current context",
                                                   style="yellow", level=2)
                 # update progress bar for each processed rule
@@ -1490,7 +1505,6 @@ class PaloCleaner:
                 # If there are more than 1 found object (as the current one will always be found)
                 # We need to find the best one (keep the current one or use one of the other duplicates ?)
                 if len(upward_objects) > 1:
-
                     # If the object type is AddressObject, find the best replacement using the find_best_replacement_addr_obj function
                     if type(obj) is AddressObject:
                         replacement_obj, replacement_obj_location = self.find_best_replacement_addr_obj(upward_objects,
