@@ -49,18 +49,18 @@ def parse_cli_args():
     )
 
     parser.add_argument(
-        "--verbosity",
+        "--verbosity", "-v",
         action = "count",
         default = 1,
         help = "Verbosity level (from 1 to 3)"
     )
-
+    """
     parser.add_argument(
         "--superverbose",
         action = "store_true",
         help = "Verbosity level (from 1 to 3)"
     )
-
+    """
     parser.add_argument(
         "--max-days-since-change",
         action = "store",

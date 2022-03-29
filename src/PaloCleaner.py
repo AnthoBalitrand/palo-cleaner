@@ -51,6 +51,7 @@ cleaning_order = {
     5: {"Tag": Tag}
 }
 
+
 class PaloCleaner:
     def __init__(self, report_folder, **kwargs):
         """
@@ -82,13 +83,13 @@ class PaloCleaner:
         self._stored_pano_hierarchy = None
         self._removable_objects = list()
         self._tag_referenced = set()
-        self._superverbose = kwargs['superverbose']
         self._verbosity = int(kwargs['verbosity'])
         self._max_change_timestamp = int(time.time()) - int(kwargs['max_days_since_change']) * 86400 if kwargs['max_days_since_change'] else 0
         self._max_hit_timestamp = int(time.time()) - int(kwargs['max_days_since_hit']) * 86400 if kwargs['max_days_since_hit'] else 0
         self._need_opstate = self._max_change_timestamp or self._max_hit_timestamp
         self._console = Console(record=True if not self._no_report else False)
         self._console.log = self.loglevel_decorator(self._console.log)
+        self._console.status = self.status_decorator(self._console.status)
         self._replacements = dict()
         self._panorama_devices = dict()
         self._hitcounts = dict()
@@ -105,11 +106,37 @@ class PaloCleaner:
         :return: (func) The called function after checking the loglevel
         """
         @functools.wraps(log_func)
-        def wrapper(*args, **kwargs):
+        def wrapper(*xargs, **kwargs):
             if not kwargs.get('level'):
-                return log_func(*args, **kwargs)
+                return log_func(*xargs, **kwargs)
             elif kwargs.pop('level') <= self._verbosity:
-                return log_func(*args, **kwargs)
+                return log_func(*xargs, **kwargs)
+
+        return wrapper
+
+    def status_decorator(self, status_func):
+        class FalseStatus:
+            def __init__(self):
+                self.id = 1
+
+            def __enter__(self):
+                return self
+
+            def status(self, *xargs):
+                pass
+
+            def update(self, *xargs):
+                pass
+
+            def __exit__(self, *xargs):
+                pass
+
+        @functools.wraps(status_func)
+        def wrapper(*xargs, **kwargs):
+            if self._no_report:
+                return status_func(*xargs, **kwargs)
+            else:
+                return FalseStatus()
 
         return wrapper
 
@@ -181,12 +208,12 @@ class PaloCleaner:
                 disable=self._console.record
         ) as progress:
             self._console.print(
-                Panel("[bold green]Downloading objects and analysing usage",
+                Panel("[bold green]Downloading objects and rulebases",
                       style="green"),
                 justify="left")
             download_task = progress.add_task("", total=len(perimeter) + 1)
 
-            progress.update(download_task, description="[Panorama] Downloading shared objects")
+            progress.update(download_task, description="[ Panorama ] Downloading shared objects")
             self.fetch_objects(self._panorama, 'shared')
             self.fetch_objects(self._panorama, 'predefined')
             self._console.log(f"[ Panorama ] Shared objects downloaded ({self.count_objects('shared')} found)")
@@ -195,21 +222,21 @@ class PaloCleaner:
             # and will create it if it does not
             self.validate_tiebreak_tag()
 
-            progress.update(download_task, description="[Panorama] Downloading shared rulebases")
+            progress.update(download_task, description="[ Panorama ] Downloading shared rulebases")
             self.fetch_rulebase(self._panorama, 'shared')
             self._console.log(f"[ Panorama ] Shared rulebases downloaded ({self.count_rules('shared')} rules found)")
 
-            progress.update(download_task, description="[Panorama] Downloading managed devices information")
+            progress.update(download_task, description="[ Panorama ] Downloading managed devices information")
             self.get_panorama_managed_devices()
             self._console.log(f"[ Panorama ] Managed devices information downloaded (found {len(self._panorama_devices)} devices)")
 
             progress.update(download_task, advance=1)
 
             for (context_name, dg) in perimeter:
-                progress.update(download_task, description=f"[{context_name}] Downloading objects")
+                progress.update(download_task, description=f"[ {context_name} ] Downloading objects")
                 self.fetch_objects(dg, context_name)
                 self._console.log(f"[ {context_name} ] Objects downloaded ({self.count_objects(context_name)} found)")
-                progress.update(download_task, description=f"[{context_name}] Downloading rulebases")
+                progress.update(download_task, description=f"[ {context_name} ] Downloading rulebases")
                 self.fetch_rulebase(dg, context_name)
                 self._console.log(f"[ {context_name} ] Rulebases downloaded ({self.count_rules(context_name)} rules found)")
 
@@ -218,15 +245,19 @@ class PaloCleaner:
                 if self._need_opstate and not self._reversed_tree.get(context_name):
                     progress.update(
                         download_task,
-                        description=f"[{context_name}] Downloading hitcounts (connecting to devices)"
+                        description=f"[ {context_name} ] Downloading hitcounts (connecting to devices)"
                     )
                     self.fetch_hitcounts(dg, context_name)
-                    self._console.log(f"[ {context_name} ] Hit counts downloaded for all rulebases")
+                    self._console.log(f"[ {context_name} ] Hitcounts downloaded for all rulebases")
 
                 progress.update(download_task, advance=1)
 
             progress.remove_task(download_task)
 
+            self._console.print(
+                Panel("[bold green]Analyzing objects usage",
+                      style="green"),
+                justify="left")
             # Processing used objects set at location "shared"
             shared_fetch_task = progress.add_task("[Panorama] Processing used objects location",
                                                   total=self.count_rules('shared'))
@@ -246,46 +277,50 @@ class PaloCleaner:
 
             # Starting objects usage optimization
             # From the most "deep" device-group (far from shared), going up to the shared location
+            self._console.print(
+                Panel("[bold green]Optimizing objects duplicates",
+                      style="green"),
+                justify="left")
             for depth, contexts in sorted(self._depthed_tree.items(), key=lambda x: x[0], reverse=True):
                 for context_name in contexts:
                     if context_name in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']:
-                        self._console.log(Panel(f"[bold green]{context_name}", style="green"),
-                                          justify="center")
+                        self._console.print(Panel(f"  [bold magenta]{context_name}  ", style="magenta"),
+                                          justify="left")
                         # OBJECTS OPTIMIZATION
                         dg_optimize_task = progress.add_task(
-                            f"{context_name} - Optimizing objects",
+                            f"[ {context_name} ] - Optimizing objects",
                             total=len(self._used_objects_sets[context_name])
                         )
                         self.optimize_objects(context_name, progress, dg_optimize_task)
-                        self._console.log(f"{context_name} objects optimization done")
+                        self._console.log(f"[ {context_name} ] Objects optimization done")
                         progress.remove_task(dg_optimize_task)
 
                         # OBJECTS REPLACEMENT IN GROUPS
                         dg_replaceingroups_task = progress.add_task(
-                            f"{context_name} - Replacing objects in groups",
+                            f"[ {context_name} ] Replacing objects in groups",
                             total=len(self._replacements[context_name]['Address'])
                         )
                         self.replace_object_in_groups(context_name, progress, dg_replaceingroups_task)
-                        self._console.log(f"{context_name} objects replaced in groups")
+                        self._console.log(f"[ {context_name} ] Objects replaced in groups")
                         progress.remove_task(dg_replaceingroups_task)
 
                         # OBJECTS REPLACEMENT IN RULEBASES
                         dg_replaceinrules_task = progress.add_task(
-                            f"{context_name} - Replacing objects in rules",
+                            f"[ {context_name} ] Replacing objects in rules",
                             total=self.count_rules(context_name)
                         )
                         self.replace_object_in_rulebase(context_name, progress, dg_replaceinrules_task)
-                        self._console.log(f"{context_name} objects replaced in rulebases")
+                        self._console.log(f"[ {context_name} ] Objects replaced in rulebases")
                         progress.remove_task(dg_replaceinrules_task)
 
                         # OBJECTS CLEANING (FOR FULLY INCLUDED DEVICE GROUPS ONLY)
                         if context_name in self._analysis_perimeter['full']:
                             self.clean_local_object_set(context_name, progress, dg_optimize_task)
-                            self._console.log(f"{context_name} objects cleaned (fully included)")
+                            self._console.log(f"[ {context_name} ] Objects cleaned (fully included)")
 
         # Display the cleaning operation result (display again the hierarchy tree, but with the _cleaning_counts
         # information (deleted / replaced objects of each type for each device-group)
-        self._console.log(Panel(self.generate_hierarchy_tree(result=True)))
+        self._console.print(Panel(self.generate_hierarchy_tree(result=True)))
 
         # If the --no-report argument was not used at startup, export the console content to an HTML report file
         if not self._no_report:
@@ -749,10 +784,9 @@ class PaloCleaner:
             # If used_object has been resolved at the time of calling the flatten_object function, mark it as resolved
             # (in cache) for the "usage_base" location (adding its name) and add the (object, location) tuple to the obj_set list
             if not isinstance(used_object, type(None)):
-                if self._superverbose:
-                    self._console.log(
-                        f"  {'*' * recursion_level} Marking {used_object.name!r} ({used_object.__class__.__name__}) as resolved on cache for location {usage_base}",
-                        style="green italic")
+                self._console.log(
+                        f"[ {usage_base} ] {'*' * recursion_level} Marking {used_object.name!r} ({used_object.__class__.__name__}) as resolved on cache",
+                        style="green", level=2)
                 resolved_cache[usage_base][shorten_object_type(used_object.__class__.__name__)].append(
                     used_object.name)
 
@@ -762,10 +796,9 @@ class PaloCleaner:
             # if the resolved object is a "simple" object (not needing recursive search), just display a log indicating
             # that search is over for this one
             if type(used_object) in [panos.objects.AddressObject, panos.objects.ServiceObject, panos.objects.Tag]:
-                if self._superverbose:
-                    self._console.log(
-                        f"  {'*' * recursion_level} Object {used_object.name!r} ({used_object.__class__.__name__}) used on {usage_base!r} (ref by {referencer_type} {referencer_name}) has been found on location {object_location}",
-                        style="green italic")
+                self._console.log(
+                        f"[ {usage_base} ] {'*' * recursion_level} Object {used_object.name!r} ({used_object.__class__.__name__}) (ref by {referencer_type} {referencer_name}) has been found on location {object_location}",
+                        style="green", level=2)
 
             # if the resolved object needs recursive search for members (AddressGroup), let's go
             # here for an AddressGroup
@@ -773,20 +806,18 @@ class PaloCleaner:
                 # in case of a static group, just call the flatten_object function recursively for each member
                 # (which can be only at the group level or below)
                 if used_object.static_value:
-                    if self._superverbose:
-                        self._console.log(
-                            f"  {'*' * recursion_level} Object {used_object.name!r} (static AddressGroup) used on {usage_base!r} (ref by {referencer_type} {referencer_name!r}) has been found on location {object_location}",
-                            style="green italic")
+                    self._console.log(
+                            f"[ {usage_base} ] {'*' * recursion_level} Object {used_object.name!r} (static AddressGroup) (ref by {referencer_type} {referencer_name!r}) has been found on location {object_location}",
+                            style="green", level=2)
 
                     # for each static group member, call the current function recursively
                     # (if the member has not already been resolved for the current location, which means that it would
                     # already have been flattened)
                     for group_member in used_object.static_value:
                         if group_member not in resolved_cache[usage_base]['Address']:
-                            if self._superverbose:
-                                self._console.log(
-                                    f"  {'*' * recursion_level} Found group member of AddressGroup {used_object.name!r} : {group_member!r}",
-                                    style="green italic")
+                            self._console.log(
+                                    f"[ {usage_base} ] {'*' * recursion_level} Found group member of AddressGroup {used_object.name!r} : {group_member!r}",
+                                    style="green", level=2)
 
                             # call to the flatten_object function with the following parameters :
                             # panos.Object found for the requested object name (returned by a call to get_relative_object_location)
@@ -819,10 +850,9 @@ class PaloCleaner:
                 # for members to be found using their tags
                 # for dynamic groups, members can be at any location, upward starting from the usage_base location
                 elif used_object.dynamic_value:
-                    if self._superverbose:
-                        self._console.log(
-                            f"  {'*' * recursion_level} Object {used_object.name!r} (dynamic AddressGroup) used on {usage_base!r} (ref by {referencer_type} {referencer_name!r}) has been found on location {object_location}",
-                            style="green italic")
+                    self._console.log(
+                            f"[ {usage_base} ] {'*' * recursion_level} Object {used_object.name!r} (dynamic AddressGroup) (ref by {referencer_type} {referencer_name!r}) has been found on location {object_location}",
+                            style="green", level=2)
 
                     # call to the gen_condition_expression function, which will convert the DAG value into an executable
                     # python condition
@@ -832,10 +862,9 @@ class PaloCleaner:
                     # (= for each object matched by the DAG)
                     for referenced_object, referenced_object_location in self.get_relative_object_location_by_tag(
                             executable_condition, usage_base):
-                        if self._superverbose:
-                            self._console.log(
-                                f"  {'*' * recursion_level} Found group member of dynamic AddressGroup {used_object.name!r} : {referenced_object.name!r}",
-                                style="green italic")
+                        self._console.log(
+                                f"[ {usage_base} ] {'*' * recursion_level} Found group member of dynamic AddressGroup {used_object.name!r} : {referenced_object.name!r}",
+                                style="green", level=2)
 
                         # for each dynamic group member, call the current function recursively
                         # (if the member has not already been resolved for the current location, which means that it would
@@ -862,27 +891,23 @@ class PaloCleaner:
                             # a DAG by a tag needs to be replaced. This tag will need to be added to the replacement
                             # object for this new object to be matched by the DAG also
                             self._tag_referenced.add((referenced_object, referenced_object_location))
-                            if self._superverbose:
-                                self._console.log(
-                                    f"  {'*' * recursion_level} Marking {referenced_object.name!r} as tag-referenced",
-                                    style="green italic")
+                            self._console.log(
+                                    f"[ {usage_base} ] {'*' * recursion_level} Marking {referenced_object.name!r} as tag-referenced",
+                                    style="green", level=2)
                         else:
-                            if self._superverbose:
-                                self._console.log(
-                                    f"  {'*' * recursion_level} Address Object {referenced_object.name!r} already resolved in context {usage_base}",
-                                    style="yellow")
+                            self._console.log(
+                                    f"[ {usage_base} ] {'*' * recursion_level} Address Object {referenced_object.name!r} already resolved in current context",
+                                    style="yellow", level=2)
 
             # or here for ServiceGroup
             elif type(used_object) is panos.objects.ServiceGroup:
                 if used_object.value:
-                    if self._superverbose:
-                        self._console.log(
-                            f"  {'*' * recursion_level} Object {used_object.name!r} (ServiceGroup) used on {usage_base} has been found on location {object_location}")
+                    self._console.log(
+                            f"[ {usage_base} ] {'*' * recursion_level} Object {used_object.name!r} (ServiceGroup) has been found on location {object_location}", level=2)
                     for group_member in used_object.value:
                         if group_member not in resolved_cache[usage_base]['Service']:
-                            if self._superverbose:
-                                self._console.log(
-                                    f"  {'*' * recursion_level} Found group member of ServiceGroup {used_object.name} : {group_member}")
+                            self._console.log(
+                                    f"[ {usage_base} ] {'*' * recursion_level} Found group member of ServiceGroup {used_object.name} : {group_member}", level=2)
                             obj_set += flatten_object(
                                 *self.get_relative_object_location(group_member, usage_base),
                                 usage_base,
@@ -898,10 +923,9 @@ class PaloCleaner:
                 if type(used_object) is not panos.objects.Tag:
                     if used_object.tag:
                         for tag in used_object.tag:
-                            if self._superverbose:
-                                self._console.log(
-                                    f"  {'*' * recursion_level} Object {used_object.name} ({used_object.__class__.__name__}) uses tag {tag}",
-                                    style="green italic")
+                            self._console.log(
+                                    f"[ {usage_base} ] {'*' * recursion_level} Object {used_object.name} ({used_object.__class__.__name__}) uses tag {tag}",
+                                    style="green")
                             if tag not in resolved_cache[usage_base]['Tag']:
                                 # call to the flatten_object function with the following parameters :
                                 # panos.Object (found by the get_relative_object_location function)
@@ -1011,9 +1035,8 @@ class PaloCleaner:
                         # else if the object is in the resolved_cache (and is not "any"), it means it has already been resolved
                         # (if the object is "any", we don't care)
                         elif obj != 'any':
-                            if self._superverbose:
-                                self._console.log(f" * {obj_type} Object {obj!r} already resolved in context {location_name}",
-                                                  style="yellow")
+                            self._console.log(f"[ {location_name} ] * {obj_type} Object {obj!r} already resolved in current context",
+                                                  style="yellow", level=2)
                 # update progress bar for each processed rule
                 progress.update(task, advance=1)
 
@@ -1231,8 +1254,7 @@ class PaloCleaner:
                     try:
                         if self._tiebreak_tag in o[0].tag:
                             choosen_object = o
-                        if self._superverbose:
-                            self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen by tiebreak")
+                        self._console.log(f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen by tiebreak", level=2)
                     except:
                         # This exception is matched when checking if the tiebreak tag is on the list of tags of an
                         # object which has no tags
@@ -1258,16 +1280,14 @@ class PaloCleaner:
                 for o in shared_fqdn_obj:
                     if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_fqdn_obj] and not choosen_object:
                         choosen_object = o
-                        if self._superverbose:
-                            self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with FQDN naming")
+                        self._console.log(f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with FQDN naming", level=2)
             # else return the first found shared object
             if shared_obj and not choosen_object:
                 for o in shared_obj:
                     if not choosen_object:
                     #if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_obj] and not choosen_object:
                         choosen_object = o
-                        if self._superverbose:
-                            self._console.log(f"Object {o[0].about()['name']} (context {o[1]}) choosen as it's a shared object")
+                        self._console.log(f"[ {base_location} ] Object {o[0].about()['name']} (context {o[1]}) choosen as it's a shared object", level=2)
             # Repeat the same logic for intermediate device-groups
             if interm_fqdn_obj and not choosen_object:
                 temp_object_level = 999
@@ -1279,8 +1299,7 @@ class PaloCleaner:
                         if location_level < temp_object_level:
                             temp_object_level = location_level
                             choosen_object = o
-                if self._superverbose:
-                    self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object with FQDN naming (level = {temp_object_level})")
+                self._console.log(f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object with FQDN naming (level = {temp_object_level})", level=2)
             if interm_obj and not choosen_object:
                 temp_object_level = 999
                 for o in interm_obj:
@@ -1289,12 +1308,11 @@ class PaloCleaner:
                         if location_level < temp_object_level:
                             temp_object_level = location_level
                             choosen_object = o
-                if self._superverbose:
-                    self._console.log(f"Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object (level = {temp_object_level})")
+                self._console.log(f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object (level = {temp_object_level})", level=2)
         # If no best replacement object has been found at this point, display an alert and return the first one in the
         # input list (can lead to random results)
         if not choosen_object:
-            self._console.log(f"ERROR : Unable to choose an object in the following list for address {obj_list[0][0].value} : {obj_list}. Returning the first one by default", style="red")
+            self._console.log(f"[ {base_location} ] ERROR : Unable to choose an object in the following list for address {obj_list[0][0].value} : {obj_list}. Returning the first one by default", style="red")
             choosen_object = obj_list[0]
 
         # If an object has not been chosen using the tiebreak tag, but the tiebreak tag adding has been requested,
@@ -1310,8 +1328,8 @@ class PaloCleaner:
             else:
                 choosen_object[0].tag = [self._tiebreak_tag]
                 tag_changed = True
-            if self._superverbose and tag_changed:
-                self._console.log(f"Adding tiebreak tag {self._tiebreak_tag} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]} ")
+            if tag_changed:
+                self._console.log(f"[ {base_location} ] Adding tiebreak tag {self._tiebreak_tag} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]} ", level=2)
             # If cleaning application is requested and tag has been changed, apply it to Panorama
             if self._apply_cleaning and tag_changed:
                 choosen_object[0].apply()
@@ -1352,9 +1370,8 @@ class PaloCleaner:
                     try:
                         if self._tiebreak_tag in o[0].tag:
                             choosen_object = o
-                        if self._superverbose:
-                            self._console.log(
-                                f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen by tiebreak")
+                        self._console.log(
+                                f"[ {base_location} ] Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen by tiebreak", level=2)
                     except:
                         # This exception is matched when checking if the tiebreak tag is on the list of tags of an
                         # object which has no tags
@@ -1382,17 +1399,15 @@ class PaloCleaner:
                 for o in shared_standard_obj:
                     if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_standard_obj]:
                         choosen_object = o
-                        if self._superverbose:
-                            self._console.log(
-                                f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with standard naming")
+                        self._console.log(
+                                f"[ {base_location} ] Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with standard naming", level=2)
             # Else return the first found shared object
             if shared_obj and not choosen_object:
                 for o in shared_obj:
                     if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_obj]:
                         choosen_object = o
-                        if self._superverbose:
-                            self._console.log(
-                                f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object")
+                        self._console.log(
+                                f"[ {base_location} ] Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object", level=2)
             # Repeat the same logic for intermediate device-groups
             if interm_standard_obj and not choosen_object:
                 temp_object_level = 999
@@ -1403,9 +1418,8 @@ class PaloCleaner:
                     if location_level < temp_object_level:
                         temp_object_level = location_level
                         choosen_object = o
-                if self._superverbose:
-                    self._console.log(
-                        f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object with standard naming (level = {temp_object_level})")
+                self._console.log(
+                        f"[ {base_location} ] Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object with standard naming (level = {temp_object_level})", level=2)
             if interm_obj and not choosen_object:
                 temp_object_level = 999
                 for o in interm_obj:
@@ -1413,9 +1427,8 @@ class PaloCleaner:
                     if location_level < temp_object_level:
                         temp_object_level = location_level
                         choosen_object = o
-                if self._superverbose:
-                    self._console.log(
-                        f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object (level = {temp_object_level})")
+                self._console.log(
+                        f"[ {base_location} ] Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object (level = {temp_object_level})", level=2)
         # If no best replacement object has been found at this point, display an alert and return the first one in the
         # input list (can lead to random results)
         if not choosen_object:
@@ -1435,9 +1448,9 @@ class PaloCleaner:
             else:
                 choosen_object[0].tag = [self._tiebreak_tag]
                 tag_changed = True
-            if self._superverbose and tag_changed:
+            if tag_changed:
                 self._console.log(
-                    f"Adding tiebreak tag {self._tiebreak_tag} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]}")
+                    f"[ {base_location} ] Adding tiebreak tag {self._tiebreak_tag} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]}", level=2)
             # If cleaning application is requested and tag has been changed, apply it to Panorama
             if self._apply_cleaning and tag_changed:
                 choosen_object[0].apply()
@@ -1497,8 +1510,8 @@ class PaloCleaner:
                     # if the chosen replacement object is different than the actual object
                     if replacement_obj != obj:
                         self._console.log(
-                            f"   Replacing {obj.about()['name']} ({obj.__class__.__name__}) at location {location_name} by {replacement_obj.about()['name']} at location {replacement_obj_location}",
-                            style="green italic")
+                            f"[ {location_name} ] Replacing {obj.about()['name']} ({obj.__class__.__name__}) at location {location_name} by {replacement_obj.about()['name']} at location {replacement_obj_location}",
+                            style="green", level=2)
 
                         # Populating the global _replacements dict (for the current location, current object type) with
                         # the details about the current object name, current object instance and location, and replacement
@@ -1553,24 +1566,29 @@ class PaloCleaner:
                     if not [x for x in self._objects['shared']['Tag'] if x.name == tag]:
                         # find the original tag (on its actual location)
                         tag_instance, tag_location = self.get_relative_object_location(tag, location_name, obj_type="tag")
-                        self._console.log(f"   [shared] Creating tag {tag!r} (copy from {tag_location}), to be used on ({replacement_obj_instance.about()['name']} at location {replacement_obj_location})")
+                        self._console.log(f"[ Panorama ] Creating tag {tag!r} (copy from {tag_location}), to be used on ({replacement_obj_instance.about()['name']} at location {replacement_obj_location})")
                         # if the cleaning application has been requested, create the new tag on Panorama
                         if self._apply_cleaning:
                             try:
                                 self._panorama.add(tag_instance).create()
                             except Exception as e:
-                                self._console.log(f"    [shared] Error while creating tag {tag!r} ! : {e.message}", style="red")
+                                self._console.log(f"[ Panorama ] Error while creating tag {tag!r} ! : {e.message}", style="red")
                         # also add the new Tag object at the proper location (shared) on the local cache
                         self._objects['shared']['Tag'].append(tag_instance)
                         self._used_objects_sets['shared'].add((tag_instance, 'shared'))
 
-                    self._console.log(f"    [{replacement_obj_location}] Adding tag {tag} to object {replacement_obj_instance.about()['name']!r} ({replacement_obj_instance.__class__.__name__})", style="yellow italic")
                     # add the new tag to the replacement object
                     if replacement_obj_instance.tag:
                         if not tag in replacement_obj_instance.tag:
                             replacement_obj_instance.tag.append(tag)
+                            self._console.log(
+                                f"[ {replacement_obj_location} ] Adding tag {tag} to object {replacement_obj_instance.about()['name']!r} ({replacement_obj_instance.__class__.__name__})",
+                                style="yellow")
                     else:
                         replacement_obj_instance.tag = [tag]
+                        self._console.log(
+                            f"[ {replacement_obj_location} ] Adding tag {tag} to object {replacement_obj_instance.about()['name']!r} ({replacement_obj_instance.__class__.__name__})",
+                            style="yellow")
                     # if the cleaning application has been requested, apply the change to the replacement object
                     if self._apply_cleaning:
                         replacement_obj_instance.apply()
@@ -1597,8 +1615,7 @@ class PaloCleaner:
                         # If the current object to be replaced has been matched as a member of a static group at the
                         # current location level, add it to the replacements_done tracking dict
                         if matched:
-                            if self._superverbose:
-                                self._console.log(f"    [{location_name}] Replacing {source_obj_instance.about()['name']!r} ({source_obj_location}) by {replacement_obj_instance.about()['name']!r} ({replacement_obj_location}) on {checked_object.about()['name']!r} ({checked_object.__class__.__name__})", style="yellow italic")
+                            self._console.log(f"[ {location_name} ] Replacing {source_obj_instance.about()['name']!r} ({source_obj_location}) by {replacement_obj_instance.about()['name']!r} ({replacement_obj_location}) on {checked_object.about()['name']!r} ({checked_object.__class__.__name__})", style="yellow", level=2)
                             # create a list (if not existing already) for the current static group object
                             # which will contain the list of all replacements done on this group
                             if checked_object.name not in replacements_done:
@@ -1609,7 +1626,7 @@ class PaloCleaner:
                     except ValueError:
                         continue
                     except Exception as e:
-                        self._console.log(f"    [{location_name}] Unknown error while replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} on {checked_object.about()['name']!r} ({checked_object.__class__.__name__}) : {e.message}", style="red")
+                        self._console.log(f"[ {location_name} ] Unknown error while replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} on {checked_object.about()['name']!r} ({checked_object.__class__.__name__}) : {e.message}", style="red")
                     # if the cleaning application has been requested, update the modified group on Panorama
                     if self._apply_cleaning and changed:
                         checked_object.apply()
@@ -1886,7 +1903,7 @@ class PaloCleaner:
 
                 # If there are replacements on the current rulebase, display the generated rich.Table on the console
                 if total_replacements:
-                    self._console.log(rulebase_table)
+                    self._console.print(rulebase_table)
 
     def clean_local_object_set(self, location_name: str, progress: rich.progress.Progress, task: rich.progress.TaskID):
         """
@@ -1955,17 +1972,15 @@ class PaloCleaner:
                         # current location, and replace it with the replacement object
                         self._used_objects_sets[location_name].remove(infos['source'])
                         self._used_objects_sets[location_name].add(infos['replacement'])
-                        if self._superverbose:
-                            self._console.log(f"[{location_name}] Removing unprotected object {name} (location {infos['source'][1]}) from used objects set")
+                        self._console.log(f"[ {location_name} ] Removing unprotected object {name} (location {infos['source'][1]}) from used objects set", level=2)
                         # If the name of the current replacement object is different than the replacement one, count it
                         # as a replacement on the _cleaning_counts tracker
                         if infos['source'][1] == location_name and infos['source'][0].name != infos['replacement'][0].name:
                             self._cleaning_counts[location_name][type]['replaced'] += 1
                     # This exception should never be raised but protects the execution
                     except ValueError:
-                        self._console.log(f"ValueError when trying to remove {name} from used objects set at location {location_name} : object not found on object set")
-                elif self._superverbose:
-                    self._console.log(f"[{location_name}] Not removing {name} (location {infos['source'][1]}) from used objects set, as protected by hitcount")
+                        self._console.log(f"[ {location_name} ] ValueError when trying to remove {name} from used objects set : object not found on object set")
+                self._console.log(f"[ {location_name} ] Not removing {name} (location {infos['source'][1]}) from used objects set, as protected by hitcount", level=2)
 
         # After cleaning the current device-group, adding the current location _used_objects_set values to the
         # _used_objects_set of the parent.
@@ -1975,6 +1990,9 @@ class PaloCleaner:
         if not parent_dg:
             parent_dg = "shared"
         self._used_objects_sets[parent_dg] = self._used_objects_sets[parent_dg].union(self._used_objects_sets[location_name])
+
+        print(f"Populated _used_objects_set for parent {parent_dg}")
+        print(self._used_objects_sets[parent_dg])
 
 
         # Iterating over each object type / object for the current location, and check if each object is member
@@ -1992,13 +2010,13 @@ class PaloCleaner:
                         while not delete_ok:
                             try:
                                 o.delete()
-                                self._console.log(f"INFO : Object {o.name} ({o.__class__.__name__}) has been successfuly deleted at location {location_name}")
+                                self._console.log(f"[ {location_name} ] Object {o.name} ({o.__class__.__name__}) has been successfuly deleted ", style="red")
                                 self._cleaning_counts[location_name][type]['removed'] += 1
                                 delete_ok = True
                             except panos.errors.PanDeviceXapiError as e:
                                 dependencies, all_matched = parse_PanDeviceXapiError_references(e.message)
                                 if not all_matched:
-                                    self._console.log(f"ERROR : It seems that object {o.name} ({o.__class__.__name__}) is used somewhere in the configuration, on device-group {location_name}. It will not be deleted. Please check manually")
+                                    self._console.log(f"[ {location_name} ] ERROR : It seems that object {o.name} ({o.__class__.__name__}) is used somewhere in the configuration, on device-group {location_name}. It will not be deleted. Please check manually")
                                     delete_ok = True
                                     continue
                                 else:
@@ -2006,20 +2024,19 @@ class PaloCleaner:
                                     # an object which is still used on a rule at this time of the process
                                     # Keeping it for security purposes
                                     for rule_dependency in dependencies["Rules"]:
-                                        self._console.log(f"ERROR : It seems that object {o.name} ({o.__class__.__name__}) is still used on the following rule : {rule_dependency['rule_location']} / {rule_dependency['rulename']}. It will not be deleted. Please check manually")
+                                        self._console.log(f"[ {location_name} ] ERROR : It seems that object {o.name} ({o.__class__.__name__}) is still used on the following rule : {rule_dependency['rule_location']} / {rule_dependency['rulename']}. It will not be deleted. Please check manually")
                                         delete_ok = True
                                     if delete_ok:
                                         continue
 
                                     for group_dependency in dependencies["AddressGroups"]:
-                                        if self._superverbose:
-                                            self._console.log(f"Group {o.name} ({o.__class__.__name__}) is still used on another group : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
+                                        self._console.log(f"[ {location_name} ] Group {o.name} ({o.__class__.__name__}) is still used on another group : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
                                         referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'])
                                         referencer_group.static_value.remove(o.name)
                                         referencer_group.apply()
                     else:
                         self._console.log(
-                            f"Object {o.name} ({o.__class__.__name__}) can be deleted at location {location_name}")
+                            f"[ {location_name} ] Object {o.name} ({o.__class__.__name__}) can be deleted", style="red")
                         self._cleaning_counts[location_name][type]['removed'] += 1
 
 
