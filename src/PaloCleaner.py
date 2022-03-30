@@ -1399,7 +1399,7 @@ class PaloCleaner:
             interm_obj = [x for x in obj_list if x[1] != 'shared']
             # create a list of objects having a name like "protocol_port" (ie = tcp_80)
             standard_obj = [x for x in obj_list if
-                            x[0].name == x[0].protocol.lower() + '_' + str(x[0].destination_port)]
+                            x[0].name.lower() == x[0].protocol.lower() + '_' + str(x[0].destination_port)]
 
             # Find objects being both shared and with standard naming for service objects
             # or being at intermediate locations and with standard naming for service objects
