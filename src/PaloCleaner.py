@@ -1996,8 +1996,8 @@ class PaloCleaner:
         }
 
         # removing replaced objects from used_objects_set for current location_name
-        for type in self._replacements.get(location_name, list()):
-            for name, infos in self._replacements[location_name][type].items():
+        for obj_type in self._replacements.get(location_name, list()):
+            for name, infos in self._replacements[location_name][obj_type].items():
                 # Remind that objects marked as "blocked" on the _replacements tracker should not be removed :
                 # They have not been replaced as expected, because used on rules where the opstate values
                 # (last_hit_timestamp and last_change_timestamp) are not in the allowed boundaries
@@ -2011,7 +2011,7 @@ class PaloCleaner:
                         # If the name of the current replacement object is different than the replacement one, count it
                         # as a replacement on the _cleaning_counts tracker
                         if infos['source'][1] == location_name and infos['source'][0].name != infos['replacement'][0].name:
-                            self._cleaning_counts[location_name][type]['replaced'] += 1
+                            self._cleaning_counts[location_name][obj_type]['replaced'] += 1
                     # This exception should never be raised but protects the execution
                     except ValueError:
                         self._console.log(f"[ {location_name} ] ValueError when trying to remove {name} from used objects set : object not found on object set")
@@ -2025,10 +2025,6 @@ class PaloCleaner:
         if not parent_dg:
             parent_dg = "shared"
         self._used_objects_sets[parent_dg] = self._used_objects_sets[parent_dg].union(self._used_objects_sets[location_name])
-
-        #print(f"Populated _used_objects_set for parent {parent_dg}")
-        #print(self._used_objects_sets[parent_dg])
-
 
         # Iterating over each object type / object for the current location, and check if each object is member
         # (or still member, as the replaced ones have been suppressed) of the _used_objects_set for the same location
@@ -2046,7 +2042,7 @@ class PaloCleaner:
                             try:
                                 o.delete()
                                 self._console.log(f"[ {location_name} ] Object {o.name} ({o.__class__.__name__}) has been successfuly deleted ", style="red")
-                                self._cleaning_counts[location_name][type]['removed'] += 1
+                                self._cleaning_counts[location_name][obj_type]['removed'] += 1
                                 delete_ok = True
                             except panos.errors.PanDeviceXapiError as e:
                                 dependencies, all_matched = parse_PanDeviceXapiError_references(e.message)
@@ -2072,7 +2068,7 @@ class PaloCleaner:
                     else:
                         self._console.log(
                             f"[ {location_name} ] Object {o.name} ({o.__class__.__name__}) can be deleted", style="red")
-                        self._cleaning_counts[location_name][type]['removed'] += 1
+                        self._cleaning_counts[location_name][obj_type]['removed'] += 1
 
 
 
@@ -2086,8 +2082,6 @@ class PaloCleaner:
                         if self._apply_cleaning:
                             successful_delete = False
         """
-
-
 
     def gen_tree_depth(self, input_tree, start='shared', depth=1):
         """
@@ -2104,85 +2098,3 @@ class PaloCleaner:
                 self._depthed_tree[depth] = list()
             self._depthed_tree[depth].append(loc)
             self.gen_tree_depth(input_tree, loc, depth + 1)
-
-    def remove_objects(self, analyzis_perimeter, delete_upward_objects):
-        """
-        Delete objects which have been added to the _removable_objects dict
-
-        :return:
-        """
-        delete_count = dict()
-        for loc in self._objects.keys():
-            if not loc in delete_count.keys():
-                delete_count[loc] = 0
-
-        # for each tuple (Object, location_name) in _removable_objects
-        for obj_instance, obj_location in self._removable_objects:
-
-            print(f"[{obj_location}] Deleting object {obj_instance.about().get('name')}")
-
-            # remove from the _objects cached information for the object location
-            self._objects[obj_location]['address_obj'].remove(obj_instance)
-            # TODO : test behavior is object on parent (intermediate) DG is removed from 1 child DG and remains used on another one
-
-            # remove object from all _used_objects_set sub-dict (each location) where it has been found as used
-            for loc in self._used_objects_sets.keys():
-                try:
-                    self._used_objects_sets[loc].remove((obj_instance, obj_location))
-                    print(f"Object {obj_instance.about().get('name')} well DELETED from location {loc}")
-                except KeyError:
-                    pass
-                except Exception as e:
-                    print(f"[{loc}] ERROR - Object {obj_instance.about().get('name')} not found ! {e}")
-
-            # delete the object itself (if apply-cleaning parameter is given in start command)
-            if self._apply_cleaning:
-                obj_instance.delete()
-            delete_count[obj_location] += 1
-            print(f"[{obj_location}] Deleting object {obj_instance.about().get('name')} as it has been replaced")
-
-        # remove unused objects (including groups), which are not member of any used_objects_set sub-dict
-        # cleaning order has to be fixed to avoid dependencies errors (deleting unused group before deleting members of this group)
-        cleaning_order = ['service_group', 'service', 'address_group', 'address_obj', 'tag']
-
-        global_used_objects_set = set()
-        for k, v in self._used_objects_sets.items():
-            for obj_tuple in v:
-                global_used_objects_set.add(obj_tuple)
-
-        # Create a list for which the order will be the more "depth" device-groups first, then going up to 'shared'
-        dg_clean_order = list()
-        for key in sorted(self._depthed_tree.keys(), reverse=True):
-            for dg in self._depthed_tree[key]:
-                if dg in analyzis_perimeter['direct']:
-                    dg_clean_order.append(dg)
-                elif delete_upward_objects:
-                    if dg in analyzis_perimeter['direct'] + analyzis_perimeter['indirect'] and dg in analyzis_perimeter[
-                        'full']:
-                        dg_clean_order.append(dg)
-        print(f"Cleaning DG in the following order : {dg_clean_order} ")
-
-        # for each device-group in the dg_clean_order list (starting with the more depthed)
-        for k in dg_clean_order:
-            print(f"Starting cleaning unused {k}")
-            v = self._objects[k]
-            # for each type of objects, in the cleaning_order order
-            for obj_type in cleaning_order:
-                for obj in v[obj_type]:
-                    # If the current object is not used anywhere
-                    if (obj, k) not in global_used_objects_set:
-                        try:
-                            print(f"[{k}] Deleting unused object {obj.about().get('name')}")
-                            # Let's delete it
-                            if self._apply_cleaning:
-                                obj.delete()
-                        except pan.xapi.PanXapiError as e:
-                            print(f"[{k}] ERROR when deleting unused object {obj.about().get('name')}. TRY MANUALLY")
-                        finally:
-                            delete_count[k] += 1
-        print("\n\n\n")
-        print("Deleted objects per location : ")
-        for k, v in delete_count.items():
-            print(f"{k} --> {v}")
-
-        # print(self._used_objects_sets)
