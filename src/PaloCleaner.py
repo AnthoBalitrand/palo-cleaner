@@ -70,6 +70,7 @@ class PaloCleaner:
         self._tiebreak_tag = kwargs['tiebreak_tag']
         self._apply_tiebreak_tag = kwargs['apply_tiebreak_tag']
         self._no_report = kwargs['no_report']
+        self._split_report = kwargs['split_report']
         self._report_folder = report_folder
         self._panorama = None
         self._objects = dict()
@@ -87,9 +88,9 @@ class PaloCleaner:
         self._max_change_timestamp = int(time.time()) - int(kwargs['max_days_since_change']) * 86400 if kwargs['max_days_since_change'] else 0
         self._max_hit_timestamp = int(time.time()) - int(kwargs['max_days_since_hit']) * 86400 if kwargs['max_days_since_hit'] else 0
         self._need_opstate = self._max_change_timestamp or self._max_hit_timestamp
-        self._console = Console(record=True if not self._no_report else False)
-        self._console.log = self.loglevel_decorator(self._console.log)
-        self._console.status = self.status_decorator(self._console.status)
+        self._console = None
+        self._console_context = None
+        self.init_console()
         self._replacements = dict()
         self._panorama_devices = dict()
         self._hitcounts = dict()
@@ -284,6 +285,7 @@ class PaloCleaner:
             for depth, contexts in sorted(self._depthed_tree.items(), key=lambda x: x[0], reverse=True):
                 for context_name in contexts:
                     if context_name in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']:
+                        self.init_console(context_name)
                         self._console.print(Panel(f"  [bold magenta]{context_name}  ", style="magenta"),
                                           justify="left")
                         # OBJECTS OPTIMIZATION
@@ -318,6 +320,7 @@ class PaloCleaner:
                             self.clean_local_object_set(context_name, progress, dg_optimize_task)
                             self._console.log(f"[ {context_name} ] Objects cleaned (fully included)")
 
+        self.init_console("report")
         # Display the cleaning operation result (display again the hierarchy tree, but with the _cleaning_counts
         # information (deleted / replaced objects of each type for each device-group)
         self._console.print(Panel(self.generate_hierarchy_tree(result=True)))
@@ -325,6 +328,27 @@ class PaloCleaner:
         # If the --no-report argument was not used at startup, export the console content to an HTML report file
         if not self._no_report:
             self._console.save_html(self._report_folder+'/report.html')
+
+    def init_console(self, context_name=None):
+        """
+        Initializes a new rich.Console object if the split_report argument has been specified at startup
+        Save the previous (replaced) Console to html file before creating the new one
+        :param context_name: (str) The name of the context (device-group) concerned by the logs which will be sent to
+        this Console
+        :return:
+
+        """
+
+        if not context_name and not self._console:
+            self._console = Console(record=True if not self._no_report else False)
+            self._console_context = "init"
+        elif context_name and not self._no_report and self._split_report:
+            self._console.save_html(self._report_folder+'/'+self._console_context+'.html')
+            self._console = Console(record=True)
+            self._console_context = context_name
+        self._console.log = self.loglevel_decorator(self._console.log)
+        self._console.status = self.status_decorator(self._console.status)
+
 
     def get_devicegroups(self):
         """

@@ -54,13 +54,7 @@ def parse_cli_args():
         default = 1,
         help = "Verbosity level (from 1 to 3)"
     )
-    """
-    parser.add_argument(
-        "--superverbose",
-        action = "store_true",
-        help = "Verbosity level (from 1 to 3)"
-    )
-    """
+
     parser.add_argument(
         "--max-days-since-change",
         action = "store",
@@ -93,6 +87,13 @@ def parse_cli_args():
         "--no-report" ,
         action = "store_true",
         help = "Does not generates job reports",
+        default = False,
+    )
+
+    parser.add_argument(
+        "--split-report",
+        action = "store_true",
+        help = "Split the report file (1 per device-group)",
         default = False,
     )
 
