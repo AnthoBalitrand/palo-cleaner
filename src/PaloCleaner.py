@@ -896,6 +896,13 @@ class PaloCleaner:
                                 f"[ {usage_base} ] {'*' * recursion_level} Found group member of dynamic AddressGroup {used_object.name!r} : {referenced_object.name!r}",
                                 style="green", level=2)
 
+                        # the condition below permits to alert for circular references
+                        if referenced_object == used_object:
+                            self._console.log(
+                                f"[ {usage_base} ] {'*' * recursion_level} Circular reference found on dynamic AddressGroup {used_object.name!r}",
+                                style="red"
+                            )
+
                         # for each dynamic group member, call the current function recursively
                         # (if the member has not already been resolved for the current location, which means that it would
                         # already have been flattened)
