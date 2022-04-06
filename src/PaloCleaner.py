@@ -986,6 +986,7 @@ class PaloCleaner:
         # Regex statements which permits to identify an AddressObject value to know if it represents an IP/mask or a range
         ip_regex = re.compile(r'^(\d{1,3}\.){3}\d{1,3}(\/\d{1,2})?$')
         range_regex = re.compile(r'^((\d{1,3}\.){3}\d{1,3}-?){2}$')
+        created_addr_object = list()
 
         # iterates on all rulebases for the concerned location
         for k, v in self._rulebases[location_name].items():
@@ -1041,18 +1042,27 @@ class PaloCleaner:
                                     if ip_regex.match(obj) or range_regex.match(obj):
                                         # create a (temporary) new AddressObject (whose name is the same as the value)
                                         # and add it to the location_obj_set
-                                        new_addr_obj = AddressObject(name=obj, value=obj)
+                                        addr_value = self.hostify_address(obj)
                                         # adding the new created object to the _addr_ipsearch datastructure for the
                                         # current location level, else the replacement process will potentially find
                                         # only 1 replacement object (if there's one), while the current one should be
                                         # found also (replacement will be processed only if at least 2 objects are found)
-                                        if (host_addr := self.hostify_address(obj)) not in self._addr_ipsearch[location_name].keys():
-                                            self._addr_ipsearch[location_name][host_addr] = list()
-                                        self._addr_ipsearch[location_name][host_addr].append(new_addr_obj)
-                                        location_obj_set += [(new_addr_obj, location_name)]
-                                        self._console.log(
-                                            f"[ {location_name} ] * Created AddressObject for address {obj} used on rule {r.name!r}",
-                                            style="yellow")
+                                        if addr_value not in self._addr_ipsearch[location_name].keys():
+                                            self._addr_ipsearch[location_name][addr_value] = list()
+                                        if not addr_value in created_addr_object:
+                                            new_addr_obj = AddressObject(name=obj, value=addr_value)
+                                            self._addr_ipsearch[location_name][addr_value].append(new_addr_obj)
+                                            location_obj_set += [(new_addr_obj, location_name)]
+                                            self._console.log(
+                                                f"[ {location_name} ] * Created AddressObject for address {obj} used on rule {r.name!r}",
+                                                style="yellow")
+                                            created_addr_object.append(addr_value)
+                                        else:
+                                            self._console.log(
+                                                f"[ {location_name} ] * Using previously created AddressObject for address {obj} used on rule {r.name!r}",
+                                                style="yellow",
+                                                level=2,
+                                            )
 
                                     # else for any un-supported AddressObject type, log an error
                                     else:
