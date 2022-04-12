@@ -1767,7 +1767,8 @@ class PaloCleaner:
 
                         # Thanks to the field format obtained from the repl_map descriptor, iterate directly over the
                         # not_null_field list (if it is already a list), or convert it to a list to iterate
-                        for o in not_null_field if field_type is list else [not_null_field]:
+                        field_values = not_null_field if field_type is list else [not_null_field]
+                        for o in field_values:
                             # Using the Walrus operator again to get the replacement information for the current object
                             # (if there's any)
                             if (replacement := self._replacements[location_name][obj_type].get(o)):
@@ -1781,10 +1782,14 @@ class PaloCleaner:
                                     # replacement type 2 = removed
                                     # replacement type 3 = added
                                     replacements_done[obj_type][field_name].append((f"{o} ({source_obj_location})", 2))
-                                    replacements_done[obj_type][field_name].append((f"{repl_name} ({replacement_obj_location})", 3))
-                                    current_field_replacements_count += 2
+                                    current_field_replacements_count += 1
                                     items_to_remove.append(o)
-                                    items_to_add.append(repl_name)
+                                    # blocking cases where duplicates objects are used on a field of the rule and would
+                                    # be replaced by the same target object
+                                    if repl_name not in field_values + items_to_add:
+                                        replacements_done[obj_type][field_name].append((f"{repl_name} ({replacement_obj_location})", 3))
+                                        current_field_replacements_count += 1
+                                        items_to_add.append(repl_name)
                                 # Else if the name of the replacement object is the same of the original one
                                 else:
                                     # replacement type 1 = same name different location
