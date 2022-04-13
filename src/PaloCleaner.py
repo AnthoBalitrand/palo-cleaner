@@ -1659,7 +1659,10 @@ class PaloCleaner:
                         # group members values needs to be updated
                         if source_obj_instance.about()['name'] != replacement_obj_instance.about()['name']:
                             checked_object.static_value.remove(source_obj_instance.about()['name'])
-                            checked_object.static_value.append(replacement_obj_instance.about()['name'])
+                            # adding the replacement object to the group only if it has not been already used to replace
+                            # another one (case where we have duplicate objects on a static group)
+                            if not replacement_obj_instance.about()['name'] in checked_object.static_value:
+                                checked_object.static_value.append(replacement_obj_instance.about()['name'])
                             changed = True
                             matched = True
                         # if the name of the replacement object is the same than the original one, the static
@@ -1693,13 +1696,20 @@ class PaloCleaner:
             # create a rich.Table, for which the header is the updated group name
             group_table = Table(style="dim", border_style="not dim", expand=False)
             group_table.add_column(changed_group_name)
+            # create a list which contains the list of new added objects to the group to avoid adding the same one
+            # multiple times (case of duplicate objects already in the group).
+            # The application of such stuff on the group directly is protected above on the code, here's just for display
+            already_added_objects = list()
+
             # for each replacement done on the current group
             for replaced_item in replacements_done[changed_group_name]:
                 # if the name of the original and replacement objects are different, display the original object
                 # name in red, and the replacement one in green (as well as their respective location)
                 if replaced_item[0] != replaced_item[2]:
                     group_table.add_row(f"[red]- {replaced_item[0]} ({replaced_item[1]})[/red]")
-                    group_table.add_row(f"[green]+ {replaced_item[2]} ({replaced_item[3]})[/green]")
+                    if not replaced_item[2] in already_added_objects:
+                        group_table.add_row(f"[green]+ {replaced_item[2]} ({replaced_item[3]})[/green]")
+                        already_added_objects.append(replaced_item[2])
                 # else if the name of the original and replacement objects are the same, just display the name in yellow
                 # as well as the original object and replacement object locations
                 else:
