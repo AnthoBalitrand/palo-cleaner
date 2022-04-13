@@ -349,7 +349,6 @@ class PaloCleaner:
         self._console.log = self.loglevel_decorator(self._console.log)
         self._console.status = self.status_decorator(self._console.status)
 
-
     def get_devicegroups(self):
         """
         Gets list of DeviceGroups from Panorama
@@ -1331,9 +1330,13 @@ class PaloCleaner:
             # if shared and well-named objects are found, return the first one
             if shared_fqdn_obj and not choosen_object:
                 for o in shared_fqdn_obj:
-                    if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_fqdn_obj] and not choosen_object:
-                        choosen_object = o
-                        self._console.log(f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with FQDN naming", level=2)
+                    # line below modified to fix issue signaled by Laetitia. Impact has to be evaluated
+                    # even if intermediate object has the same name than the shared replacement one, it needs to be the
+                    # one used (until deletion of the intermediate one to match the shared one)
+                    #if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_fqdn_obj] and not choosen_object:
+                    choosen_object = o
+                    self._console.log(f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with FQDN naming", level=2)
+                    break
             # else return the first found shared object
             if shared_obj and not choosen_object:
                 for o in shared_obj:
