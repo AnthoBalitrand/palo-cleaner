@@ -1864,6 +1864,8 @@ class PaloCleaner:
             if rulebase_name != "context" and len(rulebase) > 0:
                 # initialize a variable which will count the number of replacements done for this rulebase
                 total_replacements = 0
+                # initialize a variable which will count the number of edited rules for the current rulebase
+                modified_rules = 0
                 # find the opstate hitcount name for the current rulebase type (panos-python stuff)
                 # IE : SecurityRule becomes "security", NatRule becomes "nat"
                 # Note also that the rulebase_name has the following value format : PreRulebase_SecurityRule (for example)
@@ -1898,7 +1900,7 @@ class PaloCleaner:
                     # TODO : validate if disabled rules are considered editable or not (issue #19)
                     if r.disabled or not self._need_opstate or not rule_counters:
                         editable_rule = True
-                    elif rule_modification_timestamp > self._max_hit_timestamp and last_hit_timestamp > self._max_hit_timestamp:
+                    elif rule_modification_timestamp > self._max_change_timestamp and last_hit_timestamp > self._max_hit_timestamp:
                         editable_rule = True
 
                     # call the replace_in_rule function for the current rule, which will reply with :
@@ -1923,6 +1925,8 @@ class PaloCleaner:
                                             if object_name in self._replacements[location_name][obj_type]:
                                                 self._replacements[location_name][obj_type][object_name][
                                                     "blocked"] = True
+                        else:
+                            modified_rules += 1
 
                         # Iterate up to the value of the max_replace variable (which is the highest number of
                         # replacements for a given field of the current rule
@@ -1974,6 +1978,8 @@ class PaloCleaner:
                 # If there are replacements on the current rulebase, display the generated rich.Table on the console
                 if total_replacements:
                     self._console.print(rulebase_table)
+                    self._console.log(
+                        f"[ {location_name} ] {modified_rules} rules edited for the current rulebase ({rulebase_name})")
 
     def clean_local_object_set(self, location_name: str, progress: rich.progress.Progress, task: rich.progress.TaskID):
         """

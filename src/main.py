@@ -43,12 +43,6 @@ def parse_cli_args():
     )
 
     parser.add_argument(
-        "--delete-upward-objects",
-        action = "store_true",
-        help = "Deletes upward unused objects (shared + intermediates) if all childs are analyzed"
-    )
-
-    parser.add_argument(
         "--verbosity", "-v",
         action = "count",
         default = 1,
