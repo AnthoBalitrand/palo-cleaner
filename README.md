@@ -181,11 +181,11 @@ Discovered hierarchy tree is the following :
  F (Fully included = cleaned) / P (Partially included = not cleaned) 
 ╭────────────────────────────────────────────────────────────────────────────────────────────╮
 │ * P shared                                                                                 │
-│ ├── - mickey                                                                             │
-│ ├── - winnie                                                                             │
-│ └── * F bambi                                                                                │
-│     ├── + F geno                                                                             │
-│     └── + F gurri                                                                            │
+│ ├── - mickey                                                                               │
+│ ├── - winnie                                                                               │
+│ └── * F bambi                                                                              │
+│     ├── + F geno                                                                           │
+│     └── + F gurri                                                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
