@@ -136,60 +136,124 @@ Example :
 No device-groups specified, all hierarchy levels are included in the analyzis / cleaning process :
 ```
 $ python3 main.py --panorama-url 192.168.192.10 --api-user apiuser
-[22:56:28] [ Panorama ] Connection established                                                                                                            PaloCleaner.py:112
+[22:56:28] [ Panorama ] Connection established
 Discovered hierarchy tree is the following :
 (  + are directly included  /  * are indirectly included  /  - are not included  )
  F (Fully included = cleaned) / P (Partially included = not cleaned) 
 ╭────────────────────────────────────────────────────────────────────────────────────────────╮
 │ + F shared                                                                                 │
-│ ├── + F mickey                                                                             │
-│ ├── + F winnie                                                                             │
-│ └── + F bambi                                                                              │
-│     ├── + F geno                                                                           │
-│     └── + F gurri                                                                          │
+│ ├── + F sheldon                                                                            │
+│ ├── + F penny                                                                              │
+│ └── + F howard                                                                             │
+│     ├── + F halley                                                                         │
+│     └── + F neil                                                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
-Specifying 'mickey' and 'winnie' at startup :
+Specifying 'sheldon' and 'penny' at startup :
 
 ```
-$ python3 main.py --panorama-url 192.168.192.10 --api-user apiuser --device-groups mickey winnie
-[22:56:40] [ Panorama ] Connection established                                                                                                            PaloCleaner.py:112
+$ python3 main.py --panorama-url 192.168.192.10 --api-user apiuser --device-groups sheldon penny
+[22:56:40] [ Panorama ] Connection established
 Discovered hierarchy tree is the following :
 (  + are directly included  /  * are indirectly included  /  - are not included  )
  F (Fully included = cleaned) / P (Partially included = not cleaned) 
 ╭────────────────────────────────────────────────────────────────────────────────────────────╮
 │ * P shared                                                                                 │
-│ ├── + F mickey                                                                             │
-│ ├── + F winnie                                                                             │
-│ └── - bambi                                                                                │
-│     ├── - geno                                                                             │
-│     └── - gurri                                                                            │
+│ ├── + F sheldon                                                                            │
+│ ├── + F penny                                                                              │
+│ └── - howard                                                                               │
+│     ├── - halley                                                                           │
+│     └── - neil                                                                             │
 ╰────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 Note that the 'shared' level is included in the process (it will be analyzed as it is above some analyzed device-groups), 
 but it is marked as "P" = Partially included, meaning that it will not be cleaned. 
 
 
-Specifying 'geno' and 'gurri' at startup : 
+Specifying 'halley' and 'neil' at startup : 
 
 ```
-$ python3 main.py --panorama-url 192.168.192.10 --api-user apiuser --device-groups mickey winnie
-[22:56:50] [ Panorama ] Connection established                                                                                                            PaloCleaner.py:112
+$ python3 main.py --panorama-url 192.168.192.10 --api-user apiuser --device-groups halley neil
+[22:56:50] [ Panorama ] Connection established
 Discovered hierarchy tree is the following :
 (  + are directly included  /  * are indirectly included  /  - are not included  )
  F (Fully included = cleaned) / P (Partially included = not cleaned) 
 ╭────────────────────────────────────────────────────────────────────────────────────────────╮
 │ * P shared                                                                                 │
-│ ├── - mickey                                                                               │
-│ ├── - winnie                                                                               │
-│ └── * F bambi                                                                              │
-│     ├── + F geno                                                                           │
-│     └── + F gurri                                                                          │
+│ ├── - sheldon                                                                              │
+│ ├── - penny                                                                                │
+│ └── * F howard                                                                             │
+│     ├── + F halley                                                                         │
+│     └── + F neil                                                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
-As all the childs of the device-group "bambi" are explicitly included in the --device-groups argument, 
-"bambi" is implicitly included too. 
-"Mickey" and "winnie" will not be analyzed (neither cleaned). 
-The "shared" level will be analyzed, but not cleaned. 
+As all the childs of the device-group 'howard' are explicitly included in the --device-groups argument, 
+'howard' is implicitly included too. 
+'sheldon' and 'penny' will not be analyzed (neither cleaned). 
+The 'shared' level will be analyzed, but not cleaned. 
+
+#### 2 - Download all objects and rulebases from the included device-groups 
+
+The full objects and rulebases of the fully included and partially included device-groups is downloaded at this step. 
+
+**If you use opstate information** (using the --max-days-since-change and --max-days-since-hit parameters), those values are 
+downloaded at this step, **by connecting to each of the device-groups members appliances**. 
+
+
+Make sure the API user account provided at startup is also allowed to connect to all of those appliances, and that the necessary flows are open. 
+
+```
+╭───────────────────────────────────╮
+│ Downloading objects and rulebases │
+╰───────────────────────────────────╯
+[13:53:32] [ Panorama ] Shared objects downloaded (19 found)
+[13:53:33] [ Panorama ] Shared rulebases downloaded (1 rules found)
+[13:53:34] [ Panorama ] Managed devices information downloaded (found 0 devices)
+[13:53:35] [ sheldon ] Objects downloaded (6 found)
+[13:53:36] [ sheldon ] Rulebases downloaded (2 rules found)
+[13:53:37] [ penny ] Objects downloaded (8 found)
+[13:53:39] [ penny ] Rulebases downloaded (8 rules found)
+[13:53:40] [ howard ] Objects downloaded (0 found)
+[13:53:41] [ howard ] Rulebases downloaded (0 rules found)
+[13:53:42] [ halley ] Objects downloaded (1 found)
+[13:53:44] [ halley ] Rulebases downloaded (0 rules found)
+[13:53:45] [ neil ] Objects downloaded (0 found)
+[13:53:46] [ neil ] Rulebases downloaded (0 rules found)
+```
+
+#### 3 - Objects usage analysis 
+
+At this step, the script will compute several very important things : 
+- For objects directly used on the different rulebases, what is their location ? 
+  - objects are referenced by their name. Looking at the device-groups hierarchy, the script will find the "nearest" matching the object usage location, going upward 
+  - same logic is applied for all objects referenced on the policy : AddressObject, AddressGroups, Service, ServiceGroup, Tag... 
+
+![nearest_object_location_image](doc/images/nearest_object_location.png)
+
+- For IP addresses (hosts or subnets) directly used on rules (not referencing an object), create a matching AddressObject to work with in the next steps 
+
+```
+[ penny ] * Created AddressObject for address 10.121.16.0/24 used on rule 'Guest-CheesecakeFactory' 
+```
+
+- For referenced groups objects (AddressGroup or ServiceGroup), the group content is recursively explored (parsing content of groups referenced inside groups)
+  - For static groups, they can only reference objects at the same level, or at a higher level in the hierarchy compared to where the group is **created** 
+  - For dynamic groups, as they just reference tags, they can reference any object at the level where the group is **used**, and upward 
+
+![static_group_exploration_image](doc/images/static_group_exploration.png)
+
+![dynamic_group_exploration_image](doc/images/dynamic_group_exploration.png)
+
+Note that for dynamic groups, "circular reference" situation can occur : the group itself can be assigned the tags that it uses to find its own group members. 
+This is handled by the algorithm, and will not cause specific issues. 
+However, the following log will appear to advertise you about such a situation : 
+
+```
+[ sheldon] * Circular reference found on dynamic AddressGroup 'DYN-GROUP-1' 
+```
+
+Once this step will be processed, each device-group will be assigned with a set (list of unique objects) used by the rulebases of this device-group. 
+This set will contain tuples of (Object, location) of each and every object found by the exploration process. 
+
