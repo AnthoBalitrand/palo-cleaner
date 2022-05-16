@@ -300,7 +300,7 @@ class PaloCleaner:
                         # OBJECTS REPLACEMENT IN GROUPS
                         dg_replaceingroups_task = progress.add_task(
                             f"[ {context_name} ] Replacing objects in groups",
-                            total=len(self._replacements[context_name]['Address'])
+                            total=len(self._replacements[context_name]['Address']) + len(self._replacements[context_name]['Service'])
                         )
                         self.replace_object_in_groups(context_name, progress, dg_replaceingroups_task)
                         self._console.log(f"[ {context_name} ] Objects replaced in groups")
@@ -945,7 +945,7 @@ class PaloCleaner:
                             self._console.log(
                                     f"[ {usage_base} ] {'*' * recursion_level} Found group member of ServiceGroup {used_object.name} : {group_member}", level=2)
                             obj_set += flatten_object(
-                                *self.get_relative_object_location(group_member, usage_base),
+                                *self.get_relative_object_location(group_member, usage_base, obj_type="Service"),
                                 usage_base,
                                 used_object.__class__.__name__,
                                 used_object.name,
@@ -1691,6 +1691,65 @@ class PaloCleaner:
 
             progress.update(task, advance=1)
 
+        # for each replacement for object type "Service" (ServiceObject, ServiceGroup) at the current location level
+        for replacement_name, replacement in self._replacements[location_name]['Service'].items():
+            # the source object name is the key on the _replacements dict
+            source_obj = replacement_name
+            # the source_obj_instance and source_obj_location are found in the 'source' key of the dict item
+            source_obj_instance, source_obj_location = replacement['source']
+            # the replacement_obj_instance and replacement_obj_location are found in the 'replacement' key of the dict item
+            replacement_obj_instance, replacement_obj_location = replacement['replacement']
+
+            # for each ServiceObject type object in the current location objects
+            for checked_object in self._objects[location_name]['Service']:
+                # if the type of the current object is a ServiceGroup
+                if type(checked_object) is panos.objects.ServiceGroup and checked_object.value:
+                    changed = False
+                    matched = False
+                    try:
+                        # if the name of the replacement object is different than the origin one, then the static
+                        # group members values needs to be updated
+                        if source_obj_instance.about()['name'] != replacement_obj_instance.about()['name']:
+                            checked_object.value.remove(source_obj_instance.about()['name'])
+                            # adding the replacement object to the group only if it has not been already used to replace
+                            # another one (case where we have duplicate objects on a static group)
+                            if not replacement_obj_instance.about()['name'] in checked_object.value:
+                                checked_object.value.append(replacement_obj_instance.about()['name'])
+                            changed = True
+                            matched = True
+                        # if the name of the replacement object is the same than the original one, the static
+                        # group members values remains the same
+                        elif source_obj_instance.about()['name'] in checked_object.value:
+                            matched = True
+
+                        # If the current object to be replaced has been matched as a member of a static group at the
+                        # current location level, add it to the replacements_done tracking dict
+                        if matched:
+                            self._console.log(
+                                f"[ {location_name} ] Replacing {source_obj_instance.about()['name']!r} ({source_obj_location}) by {replacement_obj_instance.about()['name']!r} ({replacement_obj_location}) on {checked_object.about()['name']!r} ({checked_object.__class__.__name__})",
+                                style="yellow", level=2)
+                            # create a list (if not existing already) for the current static group object
+                            # which will contain the list of all replacements done on this group
+                            if checked_object.name not in replacements_done:
+                                replacements_done[checked_object.name] = list()
+                            # then append the current replacement information to this list (as a tuple format)
+                            replacements_done[checked_object.name].append((source_obj_instance.about()['name'],
+                                                                           source_obj_location,
+                                                                           replacement_obj_instance.about()['name'],
+                                                                           replacement_obj_location))
+                    # TODO : check when this error is matched ?? (don't remember, but it probably needs to be here)
+                    except ValueError:
+                        continue
+                    except Exception as e:
+                        self._console.log(
+                            f"[ {location_name} ] Unknown error while replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} on {checked_object.about()['name']!r} ({checked_object.__class__.__name__}) : {e.message}",
+                            style="red")
+                    # if the cleaning application has been requested, update the modified group on Panorama
+                    if self._apply_cleaning and changed:
+                        checked_object.apply()
+
+            progress.update(task, advance=1)
+
         # for each group on which a replacement has been done
         for changed_group_name in replacements_done:
             # create a rich.Table, for which the header is the updated group name
@@ -1757,6 +1816,8 @@ class PaloCleaner:
             # the replacements in a Table object (back to the replace_object_in_rulebase function calling the current one)
             max_replace = 0
 
+            any_change_done = False
+
             # For each type of object (Address, Service, Tag...) which can be found on the current rule's type
             for obj_type in repl_map.get(type(rule)):
                 # Add a key to the replacements_done for the current object type (and initialize with an empty dict)
@@ -1803,6 +1864,7 @@ class PaloCleaner:
                                         replacements_done[obj_type][field_name].append((f"{repl_name} ({replacement_obj_location})", 3))
                                         current_field_replacements_count += 1
                                         items_to_add.append(repl_name)
+                                    any_change_done = True
                                 # Else if the name of the replacement object is the same of the original one
                                 else:
                                     # replacement type 1 = same name different location
@@ -1821,14 +1883,13 @@ class PaloCleaner:
 
                         # if the rule can be modified (and cleaning application has been requested), change the current
                         # field value to the appropriate one, and apply the change
-                        if editable_rule and self._apply_cleaning:
-                            if field_type is not list:
+                        if editable_rule:
+                            if field_type is not list and items_to_add:
                                 setattr(rule, field_name, items_to_add[0])
                             else:
                                 any(not_null_field.remove(x) for x in items_to_remove)
                                 any(not_null_field.append(x) for x in items_to_add)
                                 setattr(rule, field_name, not_null_field)
-                            rule.apply()
 
                     # Update the max_replace value with the highest current_field_replacements_count value
                     # (if the current one is highest). This is used for proper display of the rich.Table rows for each
@@ -1836,6 +1897,15 @@ class PaloCleaner:
                     # to be displayed)
                     if current_field_replacements_count > max_replace:
                         max_replace = current_field_replacements_count
+
+            if self._apply_cleaning and editable_rule and any_change_done:
+                try:
+                    rule.apply()
+                    self._console.log(f"[ {location_name} ] Cleaning applied to rule {r.name}")
+                except Exception as e:
+                    self._console.log(
+                        f"[ {location_name} ] Error when applying cleaning to rule {r.name} : {e}",
+                        style="red")
 
             # Returns the replacements_done dict, the total number of replacements for the current rule (replacements_count),
             # and the max_replace value (highest number of replacements for a given field) for proper display on the output report
@@ -2089,6 +2159,7 @@ class PaloCleaner:
                                 dependencies, all_matched = parse_PanDeviceXapiError_references(e.message)
                                 if not all_matched:
                                     self._console.log(f"[ {location_name} ] ERROR : It seems that object {o.name} ({o.__class__.__name__}) is used somewhere in the configuration, on device-group {location_name}. It will not be deleted. Please check manually")
+                                    self._console.log(f"[ {location_name} ] ERROR content : {e.message}")
                                     delete_ok = True
                                     continue
                                 else:
