@@ -1057,6 +1057,7 @@ class PaloCleaner:
                                             self._addr_ipsearch[location_name][addr_value] = list()
                                         if not addr_value in created_addr_object:
                                             new_addr_obj = AddressObject(name=obj, value=addr_value)
+                                            new_addr_obj.description = "palocleaner_temp_addressobject"
                                             self._addr_ipsearch[location_name][addr_value].append(new_addr_obj)
                                             location_obj_set += [(new_addr_obj, location_name)]
                                             self._console.log(
@@ -1315,14 +1316,14 @@ class PaloCleaner:
         # If the tiebreak tag was not used to find the "best" object
         if not choosen_object:
             # create a list of shared objects from the obj_list
-            shared_obj = [x for x in obj_list if x[1] == 'shared']
+            shared_obj = [x for x in obj_list if x[1] == 'shared' and getattr(x[0], 'description') != 'palocleaner_temp_addressobject']
             # create a list of intermediate DG objects from the obj_list
             # TODO : concerned line here
             # interm_obj = [x for x in obj_list if x[1] != 'shared' and x[1] != base_location]
-            interm_obj = [x for x in obj_list if x[1] != 'shared']
+            interm_obj = [x for x in obj_list if x[1] != 'shared' and getattr(x[0], 'description') != 'palocleaner_temp_addressobject']
             # create a list of objects having name with multiple "." and ending with "corp" or "com" (probably FQDN)
             fqdn_obj = [x for x in obj_list if
-                        len(x[0].about()['name'].split('.')) > 1 and x[0].about()['name'].split('.')[-1] in ['corp', 'com']]
+                        len(x[0].about()['name'].split('.')) > 1 and x[0].about()['name'].split('.')[-1] in ['corp', 'com'] and getattr(x[0], 'description') != 'palocleaner_temp_addressobject']
             # find objects being both shared and with FQDN-like naming
             shared_fqdn_obj = list(set(shared_obj) & set(fqdn_obj))
             interm_fqdn_obj = list(set(interm_obj) & set(fqdn_obj))
@@ -1373,7 +1374,7 @@ class PaloCleaner:
 
         # If an object has not been chosen using the tiebreak tag, but the tiebreak tag adding has been requested,
         # then add the tiebreak tag to the chosen object so that it will remain the preferred one for next executions
-        if self._apply_tiebreak_tag and not choosen_by_tiebreak:
+        if self._apply_tiebreak_tag and not choosen_by_tiebreak and getattr(choosen_object[0], 'description') != 'palocleaner_temp_addressobject':
             tag_changed = False
             # If the object already has some tags, adding the tiebreak tag to the list
             if choosen_object[0].tag:
