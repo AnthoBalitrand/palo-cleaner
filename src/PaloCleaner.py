@@ -952,7 +952,7 @@ class PaloCleaner:
                                 recursion_level + 1)
 
             # checking if the resolved objects has tags (which needs to be added to the used_object_set too)
-            # checking is used_object is not None permits to avoid cases where unsupported objects are used on the rule
+            # checking if used_object is not None permits to avoid cases where unsupported objects are used on the rule
             # IE : EDL at the time of writing this comment
 
             if not isinstance(used_object, type(None)):
@@ -1301,7 +1301,7 @@ class PaloCleaner:
         # Not that if several objects have the tiebreak tag (which is not supposed to happen), the first one of the list
         # will be chosen, which can leads to some randomness
         if self._tiebreak_tag:
-            for o in obj_list:
+            for o in sorted(obj_list, key=lambda x: x[0].about()['name']):
                 if not choosen_object:
                     try:
                         if self._tiebreak_tag in o[0].tag:
@@ -1327,9 +1327,9 @@ class PaloCleaner:
             shared_fqdn_obj = list(set(shared_obj) & set(fqdn_obj))
             interm_fqdn_obj = list(set(interm_obj) & set(fqdn_obj))
 
-            # if shared and well-named objects are found, return the first one
+            # if shared and well-named objects are found, return the first one after sorting by name
             if shared_fqdn_obj and not choosen_object:
-                for o in shared_fqdn_obj:
+                for o in sorted(shared_fqdn_obj, key=lambda x: x[0].about()['name']):
                     # line below modified to fix issue signaled by Laetitia. Impact has to be evaluated
                     # even if intermediate object has the same name than the shared replacement one, it needs to be the
                     # one used (until deletion of the intermediate one to match the shared one)
@@ -1337,9 +1337,9 @@ class PaloCleaner:
                     choosen_object = o
                     self._console.log(f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with FQDN naming", level=2)
                     break
-            # else return the first found shared object
+            # else return the first found shared object after sorting by name
             if shared_obj and not choosen_object:
-                for o in shared_obj:
+                for o in sorted(shared_obj, key=lambda x: x[0].about()['name']):
                     if not choosen_object:
                     #if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_obj] and not choosen_object:
                         choosen_object = o
@@ -1349,7 +1349,7 @@ class PaloCleaner:
                 temp_object_level = 999
                 # This code will permit to keep the "highest" device-group level matching object
                 # (nearest to the "shared" location)
-                for o in interm_fqdn_obj:
+                for o in sorted(interm_fqdn_obj, key=lambda x: x[0].about()['name']):
                     if not choosen_object:
                         location_level = [k for k, v in self._depthed_tree.items() if o[1] in v][0]
                         if location_level < temp_object_level:
@@ -1358,7 +1358,7 @@ class PaloCleaner:
                 self._console.log(f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object with FQDN naming (level = {temp_object_level})", level=2)
             if interm_obj and not choosen_object:
                 temp_object_level = 999
-                for o in interm_obj:
+                for o in sorted(interm_obj, key=lambda x: x[0].about()['name']):
                     if not choosen_object:
                         location_level = [k for k, v in self._depthed_tree.items() if o[1] in v][0]
                         if location_level < temp_object_level:
@@ -1369,7 +1369,7 @@ class PaloCleaner:
         # input list (can lead to random results)
         if not choosen_object:
             self._console.log(f"[ {base_location} ] ERROR : Unable to choose an object in the following list for address {obj_list[0][0].value} : {obj_list}. Returning the first one by default", style="red")
-            choosen_object = obj_list[0]
+            choosen_object = sorted(obj_list, key=lambda x: x[0].about()['name'])[0]
 
         # If an object has not been chosen using the tiebreak tag, but the tiebreak tag adding has been requested,
         # then add the tiebreak tag to the chosen object so that it will remain the preferred one for next executions
@@ -1385,10 +1385,13 @@ class PaloCleaner:
                 choosen_object[0].tag = [self._tiebreak_tag]
                 tag_changed = True
             if tag_changed:
-                self._console.log(f"[ {base_location} ] Adding tiebreak tag {self._tiebreak_tag} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]} ", level=2)
+                self._console.log(f"[ {base_location} ] Adding tiebreak tag {self._tiebreak_tag} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]} ")
             # If cleaning application is requested and tag has been changed, apply it to Panorama
             if self._apply_cleaning and tag_changed:
-                choosen_object[0].apply()
+                try:
+                    choosen_object[0].apply()
+                except Exception as e:
+                    self._console.log(f"[ {base_location} ] Error when adding tiebreak tag to object {choosen_object[0].about()['name']} : {e}", style="red")
 
         # Returns the chosen object among the provided list
         return choosen_object
@@ -1421,7 +1424,7 @@ class PaloCleaner:
         # Not that if several objects have the tiebreak tag (which is not supposed to happen), the first one of the list
         # will be chosen, which can leads to some randomness
         if self._tiebreak_tag:
-            for o in obj_list:
+            for o in sorted(obj_list, key=lambda x: x[0].about()['name']):
                 if not choosen_object:
                     try:
                         if self._tiebreak_tag in o[0].tag:
@@ -1452,14 +1455,14 @@ class PaloCleaner:
 
             # If shared and well-named objects are found, return the first one
             if shared_standard_obj and not choosen_object:
-                for o in shared_standard_obj:
+                for o in sorted(shared_standard_obj, key=lambda x: x[0].about()['name']):
                     if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_standard_obj]:
                         choosen_object = o
                         self._console.log(
                                 f"[ {base_location} ] Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with standard naming", level=2)
             # Else return the first found shared object
             if shared_obj and not choosen_object:
-                for o in shared_obj:
+                for o in sorted(shared_obj, key=lambda x: x[0].about()['name']):
                     if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_obj]:
                         choosen_object = o
                         self._console.log(
@@ -1469,7 +1472,7 @@ class PaloCleaner:
                 temp_object_level = 999
                 # This code will permit to keep the "highest" device-group level matching object
                 # (nearest to the "shared" location)
-                for o in interm_standard_obj:
+                for o in sorted(interm_standard_obj, key=lambda x: x[0].about()['name']):
                     location_level = [k for k, v in self._depthed_tree.items() if o[1] in v][0]
                     if location_level < temp_object_level:
                         temp_object_level = location_level
@@ -1478,7 +1481,7 @@ class PaloCleaner:
                         f"[ {base_location} ] Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's an intermediate object with standard naming (level = {temp_object_level})", level=2)
             if interm_obj and not choosen_object:
                 temp_object_level = 999
-                for o in interm_obj:
+                for o in sorted(interm_obj, key=lambda x: x[0].about()['name']):
                     location_level = [k for k, v in self._depthed_tree.items() if o[1] in v][0]
                     if location_level < temp_object_level:
                         temp_object_level = location_level
@@ -1489,7 +1492,7 @@ class PaloCleaner:
         # input list (can lead to random results)
         if not choosen_object:
             self._console.log(f"ERROR : Unable to choose an object in the following list for service {self.stringify_service(obj_list[0][0])} : {obj_list}. Returning the first one by default", style="red")
-            choosen_object = obj_list[0]
+            choosen_object = sorted(obj_list, key=lambda x: x[0].about()['name'])[0]
 
         # If an object has not been chosen using the tiebreak tag, but the tiebreak tag adding has been requested,
         # then add the tiebreak tag to the chosen object so that it will remain the preferred one for next executions
@@ -1506,10 +1509,13 @@ class PaloCleaner:
                 tag_changed = True
             if tag_changed:
                 self._console.log(
-                    f"[ {base_location} ] Adding tiebreak tag {self._tiebreak_tag} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]}", level=2)
+                    f"[ {base_location} ] Adding tiebreak tag {self._tiebreak_tag} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]}")
             # If cleaning application is requested and tag has been changed, apply it to Panorama
             if self._apply_cleaning and tag_changed:
-                choosen_object[0].apply()
+                try:
+                    choosen_object[0].apply()
+                except Exception as e:
+                    self._console.log(f"[ {base_location} ] Error when adding tiebreak tag to object {choosen_object[0].about()['name']} : {e}", style="red")
 
         # Returns the chosen object among the provided list
         return choosen_object
