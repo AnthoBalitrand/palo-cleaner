@@ -7,6 +7,7 @@ from rich.text import Text
 from rich.panel import Panel
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn, TimeRemainingColumn
+from rich.traceback import install
 import panos.objects
 from panos.panorama import Panorama, DeviceGroup, PanoramaDeviceGroupHierarchy
 from panos.objects import AddressObject, AddressGroup, Tag, ServiceObject, ServiceGroup
@@ -18,6 +19,7 @@ from panos.device import SystemSettings
 import re
 import time
 import functools
+import signal
 
 """
 Below is a representation of the different types of rules being processed, and for each of them, the name of each 
@@ -95,6 +97,7 @@ class PaloCleaner:
         self._panorama_devices = dict()
         self._hitcounts = dict()
         self._cleaning_counts = dict()
+        signal.signal(signal.SIGINT, self.signal_handler)
 
     def loglevel_decorator(self, log_func):
         """
@@ -141,6 +144,11 @@ class PaloCleaner:
 
         return wrapper
 
+    def signal_handler(self, signum, frame):
+        res = input("  Do you really want to interrupt the running operations ? y/n ")
+        if res == 'y':
+            raise KeyboardInterrupt
+
     def start(self):
         """
         First function called after __init__, which starts the processing
@@ -165,169 +173,172 @@ class PaloCleaner:
                                                  password=True)
 
         self._console.print("\n\n")
-        with self._console.status("Connecting to Panorama...", spinner="dots12") as status:
-            try:
-                self._panorama = Panorama(self._panorama_url, self._panorama_user, self._panorama_password)
-                self.get_pano_dg_hierarchy()
+        try:
+            with self._console.status("Connecting to Panorama...", spinner="dots12") as status:
+                try:
+                    self._panorama = Panorama(self._panorama_url, self._panorama_user, self._panorama_password)
+                    self.get_pano_dg_hierarchy()
+                    time.sleep(1)
+                    self._console.log("[ Panorama ] Connection established")
+                except PanXapiError as e:
+                    self._console.log(f"[ Panorama ] Error while connecting to Panorama : {e.message}", style="red")
+                    return 0
+                except Exception as e:
+                    self._console.log("[ Panorama ] Unknown error occurred while connecting to Panorama", style="red")
+                    return 0
+
+                # get the full device-groups hierarchy and displays is in the console with color code to identity which
+                # device-groups will be concerned by the cleaning process
+
+                status.update("Parsing device groups list")
+                hierarchy_tree = self.generate_hierarchy_tree()
                 time.sleep(1)
-                self._console.log("[ Panorama ] Connection established")
-            except PanXapiError as e:
-                self._console.log(f"[ Panorama ] Error while connecting to Panorama : {e.message}", style="red")
-                return 0
-            except Exception as e:
-                self._console.log("[ Panorama ] Unknown error occurred while connecting to Panorama", style="red")
-                return 0
+                self._console.print("Discovered hierarchy tree is the following :")
+                self._console.print(
+                    "( [red] + are directly included [/red] / [yellow] * are indirectly included [/yellow] / [green] - are not included [/green] )")
+                self._console.print(
+                    " F (Fully included = cleaned) / P (Partially included = not cleaned) "
+                )
+                self._console.print(Panel(hierarchy_tree))
+                time.sleep(1)
 
-            # get the full device-groups hierarchy and displays is in the console with color code to identity which
-            # device-groups will be concerned by the cleaning process
+            # "perimeter" is a list containing the name only of each device-group included in the cleaning process
+            perimeter = [(dg.about()['name'], dg) for dg in self.get_devicegroups() if
+                         dg.about()['name'] in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']]
 
-            status.update("Parsing device groups list")
-            hierarchy_tree = self.generate_hierarchy_tree()
-            time.sleep(1)
-            self._console.print("Discovered hierarchy tree is the following :")
-            self._console.print(
-                "( [red] + are directly included [/red] / [yellow] * are indirectly included [/yellow] / [green] - are not included [/green] )")
-            self._console.print(
-                " F (Fully included = cleaned) / P (Partially included = not cleaned) "
-            )
-            self._console.print(Panel(hierarchy_tree))
-            time.sleep(1)
+            with Progress(
+                    SpinnerColumn(spinner_name="dots12"),
+                    BarColumn(),
+                    TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                    TimeRemainingColumn(),
+                    TimeElapsedColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    console=self._console,
+                    transient=True,
+                    disable=self._console.record
+            ) as progress:
+                self._console.print(
+                    Panel("[bold green]Downloading objects and rulebases",
+                          style="green"),
+                    justify="left")
+                download_task = progress.add_task("", total=len(perimeter) + 1)
 
-        # "perimeter" is a list containing the name only of each device-group included in the cleaning process
-        perimeter = [(dg.about()['name'], dg) for dg in self.get_devicegroups() if
-                     dg.about()['name'] in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']]
+                progress.update(download_task, description="[ Panorama ] Downloading shared objects")
+                self.fetch_objects(self._panorama, 'shared')
+                self.fetch_objects(self._panorama, 'predefined')
+                self._console.log(f"[ Panorama ] Shared objects downloaded ({self.count_objects('shared')} found)")
 
-        with Progress(
-                SpinnerColumn(spinner_name="dots12"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                TimeRemainingColumn(),
-                TimeElapsedColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=self._console,
-                transient=True,
-                disable=self._console.record
-        ) as progress:
-            self._console.print(
-                Panel("[bold green]Downloading objects and rulebases",
-                      style="green"),
-                justify="left")
-            download_task = progress.add_task("", total=len(perimeter) + 1)
+                # calling a function which will make sure that the tiebreak-tag exists (if requested as argument)
+                # and will create it if it does not
+                self.validate_tiebreak_tag()
 
-            progress.update(download_task, description="[ Panorama ] Downloading shared objects")
-            self.fetch_objects(self._panorama, 'shared')
-            self.fetch_objects(self._panorama, 'predefined')
-            self._console.log(f"[ Panorama ] Shared objects downloaded ({self.count_objects('shared')} found)")
+                progress.update(download_task, description="[ Panorama ] Downloading shared rulebases")
+                self.fetch_rulebase(self._panorama, 'shared')
+                self._console.log(f"[ Panorama ] Shared rulebases downloaded ({self.count_rules('shared')} rules found)")
 
-            # calling a function which will make sure that the tiebreak-tag exists (if requested as argument)
-            # and will create it if it does not
-            self.validate_tiebreak_tag()
-
-            progress.update(download_task, description="[ Panorama ] Downloading shared rulebases")
-            self.fetch_rulebase(self._panorama, 'shared')
-            self._console.log(f"[ Panorama ] Shared rulebases downloaded ({self.count_rules('shared')} rules found)")
-
-            progress.update(download_task, description="[ Panorama ] Downloading managed devices information")
-            self.get_panorama_managed_devices()
-            self._console.log(f"[ Panorama ] Managed devices information downloaded (found {len(self._panorama_devices)} devices)")
-
-            progress.update(download_task, advance=1)
-
-            for (context_name, dg) in perimeter:
-                progress.update(download_task, description=f"[ {context_name} ] Downloading objects")
-                self.fetch_objects(dg, context_name)
-                self._console.log(f"[ {context_name} ] Objects downloaded ({self.count_objects(context_name)} found)")
-                progress.update(download_task, description=f"[ {context_name} ] Downloading rulebases")
-                self.fetch_rulebase(dg, context_name)
-                self._console.log(f"[ {context_name} ] Rulebases downloaded ({self.count_rules(context_name)} rules found)")
-
-                # if opstate (hit counts) has to be cared, download on each device member of the device-group
-                # if this device-group has no child device-group
-                if self._need_opstate and not self._reversed_tree.get(context_name):
-                    progress.update(
-                        download_task,
-                        description=f"[ {context_name} ] Downloading hitcounts (connecting to devices)"
-                    )
-                    self.fetch_hitcounts(dg, context_name)
-                    self._console.log(f"[ {context_name} ] Hitcounts downloaded for all rulebases")
+                progress.update(download_task, description="[ Panorama ] Downloading managed devices information")
+                self.get_panorama_managed_devices()
+                self._console.log(f"[ Panorama ] Managed devices information downloaded (found {len(self._panorama_devices)} devices)")
 
                 progress.update(download_task, advance=1)
 
-            progress.remove_task(download_task)
+                for (context_name, dg) in perimeter:
+                    progress.update(download_task, description=f"[ {context_name} ] Downloading objects")
+                    self.fetch_objects(dg, context_name)
+                    self._console.log(f"[ {context_name} ] Objects downloaded ({self.count_objects(context_name)} found)")
+                    progress.update(download_task, description=f"[ {context_name} ] Downloading rulebases")
+                    self.fetch_rulebase(dg, context_name)
+                    self._console.log(f"[ {context_name} ] Rulebases downloaded ({self.count_rules(context_name)} rules found)")
 
-            self._console.print(
-                Panel("[bold green]Analyzing objects usage",
-                      style="green"),
-                justify="left")
-            # Processing used objects set at location "shared"
-            shared_fetch_task = progress.add_task("[Panorama] Processing used objects location",
-                                                  total=self.count_rules('shared'))
-            self.fetch_used_obj_set("shared", progress, shared_fetch_task)
-            self._console.log("[ Panorama ] Used objects set processed")
-            progress.remove_task(shared_fetch_task)
-
-            # Processing used objects set for each location included in the analysis perimeter
-            for (context_name, dg) in perimeter:
-                dg_fetch_task = progress.add_task(
-                    f"[{dg.about()['name']}] Processing used objects location",
-                    total=self.count_rules(dg.about()['name'])
-                )
-                self.fetch_used_obj_set(dg.about()['name'], progress, dg_fetch_task)
-                self._console.log(f"[ {dg.about()['name']} ] Used objects set processed")
-                progress.remove_task(dg_fetch_task)
-
-            # Starting objects usage optimization
-            # From the most "deep" device-group (far from shared), going up to the shared location
-            self._console.print(
-                Panel("[bold green]Optimizing objects duplicates",
-                      style="green"),
-                justify="left")
-            for depth, contexts in sorted(self._depthed_tree.items(), key=lambda x: x[0], reverse=True):
-                for context_name in contexts:
-                    if context_name in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']:
-                        self.init_console(context_name)
-                        self._console.print(Panel(f"  [bold magenta]{context_name}  ", style="magenta"),
-                                          justify="left")
-                        # OBJECTS OPTIMIZATION
-                        dg_optimize_task = progress.add_task(
-                            f"[ {context_name} ] - Optimizing objects",
-                            total=len(self._used_objects_sets[context_name])
+                    # if opstate (hit counts) has to be cared, download on each device member of the device-group
+                    # if this device-group has no child device-group
+                    if self._need_opstate and not self._reversed_tree.get(context_name):
+                        progress.update(
+                            download_task,
+                            description=f"[ {context_name} ] Downloading hitcounts (connecting to devices)"
                         )
-                        self.optimize_objects(context_name, progress, dg_optimize_task)
-                        self._console.log(f"[ {context_name} ] Objects optimization done")
-                        progress.remove_task(dg_optimize_task)
+                        self.fetch_hitcounts(dg, context_name)
+                        self._console.log(f"[ {context_name} ] Hitcounts downloaded for all rulebases")
 
-                        # OBJECTS REPLACEMENT IN GROUPS
-                        dg_replaceingroups_task = progress.add_task(
-                            f"[ {context_name} ] Replacing objects in groups",
-                            total=len(self._replacements[context_name]['Address']) + len(self._replacements[context_name]['Service'])
-                        )
-                        self.replace_object_in_groups(context_name, progress, dg_replaceingroups_task)
-                        self._console.log(f"[ {context_name} ] Objects replaced in groups")
-                        progress.remove_task(dg_replaceingroups_task)
+                    progress.update(download_task, advance=1)
 
-                        # OBJECTS REPLACEMENT IN RULEBASES
-                        dg_replaceinrules_task = progress.add_task(
-                            f"[ {context_name} ] Replacing objects in rules",
-                            total=self.count_rules(context_name)
-                        )
-                        self.replace_object_in_rulebase(context_name, progress, dg_replaceinrules_task)
-                        self._console.log(f"[ {context_name} ] Objects replaced in rulebases")
-                        progress.remove_task(dg_replaceinrules_task)
+                progress.remove_task(download_task)
 
-                        # OBJECTS CLEANING (FOR FULLY INCLUDED DEVICE GROUPS ONLY)
-                        if context_name in self._analysis_perimeter['full']:
-                            self.clean_local_object_set(context_name, progress, dg_optimize_task)
-                            self._console.log(f"[ {context_name} ] Objects cleaned (fully included)")
+                self._console.print(
+                    Panel("[bold green]Analyzing objects usage",
+                          style="green"),
+                    justify="left")
+                # Processing used objects set at location "shared"
+                shared_fetch_task = progress.add_task("[Panorama] Processing used objects location",
+                                                      total=self.count_rules('shared'))
+                self.fetch_used_obj_set("shared", progress, shared_fetch_task)
+                self._console.log("[ Panorama ] Used objects set processed")
+                progress.remove_task(shared_fetch_task)
 
-        self.init_console("report")
-        # Display the cleaning operation result (display again the hierarchy tree, but with the _cleaning_counts
-        # information (deleted / replaced objects of each type for each device-group)
-        self._console.print(Panel(self.generate_hierarchy_tree(result=True)))
+                # Processing used objects set for each location included in the analysis perimeter
+                for (context_name, dg) in perimeter:
+                    dg_fetch_task = progress.add_task(
+                        f"[{dg.about()['name']}] Processing used objects location",
+                        total=self.count_rules(dg.about()['name'])
+                    )
+                    self.fetch_used_obj_set(dg.about()['name'], progress, dg_fetch_task)
+                    self._console.log(f"[ {dg.about()['name']} ] Used objects set processed")
+                    progress.remove_task(dg_fetch_task)
 
-        # If the --no-report argument was not used at startup, export the console content to an HTML report file
-        if not self._no_report:
-            self._console.save_html(self._report_folder+'/report.html')
+                # Starting objects usage optimization
+                # From the most "deep" device-group (far from shared), going up to the shared location
+                self._console.print(
+                    Panel("[bold green]Optimizing objects duplicates",
+                          style="green"),
+                    justify="left")
+                for depth, contexts in sorted(self._depthed_tree.items(), key=lambda x: x[0], reverse=True):
+                    for context_name in contexts:
+                        if context_name in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']:
+                            self.init_console(context_name)
+                            self._console.print(Panel(f"  [bold magenta]{context_name}  ", style="magenta"),
+                                              justify="left")
+                            # OBJECTS OPTIMIZATION
+                            dg_optimize_task = progress.add_task(
+                                f"[ {context_name} ] - Optimizing objects",
+                                total=len(self._used_objects_sets[context_name])
+                            )
+                            self.optimize_objects(context_name, progress, dg_optimize_task)
+                            self._console.log(f"[ {context_name} ] Objects optimization done")
+                            progress.remove_task(dg_optimize_task)
+
+                            # OBJECTS REPLACEMENT IN GROUPS
+                            dg_replaceingroups_task = progress.add_task(
+                                f"[ {context_name} ] Replacing objects in groups",
+                                total=len(self._replacements[context_name]['Address']) + len(self._replacements[context_name]['Service'])
+                            )
+                            self.replace_object_in_groups(context_name, progress, dg_replaceingroups_task)
+                            self._console.log(f"[ {context_name} ] Objects replaced in groups")
+                            progress.remove_task(dg_replaceingroups_task)
+
+                            # OBJECTS REPLACEMENT IN RULEBASES
+                            dg_replaceinrules_task = progress.add_task(
+                                f"[ {context_name} ] Replacing objects in rules",
+                                total=self.count_rules(context_name)
+                            )
+                            self.replace_object_in_rulebase(context_name, progress, dg_replaceinrules_task)
+                            self._console.log(f"[ {context_name} ] Objects replaced in rulebases")
+                            progress.remove_task(dg_replaceinrules_task)
+
+                            # OBJECTS CLEANING (FOR FULLY INCLUDED DEVICE GROUPS ONLY)
+                            if context_name in self._analysis_perimeter['full']:
+                                self.clean_local_object_set(context_name, progress, dg_optimize_task)
+                                self._console.log(f"[ {context_name} ] Objects cleaned (fully included)")
+
+            self.init_console("report")
+            # Display the cleaning operation result (display again the hierarchy tree, but with the _cleaning_counts
+            # information (deleted / replaced objects of each type for each device-group)
+            self._console.print(Panel(self.generate_hierarchy_tree(result=True)))
+        except KeyboardInterrupt as e:
+            self._console.log("PROCESS INTERRUPTED BY USER")
+        finally:
+            # If the --no-report argument was not used at startup, export the console content to an HTML report file
+            if not self._no_report:
+                self._console.save_html(self._report_folder+'/report.html')
 
     def init_console(self, context_name=None):
         """
@@ -348,6 +359,7 @@ class PaloCleaner:
             self._console_context = context_name
         self._console.log = self.loglevel_decorator(self._console.log)
         self._console.status = self.status_decorator(self._console.status)
+        rich.traceback.install(console=self._console)
 
     def get_devicegroups(self):
         """
