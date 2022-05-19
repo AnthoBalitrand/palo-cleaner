@@ -91,6 +91,13 @@ def parse_cli_args():
         default = False,
     )
 
+    parser.add_argument(
+        "--favorise-tagged-objects",
+        action = "store_true",
+        help = "Favorise objects referenced on DAG or having DAGs when eliminating duplicates (works only for shared objects)",
+        default = False,
+    )
+
     return parser.parse_args()
 
 

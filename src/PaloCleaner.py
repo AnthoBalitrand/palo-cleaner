@@ -66,6 +66,8 @@ class PaloCleaner:
         self._panorama_url = kwargs['panorama_url']
         self._panorama_user = kwargs['api_user']
         self._panorama_password = kwargs['api_password']
+        # Remove api_password from args to avoid it to be printed later (startup arguments printed in log file)
+        kwargs['api_password'] = None
         self._dg_filter = kwargs['device_groups']
         self._depthed_tree = dict({0: ['shared']})
         self._apply_cleaning = kwargs['apply_cleaning']
@@ -73,6 +75,7 @@ class PaloCleaner:
         self._apply_tiebreak_tag = kwargs['apply_tiebreak_tag']
         self._no_report = kwargs['no_report']
         self._split_report = kwargs['split_report']
+        self._favorise_tagged_objects = kwargs['favorise_tagged_objects']
         self._report_folder = report_folder
         self._panorama = None
         self._objects = dict()
@@ -98,6 +101,7 @@ class PaloCleaner:
         self._hitcounts = dict()
         self._cleaning_counts = dict()
         signal.signal(signal.SIGINT, self.signal_handler)
+        self._console.log(f"STARTUP ARGUMENTS : {kwargs}")
 
     def loglevel_decorator(self, log_func):
         """
@@ -167,13 +171,13 @@ class PaloCleaner:
 """)
         self._console.print(header_text, style="green", justify="left")
 
-        # if the API user password has not been provided within the CLI start command, prompt the user
-        while self._panorama_password == "":
-            self._panorama_password = Prompt.ask(f"Please provide the password for API user {self._panorama_user!r} ",
-                                                 password=True)
-
-        self._console.print("\n\n")
         try:
+            # if the API user password has not been provided within the CLI start command, prompt the user
+            while self._panorama_password == "":
+                self._panorama_password = Prompt.ask(f"Please provide the password for API user {self._panorama_user!r} ",
+                                                     password=True)
+
+            self._console.print("\n\n")
             with self._console.status("Connecting to Panorama...", spinner="dots12") as status:
                 try:
                     self._panorama = Panorama(self._panorama_url, self._panorama_user, self._panorama_password)
@@ -1287,6 +1291,28 @@ class PaloCleaner:
 
         return found_upward_objects
 
+    def count_tags_in_obj_tuple(self, obj):
+        """
+        Returns the number of tags assigned to an object. Returns 0 if the tag attribute value is None
+        :param obj: ((AddressObject, location)) Tuple of the object for which to count the number of tags + its location
+        :return: (int) The number of tags assigned to the concerned object
+        """
+        if obj[0].tag is None:
+            return 0
+        else:
+            return len(obj[0].tag)
+
+    def count_tags_in_obj(self, obj):
+        """
+        Returns the number of tags assigned to an object. Returns 0 if the tag attribute value is None
+        :param obj: (AddressObject) The object on which to count the number of tags
+        :return: (int) The number of tags assigned to the concerned object
+        """
+        if obj.tag is None:
+            return 0
+        else:
+            return len(obj.tag)
+
     def find_best_replacement_addr_obj(self, obj_list: list, base_location: str):
         """
         Get a list of tuples (object, location) and returns the best to be used based on location and naming criterias
@@ -1320,12 +1346,20 @@ class PaloCleaner:
                         if self._tiebreak_tag in o[0].tag:
                             choosen_object = o
                         self._console.log(f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen by tiebreak", level=2)
-                    except:
+                    except TypeError:
                         # This exception is matched when checking if the tiebreak tag is on the list of tags of an
                         # object which has no tags
                         pass
 
         # If the tiebreak tag was not used to find the "best" object
+        # if some replacements objects are tag-referenced (used on DAG) and if we decided to favorise those ones, they'll be chosen first
+        if self._favorise_tagged_objects and not choosen_object:
+            for x in obj_list:
+                if x in self._tag_referenced and not choosen_object:
+                    choosen_object = x
+                    self._console.log(f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as tag-referenced", level=2)
+
+        # else continue with the normal process
         if not choosen_object:
             # create a list of shared objects from the obj_list
             shared_obj = [x for x in obj_list if x[1] == 'shared' and getattr(x[0], 'description') != 'palocleaner_temp_addressobject']
@@ -1340,8 +1374,22 @@ class PaloCleaner:
             shared_fqdn_obj = list(set(shared_obj) & set(fqdn_obj))
             interm_fqdn_obj = list(set(interm_obj) & set(fqdn_obj))
 
+
             # if shared and well-named objects are found, return the first one after sorting by name
             if shared_fqdn_obj and not choosen_object:
+                if self._favorise_tagged_objects and len(shared_fqdn_obj) > 1:
+                    shared_fqdn_obj.sort(key=self.count_tags_in_obj_tuple)
+                    if self.count_tags_in_obj_tuple(shared_fqdn_obj[0]) > self.count_tags_in_obj_tuple(shared_fqdn_obj[1]):
+                        choosen_object = shared_fqdn_obj[0]
+                        self._console.log(
+                            f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with FQDN naming, and highest number of tags",
+                            level=2)
+                if not choosen_object:
+                    choosen_object = sorted(shared_fqdn_obj, key=lambda x: x[0].about()['name'])[0]
+                    self._console.log(
+                        f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with FQDN naming",
+                        level=2)
+                """
                 for o in sorted(shared_fqdn_obj, key=lambda x: x[0].about()['name']):
                     # line below modified to fix issue signaled by Laetitia. Impact has to be evaluated
                     # even if intermediate object has the same name than the shared replacement one, it needs to be the
@@ -1350,13 +1398,28 @@ class PaloCleaner:
                     choosen_object = o
                     self._console.log(f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with FQDN naming", level=2)
                     break
+                """
             # else return the first found shared object after sorting by name
             if shared_obj and not choosen_object:
+                if self._favorise_tagged_objects and len(shared_obj) > 1:
+                    shared_obj.sort(key=self.count_tags_in_obj_tuple)
+                    if self.count_tags_in_obj_tuple(shared_obj[0]) > self.count_tags_in_obj_tuple(shared_obj[1]):
+                        choosen_object = shared_obj[0]
+                        self._console.log(
+                            f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object, and highest number of tags",
+                            level=2)
+                if not choosen_object:
+                    choosen_object = sorted(shared_obj, key=lambda x: x[0].about()['name'])[0]
+                    self._console.log(
+                        f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object",
+                        level=2)
+                """
                 for o in sorted(shared_obj, key=lambda x: x[0].about()['name']):
                     if not choosen_object:
                     #if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_obj] and not choosen_object:
                         choosen_object = o
                         self._console.log(f"[ {base_location} ] Object {o[0].about()['name']} (context {o[1]}) choosen as it's a shared object", level=2)
+                """
             # Repeat the same logic for intermediate device-groups
             if interm_fqdn_obj and not choosen_object:
                 temp_object_level = 999
@@ -1584,7 +1647,7 @@ class PaloCleaner:
                     # if the chosen replacement object is different than the actual object
                     if replacement_obj != obj:
                         self._console.log(
-                            f"[ {location_name} ] Replacing {obj.about()['name']} ({obj.__class__.__name__}) at location {location_name} by {replacement_obj.about()['name']} at location {replacement_obj_location}",
+                            f"[ {location_name} ] Replacing {obj.about()['name']} ({obj.__class__.__name__}) at location {location} by {replacement_obj.about()['name']} at location {replacement_obj_location}",
                             style="green", level=2)
 
                         # Populating the global _replacements dict (for the current location, current object type) with
@@ -2145,7 +2208,8 @@ class PaloCleaner:
                     # This exception should never be raised but protects the execution
                     except ValueError:
                         self._console.log(f"[ {location_name} ] ValueError when trying to remove {name} from used objects set : object not found on object set")
-                self._console.log(f"[ {location_name} ] Not removing {name} (location {infos['source'][1]}) from used objects set, as protected by hitcount", level=2)
+                else:
+                    self._console.log(f"[ {location_name} ] Not removing {name} (location {infos['source'][1]}) from used objects set, as protected by hitcount", level=2)
 
         # After cleaning the current device-group, adding the current location _used_objects_set values to the
         # _used_objects_set of the parent.
