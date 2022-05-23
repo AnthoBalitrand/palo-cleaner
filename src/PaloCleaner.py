@@ -2145,23 +2145,34 @@ class PaloCleaner:
         """
 
         def parse_PanDeviceXapiError_references(dependencies_error_message: str) -> (dict, bool):
-            groupinfo_regex = re.compile(r'^.+?(?=->)-> (?P<location>.+?(?=->))-> address-group -> (?P<groupname>.+?(?=->))')
+            addr_groupinfo_regex = re.compile(r'^.+?(?=->)-> (?P<location>.+?(?=->))-> address-group -> (?P<groupname>.+?(?=->))')
+            serv_groupinfo_regex = re.compile(r'^.+?(?=->)-> (?P<location>.+?(?=->))-> service-group -> (?P<groupname>.+?(?=->))')
             ruleinfo_regex = re.compile(r'^.+?(?=->)-> (?P<location>.+?(?=->))-> (?P<rbtype>.+?(?=->))-> (?P<rb>.+?(?=->))-> rules -> (?P<rulename>.+?(?=->))-> (?P<field>.+)')
 
-            dependencies = {"AddressGroups": list(), "Rules": list()}
+            dependencies = {"AddressGroups": list(), "ServiceGroups": list(), "Rules": list()}
             matched_dependencies = 0
 
             for dependency_line in dependencies_error_message.split('\n'):
                 dependency_line = dependency_line.strip()
-                try:
-                    grp_result = re.match(groupinfo_regex, dependency_line).groupdict()
-                    for k, v in grp_result.items():
-                        grp_result[k] = v.strip()
-                    dependencies["AddressGroups"].append(grp_result)
+                grp_result_dict = None
+                dependency_type = None
+
+                grp_result = re.match(addr_groupinfo_regex, dependency_line)
+                if grp_result:
+                    grp_result_dict = grp_result.groupdict()
+                    dependency_type = "AddressGroups"
+                else:
+                    grp_result = re.match(serv_groupinfo_regex, dependency_line)
+                    if grp_result:
+                        grp_result_dict = grp_result.groupdict()
+                        dependency_type = "ServiceGroups"
+
+                if grp_result_dict and dependency_type:
+                    for k, v in grp_result_dict.items():
+                        grp_result_dict[k] = v.strip()
+                    dependencies[dependency_type].append(grp_result_dict)
                     matched_dependencies += 1
                     continue
-                except AttributeError:
-                    pass
 
                 # This part should never be matched, as we are not supposed to try to delete an object which is used
                 # on a rule at this time
@@ -2256,9 +2267,15 @@ class PaloCleaner:
                                         continue
 
                                     for group_dependency in dependencies["AddressGroups"]:
-                                        self._console.log(f"[ {location_name} ] Group {o.name} ({o.__class__.__name__}) is still used on another group : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
+                                        self._console.log(f"[ {location_name} ] Group {o.name} ({o.__class__.__name__}) is still used on another AddressGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
                                         referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'])
                                         referencer_group.static_value.remove(o.name)
+                                        referencer_group.apply()
+
+                                    for group_dependency in dependencies["ServiceGroups"]:
+                                        self._console.log(f"[ {location_name} ] Group {o.name} ({o.__class__.__name__}) is still used on another ServiceGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
+                                        referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'], obj_type="Service")
+                                        referencer_group.value.remove(o.name)
                                         referencer_group.apply()
                     else:
                         self._console.log(
