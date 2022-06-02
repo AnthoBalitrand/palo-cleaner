@@ -1,4 +1,3 @@
-import pan.xapi
 import rich.progress
 from rich.console import Console
 from rich.prompt import Prompt
@@ -11,7 +10,7 @@ from rich.traceback import install
 import panos.objects
 from panos.panorama import Panorama, DeviceGroup, PanoramaDeviceGroupHierarchy
 from panos.objects import AddressObject, AddressGroup, Tag, ServiceObject, ServiceGroup
-from panos.policies import SecurityRule, PreRulebase, PostRulebase, Rulebase, NatRule, AuthenticationRule, RulebaseHitCount
+from panos.policies import SecurityRule, PreRulebase, PostRulebase, Rulebase, NatRule, AuthenticationRule
 from panos.predefined import Predefined
 from panos.errors import PanXapiError
 from panos.firewall import Firewall
