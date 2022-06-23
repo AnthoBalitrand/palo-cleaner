@@ -98,6 +98,13 @@ def parse_cli_args():
         default = False,
     )
 
+    parser.add_argument(
+        "--ignore-appliances-opstate",
+        action = "extend",
+        type = str,
+        help = "List of appliances IP address for which opstate needs to be ignored (will not connect to get hitcounts)"
+    )
+
     return parser.parse_args()
 
 

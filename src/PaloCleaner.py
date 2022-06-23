@@ -92,6 +92,7 @@ class PaloCleaner:
         self._max_change_timestamp = int(time.time()) - int(kwargs['max_days_since_change']) * 86400 if kwargs['max_days_since_change'] else 0
         self._max_hit_timestamp = int(time.time()) - int(kwargs['max_days_since_hit']) * 86400 if kwargs['max_days_since_hit'] else 0
         self._need_opstate = self._max_change_timestamp or self._max_hit_timestamp
+        self._ignore_opstate_ip = kwargs['ignore_appliances_opstate']
         self._console = None
         self._console_context = None
         self.init_console()
@@ -642,19 +643,20 @@ class PaloCleaner:
             if device:
                 system_settings = device.find("", SystemSettings)
                 fw_ip = system_settings.ip_address
-                fw_vsys = getattr(fw, "vsys")
-                fw_conn = Firewall(fw_ip, self._panorama_user, self._panorama_password, vsys=fw_vsys)
-                # TODO : timeout connection + retry ?
-                self._console.log(f"[ {location_name} ] Connecting to firewall {fw_ip} on vsys {fw_vsys}")
-                fw_panos_version = fw_conn.refresh_system_info().version
-                if (current_major_version := int(fw_panos_version.split('.')[0])) > min_member_major_version:
-                    min_member_major_version = current_major_version
-                self._console.log(f"[ {location_name} ] Detected PAN-OS version on {fw_ip} : {fw_panos_version}", level=2)
-                rb = Rulebase()
-                fw_conn.add(rb)
-                for rulebase in rulebases:
-                    ans = rb.opstate.hit_count.refresh(rulebase, all_rules=True)
-                    populate_hitcounts(rulebase, ans)
+                if fw_ip not in self._ignore_opstate_ip:
+                    fw_vsys = getattr(fw, "vsys")
+                    fw_conn = Firewall(fw_ip, self._panorama_user, self._panorama_password, vsys=fw_vsys)
+                    # TODO : timeout connection + retry ?
+                    self._console.log(f"[ {location_name} ] Connecting to firewall {fw_ip} on vsys {fw_vsys}")
+                    fw_panos_version = fw_conn.refresh_system_info().version
+                    if (current_major_version := int(fw_panos_version.split('.')[0])) > min_member_major_version:
+                        min_member_major_version = current_major_version
+                    self._console.log(f"[ {location_name} ] Detected PAN-OS version on {fw_ip} : {fw_panos_version}", level=2)
+                    rb = Rulebase()
+                    fw_conn.add(rb)
+                    for rulebase in rulebases:
+                        ans = rb.opstate.hit_count.refresh(rulebase, all_rules=True)
+                        populate_hitcounts(rulebase, ans)
 
         if min_member_major_version < 9:
             # if we did not found any member firewall with PANOS >= 9, we need to get the rule modification timestamp from Panorama for this context
