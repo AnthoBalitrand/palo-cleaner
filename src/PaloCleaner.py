@@ -92,7 +92,7 @@ class PaloCleaner:
         self._max_change_timestamp = int(time.time()) - int(kwargs['max_days_since_change']) * 86400 if kwargs['max_days_since_change'] else 0
         self._max_hit_timestamp = int(time.time()) - int(kwargs['max_days_since_hit']) * 86400 if kwargs['max_days_since_hit'] else 0
         self._need_opstate = self._max_change_timestamp or self._max_hit_timestamp
-        self._ignore_opstate_ip = kwargs['ignore_appliances_opstate']
+        self._ignore_opstate_ip = [] if kwargs['ignore_appliances_opstate'] is None else kwargs['ignore_appliances_opstate']
         self._console = None
         self._console_context = None
         self.init_console()
@@ -191,9 +191,15 @@ class PaloCleaner:
                     self._console.log("[ Panorama ] Unknown error occurred while connecting to Panorama", style="red")
                     return 0
 
-                # get the full device-groups hierarchy and displays is in the console with color code to identity which
-                # device-groups will be concerned by the cleaning process
+                # if list of device-groups has been provided, check if all those device-groups exists in the
+                # Panorama downloaded hierarchy. If not, stop.
+                if self._dg_filter:
+                    if not set(self._dg_filter).issubset(self._stored_pano_hierarchy):
+                        self._console.log("[ Panorama ] One of the provided device-groups does not exists !", style="red")
+                        return 0
 
+                # get the full device-groups hierarchy and displays is in the console with color code to identify which
+                # device-groups will be concerned by the cleaning process
                 status.update("Parsing device groups list")
                 hierarchy_tree = self.generate_hierarchy_tree()
                 time.sleep(1)
@@ -464,7 +470,7 @@ class PaloCleaner:
         """
         Returns the list of directly, indirectly, and fully included device groups in the cleaning perimeter.
         Direct included DG are the ones specified in the CLI argument at startup
-        Indirect included are all upwards DG above the directly included ones.
+        Indirect included are all upwards DG above and below the directly included ones.
         Fully included are parents DG having all their child included.
 
         :param reversed_tree: (dict) Dict where keys are parent device groups and value is the list of childs
