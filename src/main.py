@@ -98,6 +98,16 @@ def parse_cli_args():
         default = False,
     )
 
+    parser.add_argument(
+        "--multithread", "-m",
+        dest = 'number-of-threads',
+        type = int,
+        action = "store",
+        help = "Perform multithreading for objects replacement in rulebases and groups with X threads (no value or 0: number of system's CPU)",
+        nargs = '?',
+        const = 0,
+    )
+
     return parser.parse_args()
 
 
@@ -125,4 +135,7 @@ def main():
 
 # entry point
 if __name__ == "__main__":
+    start = time.time()
     main()
+    end = time.time()
+    print(end - start)
