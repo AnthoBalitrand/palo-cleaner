@@ -1801,8 +1801,8 @@ class PaloCleaner:
                         if self._apply_cleaning and changed:
                             checked_object.apply()
                 
-                if self._nb_thread: # TODO TEST RETURN RETRIEVE STATUS TO CONFIRM REPLACEMENT SUCCESSFUL (list of rule in error: (r, Exception))
-                    self._queue.task_done() # TEST with input() at the start of the thread job and manual edit / delete of the rule
+                if self._nb_thread:
+                    self._queue.task_done() 
                 else:
                     break
 
@@ -1902,13 +1902,13 @@ class PaloCleaner:
                         if self._apply_cleaning and changed:
                             checked_object.apply()
                 
-                if self._nb_thread: # TODO TEST RETURN RETRIEVE STATUS TO CONFIRM REPLACEMENT SUCCESSFUL (list of rule in error: (r, Exception))
-                    self._queue.task_done() # TEST with input() at the start of the thread job and manual edit / delete of the rule
+                if self._nb_thread:
+                    self._queue.task_done()
                 else:
                     break
 
             # for each replacement for object type "Service" (ServiceObject, ServiceGroup) at the current location level
-            for replacement_name, replacement in self._replacements[location_name]['Address'].items():
+            for replacement_name, replacement in self._replacements[location_name]['Service'].items():
                 # Apply multithreading if requested
                 if self._nb_thread:
                     # add the replacement to the multithreading queue
@@ -2236,8 +2236,8 @@ class PaloCleaner:
                                     end_section=True if table_add_loop == max_replace - 1 else False,
                                     style="dim" if r.disabled else None,
                                 )
-                        if self._nb_thread: # TODO TEST RETURN RETRIEVE STATUS TO CONFIRM REPLACEMENT SUCCESSFUL (list of rule in error: (r, Exception))
-                            self._queue.task_done() # TEST with input() at the start of the thread job and manual edit / delete of the rule
+                        if self._nb_thread:
+                            self._queue.task_done()
                         else:
                             break
                 
@@ -2430,8 +2430,8 @@ class PaloCleaner:
                                 f"[ {location_name} ] Object {o.name} ({o.__class__.__name__}) can be deleted", style="red")
                             self._cleaning_counts[location_name][obj_type]['removed'] += 1
 
-                if self._nb_thread: # TODO TEST RETURN RETRIEVE STATUS TO CONFIRM REPLACEMENT SUCCESSFUL (list of rule in error: (r, Exception))
-                    self._queue.task_done() # TEST with input() at the start of the thread job and manual edit / delete of the rule
+                if self._nb_thread: 
+                    self._queue.task_done() 
                 else:
                     break
 
