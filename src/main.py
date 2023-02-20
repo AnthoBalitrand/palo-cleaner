@@ -100,7 +100,7 @@ def parse_cli_args():
 
     parser.add_argument(
         "--multithread", "-m",
-        dest = 'number-of-threads',
+        dest = 'number_of_threads',
         type = int,
         action = "store",
         help = "Perform multithreading for objects replacement in rulebases and groups with X threads (no value or 0: number of system's CPU)",

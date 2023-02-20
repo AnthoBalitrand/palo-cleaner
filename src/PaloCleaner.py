@@ -20,7 +20,7 @@ import time
 import functools
 import signal
 from multiprocessing import cpu_count
-from threading import Thread
+from threading import Thread, Lock
 from queue import Queue
 
 """
@@ -77,7 +77,7 @@ class PaloCleaner:
         self._no_report = kwargs['no_report']
         self._split_report = kwargs['split_report']
         self._favorise_tagged_objects = kwargs['favorise_tagged_objects']
-        self._nb_thread = kwargs['number-of-threads']
+        self._nb_thread = kwargs['number_of_threads']
         self._console = None
         self._console_context = None
         self.init_console()
@@ -85,7 +85,7 @@ class PaloCleaner:
             if self._nb_thread == 0: # No value provided, we take the number of system's CPU
                 try:
                     self._nb_thread = cpu_count()
-                    kwargs['number-of-threads'] = self._nb_thread
+                    kwargs['number_of_threads'] = self._nb_thread # We force back the kwargs value for the STARTUP ARGUMENTS value diplay
                 except NotImplementedError as e:
                     self._console.log(f"Error: cannot collect the number of available CPUs for multithreading : {e}", style="red")     
             elif self._nb_thread < 0:
@@ -1700,7 +1700,7 @@ class PaloCleaner:
         # (when an object to be replaced has been found on a group), to display it on the result logs
         replacements_done = dict()
 
-        def replace_in_addr_groups(replacement_name, replacement):
+        def replace_in_addr_groups(replacement_name, replacement, lock):
             """
             This function replaces the addr objects for which a better duplicate has been found on the current location groups
 
@@ -1745,6 +1745,7 @@ class PaloCleaner:
                             self._used_objects_sets['shared'].add((tag_instance, 'shared'))
 
                         # add the new tag to the replacement object
+                        lock.acquire()
                         if replacement_obj_instance.tag:
                             if not tag in replacement_obj_instance.tag:
                                 replacement_obj_instance.tag.append(tag)
@@ -1759,6 +1760,7 @@ class PaloCleaner:
                         # if the cleaning application has been requested, apply the change to the replacement object
                         if self._apply_cleaning:
                             replacement_obj_instance.apply()
+                        lock.release()
 
                 # for each Address type object in the current location objects
                 for checked_object in self._objects[location_name]['Address']:
@@ -1788,10 +1790,12 @@ class PaloCleaner:
                                 self._console.log(f"[ {location_name} ] Replacing {source_obj_instance.about()['name']!r} ({source_obj_location}) by {replacement_obj_instance.about()['name']!r} ({replacement_obj_location}) on {checked_object.about()['name']!r} ({checked_object.__class__.__name__})", style="yellow", level=2)
                                 # create a list (if not existing already) for the current static group object
                                 # which will contain the list of all replacements done on this group
+                                lock.acquire()
                                 if checked_object.name not in replacements_done:
                                     replacements_done[checked_object.name] = list()
                                 # then append the current replacement information to this list (as a tuple format)
                                 replacements_done[checked_object.name].append((source_obj_instance.about()['name'], source_obj_location, replacement_obj_instance.about()['name'], replacement_obj_location))
+                                lock.release()
                         # TODO : check when this error is matched ?? (don't remember, but it probably needs to be here)
                         except ValueError:
                             continue
@@ -1810,15 +1814,16 @@ class PaloCleaner:
         for replacement_name, replacement in self._replacements[location_name]['Address'].items():
             # Apply multithreading if requested
             if self._nb_thread:
-                # add the replaceme to the multithreading queue
-                self._queue.put((replacement_name, replacement)) # variables are passed to be treated are we are not using threads
+                # add the replacement to the multithreading queue
+                self._queue.put((replacement_name, replacement)) 
             else:
-                replace_in_addr_groups(replacement_name, replacement) 
+                replace_in_addr_groups(replacement_name, replacement)  # variables are passed to be treated are we are not using threads
         
         if self._nb_thread:
+            lock = Lock()
             for n in range(self._nb_thread):
                 try:
-                    t = Thread(target=replace_in_addr_groups, args=(None, None)) # variables are set to None as threads ill manage all the replacements from the queue
+                    t = Thread(target=replace_in_addr_groups, args=(None, None, lock)) # variables are set to None as threads ill manage all the replacements from the queue
                     t.start()
                     self._console.log(f"[ {location_name} ] Started thread {n+1}", level=2)
                 except Exception as e:
@@ -1830,7 +1835,7 @@ class PaloCleaner:
                     
         progress.update(task, advance=1)
 
-        def replace_objects_in_service_groups(replacement, replacement_name):
+        def replace_objects_in_service_groups(replacement, replacement_name, lock):
             """
             This function replaces the services objects for which a better duplicate has been found on the current location groups
 
@@ -1867,8 +1872,10 @@ class PaloCleaner:
                                 checked_object.value.remove(source_obj_instance.about()['name'])
                                 # adding the replacement object to the group only if it has not been already used to replace
                                 # another one (case where we have duplicate objects on a static group)
+                                lock.acquire()
                                 if not replacement_obj_instance.about()['name'] in checked_object.value:
                                     checked_object.value.append(replacement_obj_instance.about()['name'])
+                                lock.release()
                                 changed = True
                                 matched = True
                             # if the name of the replacement object is the same than the original one, the static
@@ -1884,6 +1891,7 @@ class PaloCleaner:
                                     style="yellow", level=2)
                                 # create a list (if not existing already) for the current static group object
                                 # which will contain the list of all replacements done on this group
+                                lock.acquire()
                                 if checked_object.name not in replacements_done:
                                     replacements_done[checked_object.name] = list()
                                 # then append the current replacement information to this list (as a tuple format)
@@ -1891,6 +1899,7 @@ class PaloCleaner:
                                                                             source_obj_location,
                                                                             replacement_obj_instance.about()['name'],
                                                                             replacement_obj_location))
+                                lock.release()
                         # TODO : check when this error is matched ?? (don't remember, but it probably needs to be here)
                         except ValueError:
                             continue
@@ -1917,9 +1926,10 @@ class PaloCleaner:
                     replace_in_service_groups(replacement_name, replacement) 
             
             if self._nb_thread:
+                lock = Lock()
                 for n in range(self._nb_thread):
                     try:
-                        t = Thread(target=replace_in_service_groups, args=(None, None)) # variables are set to None as threads ill manage all the replacements from the queue
+                        t = Thread(target=replace_in_service_groups, args=(None, None, lock)) # variables are set to None as threads ill manage all the replacements from the queue
                         t.start()
                         self._console.log(f"[ {location_name} ] Started thread {n+1}", level=2)
                     except Exception as e:
