@@ -78,9 +78,6 @@ class PaloCleaner:
         self._split_report = kwargs['split_report']
         self._favorise_tagged_objects = kwargs['favorise_tagged_objects']
         self._nb_thread = kwargs['number_of_threads']
-        self._console = None
-        self._console_context = None
-        self.init_console()
         if self._nb_thread is not None:
             if self._nb_thread == 0: # No value provided, we take the number of system's CPU
                 try:
@@ -112,6 +109,10 @@ class PaloCleaner:
         self._max_change_timestamp = int(time.time()) - int(kwargs['max_days_since_change']) * 86400 if kwargs['max_days_since_change'] else 0
         self._max_hit_timestamp = int(time.time()) - int(kwargs['max_days_since_hit']) * 86400 if kwargs['max_days_since_hit'] else 0
         self._need_opstate = self._max_change_timestamp or self._max_hit_timestamp
+        self._ignore_opstate_ip = [] if kwargs['ignore_appliances_opstate'] is None else kwargs['ignore_appliances_opstate']
+        self._console = None
+        self._console_context = None
+        self.init_console()
         self._replacements = dict()
         self._panorama_devices = dict()
         self._hitcounts = dict()
@@ -207,9 +208,15 @@ class PaloCleaner:
                     self._console.log("[ Panorama ] Unknown error occurred while connecting to Panorama", style="red")
                     return 0
 
-                # get the full device-groups hierarchy and displays is in the console with color code to identity which
-                # device-groups will be concerned by the cleaning process
+                # if list of device-groups has been provided, check if all those device-groups exists in the
+                # Panorama downloaded hierarchy. If not, stop.
+                if self._dg_filter:
+                    if not set(self._dg_filter).issubset(self._stored_pano_hierarchy):
+                        self._console.log("[ Panorama ] One of the provided device-groups does not exists !", style="red")
+                        return 0
 
+                # get the full device-groups hierarchy and displays is in the console with color code to identify which
+                # device-groups will be concerned by the cleaning process
                 status.update("Parsing device groups list")
                 hierarchy_tree = self.generate_hierarchy_tree()
                 time.sleep(1)
@@ -480,7 +487,7 @@ class PaloCleaner:
         """
         Returns the list of directly, indirectly, and fully included device groups in the cleaning perimeter.
         Direct included DG are the ones specified in the CLI argument at startup
-        Indirect included are all upwards DG above the directly included ones.
+        Indirect included are all upwards DG above and below the directly included ones.
         Fully included are parents DG having all their child included.
 
         :param reversed_tree: (dict) Dict where keys are parent device groups and value is the list of childs
@@ -659,19 +666,20 @@ class PaloCleaner:
             if device:
                 system_settings = device.find("", SystemSettings)
                 fw_ip = system_settings.ip_address
-                fw_vsys = getattr(fw, "vsys")
-                fw_conn = Firewall(fw_ip, self._panorama_user, self._panorama_password, vsys=fw_vsys)
-                # TODO : timeout connection + retry ?
-                self._console.log(f"[ {location_name} ] Connecting to firewall {fw_ip} on vsys {fw_vsys}")
-                fw_panos_version = fw_conn.refresh_system_info().version
-                if (current_major_version := int(fw_panos_version.split('.')[0])) > min_member_major_version:
-                    min_member_major_version = current_major_version
-                self._console.log(f"[ {location_name} ] Detected PAN-OS version on {fw_ip} : {fw_panos_version}", level=2)
-                rb = Rulebase()
-                fw_conn.add(rb)
-                for rulebase in rulebases:
-                    ans = rb.opstate.hit_count.refresh(rulebase, all_rules=True)
-                    populate_hitcounts(rulebase, ans)
+                if fw_ip not in self._ignore_opstate_ip:
+                    fw_vsys = getattr(fw, "vsys")
+                    fw_conn = Firewall(fw_ip, self._panorama_user, self._panorama_password, vsys=fw_vsys)
+                    # TODO : timeout connection + retry ?
+                    self._console.log(f"[ {location_name} ] Connecting to firewall {fw_ip} on vsys {fw_vsys}")
+                    fw_panos_version = fw_conn.refresh_system_info().version
+                    if (current_major_version := int(fw_panos_version.split('.')[0])) > min_member_major_version:
+                        min_member_major_version = current_major_version
+                    self._console.log(f"[ {location_name} ] Detected PAN-OS version on {fw_ip} : {fw_panos_version}", level=2)
+                    rb = Rulebase()
+                    fw_conn.add(rb)
+                    for rulebase in rulebases:
+                        ans = rb.opstate.hit_count.refresh(rulebase, all_rules=True)
+                        populate_hitcounts(rulebase, ans)
 
         if min_member_major_version < 9:
             # if we did not found any member firewall with PANOS >= 9, we need to get the rule modification timestamp from Panorama for this context
