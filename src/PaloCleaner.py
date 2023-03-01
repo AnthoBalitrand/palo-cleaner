@@ -22,6 +22,7 @@ import signal
 from multiprocessing import cpu_count
 from threading import Thread, Lock
 from queue import Queue
+from ctypes import c_int32
 
 """
 Below is a representation of the different types of rules being processed, and for each of them, the name of each 
@@ -78,6 +79,7 @@ class PaloCleaner:
         self._split_report = kwargs['split_report']
         self._favorise_tagged_objects = kwargs['favorise_tagged_objects']
         self._nb_thread = kwargs['number_of_threads']
+        self._unused_only = kwargs['unused_only']
         if self._nb_thread is not None:
             if self._nb_thread == 0: # No value provided, we take the number of system's CPU
                 try:
@@ -335,36 +337,42 @@ class PaloCleaner:
                             self.init_console(context_name)
                             self._console.print(Panel(f"  [bold magenta]{context_name}  ", style="magenta"),
                                               justify="left")
-                            # OBJECTS OPTIMIZATION
-                            dg_optimize_task = progress.add_task(
-                                f"[ {context_name} ] - Optimizing objects",
-                                total=len(self._used_objects_sets[context_name])
-                            )
-                            self.optimize_objects(context_name, progress, dg_optimize_task)
-                            self._console.log(f"[ {context_name} ] Objects optimization done")
-                            progress.remove_task(dg_optimize_task)
 
-                            # OBJECTS REPLACEMENT IN GROUPS
-                            dg_replaceingroups_task = progress.add_task(
-                                f"[ {context_name} ] Replacing objects in groups",
-                                total=len(self._replacements[context_name]['Address']) + len(self._replacements[context_name]['Service'])
-                            )
-                            self.replace_object_in_groups(context_name, progress, dg_replaceingroups_task)
-                            self._console.log(f"[ {context_name} ] Objects replaced in groups")
-                            progress.remove_task(dg_replaceingroups_task)
+                            # Initializing a dict (on the global _replacements dict) which will contain information about the replacement
+                            # done for each object type at the current location
+                            self._replacements[context_name] = {'Address': dict(), 'Service': dict(), 'Tag': dict()}
 
-                            # OBJECTS REPLACEMENT IN RULEBASES
-                            dg_replaceinrules_task = progress.add_task(
-                                f"[ {context_name} ] Replacing objects in rules",
-                                total=self.count_rules(context_name)
-                            )
-                            self.replace_object_in_rulebase(context_name, progress, dg_replaceinrules_task)
-                            self._console.log(f"[ {context_name} ] Objects replaced in rulebases")
-                            progress.remove_task(dg_replaceinrules_task)
+                            if not self._unused_only:
+                                # OBJECTS OPTIMIZATION
+                                dg_optimize_task = progress.add_task(
+                                    f"[ {context_name} ] - Optimizing objects",
+                                    total=len(self._used_objects_sets[context_name])
+                                )
+                                self.optimize_objects(context_name, progress, dg_optimize_task)
+                                self._console.log(f"[ {context_name} ] Objects optimization done")
+                                progress.remove_task(dg_optimize_task)
+
+                                # OBJECTS REPLACEMENT IN GROUPS
+                                dg_replaceingroups_task = progress.add_task(
+                                    f"[ {context_name} ] Replacing objects in groups",
+                                    total=len(self._replacements[context_name]['Address']) + len(self._replacements[context_name]['Service'])
+                                )
+                                self.replace_object_in_groups(context_name, progress, dg_replaceingroups_task)
+                                self._console.log(f"[ {context_name} ] Objects replaced in groups")
+                                progress.remove_task(dg_replaceingroups_task)
+
+                                # OBJECTS REPLACEMENT IN RULEBASES
+                                dg_replaceinrules_task = progress.add_task(
+                                    f"[ {context_name} ] Replacing objects in rules",
+                                    total=self.count_rules(context_name)
+                                )
+                                self.replace_object_in_rulebase(context_name, progress, dg_replaceinrules_task)
+                                self._console.log(f"[ {context_name} ] Objects replaced in rulebases")
+                                progress.remove_task(dg_replaceinrules_task)
 
                             # OBJECTS CLEANING (FOR FULLY INCLUDED DEVICE GROUPS ONLY)
                             if context_name in self._analysis_perimeter['full']:
-                                self.clean_local_object_set(context_name, progress, dg_optimize_task)
+                                self.clean_local_object_set(context_name)
                                 self._console.log(f"[ {context_name} ] Objects cleaned (fully included)")
 
             self.init_console("report")
@@ -1643,10 +1651,6 @@ class PaloCleaner:
 
         # for each object and associated location found on the _used_objects_set for the current location
 
-        # Initializing a dict (on the global _replacements dict) which will contain information about the replacement
-        # done for each object type at the current location
-        self._replacements[location_name] = {'Address': dict(), 'Service': dict(), 'Tag': dict()}
-
         # This dict references the function to be used to match the best replacement for each object type
         find_maps = {
             AddressObject: self.find_upward_obj_by_addr,
@@ -1856,7 +1860,7 @@ class PaloCleaner:
                     
         progress.update(task, advance=1)
 
-        def replace_objects_in_service_groups(replacement, replacement_name, lock=None):
+        def replace_objects_in_service_groups(replacement_name, replacement, lock=None):
             """
             This function replaces the services objects for which a better duplicate has been found on the current location groups
 
@@ -2142,15 +2146,14 @@ class PaloCleaner:
             formatted_return += f"[/{type_map[repl_type]}]" if repl_type > 0 else ""
             return formatted_return
 
-
         # for each rulebase at the current location
         for rulebase_name, rulebase in self._rulebases[location_name].items():
             # if the current item is a rulebase (and not the context DeviceGroup object), and is not empty
             if rulebase_name != "context" and len(rulebase) > 0:
                 # initialize a variable which will count the number of replacements done for this rulebase
-                total_replacements = 0
+                total_replacements = c_int32(0)
                 # initialize a variable which will count the number of edited rules for the current rulebase
-                modified_rules = 0
+                modified_rules = c_int32(0)
                 # find the opstate hitcount name for the current rulebase type (panos-python stuff)
                 # IE : SecurityRule becomes "security", NatRule becomes "nat"
                 # Note also that the rulebase_name has the following value format : PreRulebase_SecurityRule (for example)
@@ -2210,7 +2213,7 @@ class PaloCleaner:
                         if replacements_count:
                             # Add the number of replacements for the current rule to the total number of replacements for
                             # the current rulebase
-                            total_replacements += replacements_count
+                            total_replacements.value += replacements_count
 
                             # if the rule has changes but is not considered as editable (not in timestamp boundaries
                             # regarding opstate timestamps), protect the rule objects from deletion
@@ -2223,7 +2226,7 @@ class PaloCleaner:
                                                     self._replacements[location_name][obj_type][object_name][
                                                         "blocked"] = True
                             else:
-                                modified_rules += 1
+                                modified_rules.value += 1
 
                             # Iterate up to the value of the max_replace variable (which is the highest number of
                             # replacements for a given field of the current rule
@@ -2273,7 +2276,6 @@ class PaloCleaner:
                             self._queue.task_done()
                         else:
                             break
-                
 
                 # for each rule in the current rulebase
                 for r in rulebase:
@@ -2282,12 +2284,14 @@ class PaloCleaner:
                         # add the rule to the multithreading queue
                         self._queue.put(r) #TODO MANAGE EXCEPTION
                     else:
-                        replace_objects(r, total_replacements, modified_rules) # r is passed to be treated are we are not using threads
+                        # r is passed to be treated as we are not using threads
+                        replace_objects(r, total_replacements, modified_rules)
                 
                 if self._nb_thread:
                     for n in range(self._nb_thread):
                         try:
-                            t = Thread(target=replace_objects, args=(None, total_replacements, modified_rules, )) # r is set to None as threads ill manage all the replacements from the queue
+                            # r is set to None as threads will get all the replacements from the queue
+                            t = Thread(target=replace_objects, args=(None, total_replacements, modified_rules, ))
                             t.start()   # TO TEST MANAGE THREAD CREATION AT UPPER LEVEL WITH IN & OUT QUEUES
                             self._console.log(f"[ {location_name} ] Started thread {n+1}", level=2)
                         except Exception as e:
@@ -2299,14 +2303,13 @@ class PaloCleaner:
                 
                 progress.update(task, advance=1)
 
-
                 # If there are replacements on the current rulebase, display the generated rich.Table on the console
                 if total_replacements:
                     self._console.print(rulebase_table)
                     self._console.log(
                         f"[ {location_name} ] {modified_rules} rules edited for the current rulebase ({rulebase_name})")
 
-    def clean_local_object_set(self, location_name: str, progress: rich.progress.Progress, task: rich.progress.TaskID):
+    def clean_local_object_set(self, location_name: str):
         """
         In charge of removing the unused objects at a given location (if this location is fully included in the analysis,
         = all child device-groups also included)

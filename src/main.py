@@ -115,6 +115,13 @@ def parse_cli_args():
         help = "List of appliances IP address for which opstate needs to be ignored (will not connect to get hitcounts)"
     )
 
+    parser.add_argument(
+        "--unused-only",
+        action = "store_true",
+        help = "Only deletes unused objects. No replacements are realized",
+        default = False
+    )
+
     return parser.parse_args()
 
 
