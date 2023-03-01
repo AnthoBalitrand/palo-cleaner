@@ -58,6 +58,7 @@ optional arguments:
   --apply-tiebreak-tag  Applies the tag defined on the --tiebreak-tag argument to objects choosen by the choice algorithm
   --no-report           Does not generates job reports
   --split-report        Split the report file (1 per device-group)
+  --unused-only         Only deletes unused objects. No replacements are realized 
 
 ```
 
@@ -78,6 +79,7 @@ Here's a more detailed description of those different parameters :
 | --apply-tiebreak-tag | | Applies the taf defined on the --tiebreak-tag parameter to the choosen objects by the algorithm, to make sure they will remain choose at next script usages | 
 | --no-report | | When used, does not create any html report for the run | 
 | --split-report | | Will create multiple reports files (globally, one per device-group). Highly recommended in large environments if you don't want huge unexploitables html reports | 
+| --unused-only | | The script will only delete unused objects but will not perform any further optimization |
 
 ## Capabilities 
 
@@ -96,6 +98,7 @@ Feel free to open new issues if something needs to be fixed / improved.
 - [x] Replace objects in dynamic groups
 - [x] Protect rules (and directly referenced objects) from modification, based on last change date / last hit date 
 - [x] Run in dry-run mode, only to generate a report 
+- [x] Unused objects deletion only mode 
 
 #### Objects-type supported 
 
