@@ -1,7 +1,6 @@
 import rich.progress
 from rich.console import Console
 from rich.prompt import Prompt
-from rich.tree import Tree
 from rich.text import Text
 from rich.panel import Panel
 from rich.table import Table
@@ -16,6 +15,7 @@ from panos.errors import PanXapiError
 from panos.firewall import Firewall
 from panos.device import SystemSettings
 from hierarchy import HierarchyDG
+from pandas import DataFrame
 import re
 import time
 import functools
@@ -72,7 +72,7 @@ class PaloCleaner:
         # Remove api_password from args to avoid it to be printed later (startup arguments printed in log file)
         kwargs['api_password'] = None
         self._dg_filter = kwargs['device_groups']
-        self._protect_tags = kwargs['protect_tags']
+        self._protect_tags = kwargs['protect_tags'] if kwargs['protect_tags'] else list()
         self._analysis_perimeter = None
         self._depthed_tree = dict({0: ['shared']})
         self._apply_cleaning = kwargs['apply_cleaning']
@@ -757,6 +757,7 @@ class PaloCleaner:
             condition2 = re.sub('or(?![^(]*\))', f"in {field_name} or", condition1)
             condition2 += f" in {field_name}"
             condition = "cond_expr_result = " + condition2
+
             return condition
 
         def shorten_object_type(object_type: str):
@@ -770,7 +771,8 @@ class PaloCleaner:
             return object_type.replace('Group', '').replace('Object', '')
 
         def flatten_object(used_object: panos.objects, object_location: str, usage_base: str,
-                           referencer_type: str = None, referencer_name: str = None, recursion_level: int = 1, protect_call=False):
+                           referencer_type: str = None, referencer_name: str = None, recursion_level: int = 1,
+                           protect_call=False):
             """
             Recursively called function, charged of returning the obj_set (list of (panos.objects, location)) for a given rule
             (first call is from a loop iterating over the different rules of a rulebase at a given location)
@@ -1017,7 +1019,8 @@ class PaloCleaner:
                                     *self.get_relative_object_location(obj, location_name, obj_type),
                                     location_name,
                                     r.__class__.__name__,
-                                    r.name)
+                                    r.name
+                                )
                             )
 
                             # the following will be executed if the object used has not been found by the
@@ -2338,7 +2341,11 @@ class PaloCleaner:
                 obj_type = list(obj_item.keys())[0]
                 obj_instance = obj_item[obj_type]
                 for o in self._objects[location_name][obj_type]:
-                    if o.__class__.__name__ is obj_instance.__name__ and not (o, location_name) in self._used_objects_sets[location_name] and not set(o.tag).intersection(self._protect_tags):
+                    if o.__class__.__name__ is obj_instance.__name__ and not (o, location_name) in self._used_objects_sets[location_name]:
+                        if getattr(o, 'tag'):
+                            if o.tag:
+                                if set(o.tag).intersection(self._protect_tags):
+                                    continue
                         if self._apply_cleaning:
                             delete_ok = False
                             while not delete_ok:
