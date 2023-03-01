@@ -122,6 +122,14 @@ def parse_cli_args():
         default = False
     )
 
+    parser.add_argument(
+        "--protect-tags",
+        nargs="+",
+        action="extend",
+        type=str,
+        help = "List of tags which will protect objects from deletion"
+    )
+
     return parser.parse_args()
 
 

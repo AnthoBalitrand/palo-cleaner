@@ -15,6 +15,7 @@ from panos.predefined import Predefined
 from panos.errors import PanXapiError
 from panos.firewall import Firewall
 from panos.device import SystemSettings
+from hierarchy import HierarchyDG
 import re
 import time
 import functools
@@ -71,6 +72,8 @@ class PaloCleaner:
         # Remove api_password from args to avoid it to be printed later (startup arguments printed in log file)
         kwargs['api_password'] = None
         self._dg_filter = kwargs['device_groups']
+        self._protect_tags = kwargs['protect_tags']
+        self._analysis_perimeter = None
         self._depthed_tree = dict({0: ['shared']})
         self._apply_cleaning = kwargs['apply_cleaning']
         self._tiebreak_tag = kwargs['tiebreak_tag']
@@ -104,7 +107,7 @@ class PaloCleaner:
         self._service_valuesearch = dict()
         self._used_objects_sets = dict()
         self._rulebases = dict()
-        self._stored_pano_hierarchy = None
+        self._dg_hierarchy = dict()
         self._removable_objects = list()
         self._tag_referenced = set()
         self._verbosity = int(kwargs['verbosity'])
@@ -224,14 +227,14 @@ class PaloCleaner:
                 # if list of device-groups has been provided, check if all those device-groups exists in the
                 # Panorama downloaded hierarchy. If not, stop.
                 if self._dg_filter:
-                    if not set(self._dg_filter).issubset(self._stored_pano_hierarchy):
+                    if not set(self._dg_filter).issubset(self._dg_hierarchy):
                         self._console.log("[ Panorama ] One of the provided device-groups does not exists !", style="red")
                         return 0
 
                 # get the full device-groups hierarchy and displays is in the console with color code to identify which
                 # device-groups will be concerned by the cleaning process
                 status.update("Parsing device groups list")
-                hierarchy_tree = self.generate_hierarchy_tree()
+                hierarchy_tree = self._dg_hierarchy['shared'].get_tree()
                 time.sleep(1)
                 self._console.print("Discovered hierarchy tree is the following :")
                 self._console.print(
@@ -378,7 +381,7 @@ class PaloCleaner:
             self.init_console("report")
             # Display the cleaning operation result (display again the hierarchy tree, but with the _cleaning_counts
             # information (deleted / replaced objects of each type for each device-group)
-            self._console.print(Panel(self.generate_hierarchy_tree(result=True)))
+            self._console.print(Panel(self._dg_hierarchy['shared'].get_tree(self._cleaning_counts)))
         except KeyboardInterrupt as e:
             self._console.log("PROCESS INTERRUPTED BY USER")
         finally:
@@ -421,21 +424,32 @@ class PaloCleaner:
         Get DeviceGroupHierarchy from Panorama
         :return:
         """
+        try:
+            if not self._dg_hierarchy:
+                temp_pano_hierarchy = PanoramaDeviceGroupHierarchy(self._panorama).fetch()
+                shared_dg = HierarchyDG('shared')
+                shared_dg.level = 0
+                self._dg_hierarchy['shared'] = shared_dg
+                while len(self._dg_hierarchy) < len(temp_pano_hierarchy) + 1:
+                    for k, v in temp_pano_hierarchy.items():
+                        if (v in self._dg_hierarchy or v is None) and k not in self._dg_hierarchy:
+                            self._dg_hierarchy[k] = HierarchyDG(k)
+                            if v:
+                                self._dg_hierarchy[k].add_parent(self._dg_hierarchy[v])
+                            else:
+                                self._dg_hierarchy[k].add_parent(shared_dg)
+                if self._dg_filter:
+                    for dg in self._dg_filter:
+                        self._dg_hierarchy[dg].set_included(direct=True)
+                else:
+                    self._dg_hierarchy['shared'].set_included(direct=True)
 
-        if not self._stored_pano_hierarchy:
-            self._reversed_tree = dict()
-            self._stored_pano_hierarchy = PanoramaDeviceGroupHierarchy(self._panorama).fetch()
-            for k, v in self._stored_pano_hierarchy.items():
-                if v is None:
-                    v = 'shared'
-                self._reversed_tree[v] = self._reversed_tree[v] + [k] if v in self._reversed_tree.keys() else [k]
-                if k not in self._reversed_tree.keys():
-                    self._reversed_tree[k] = list()
+                self._analysis_perimeter = HierarchyDG.get_perimeter(self._dg_hierarchy)
+                self._depthed_tree = HierarchyDG.gen_depth_tree(self._dg_hierarchy)
 
-            # Initializes _depthred_tree dict which is an "ordered list" of device-groups, from higher in hierarchy to
-            # lowest ones. Then calls gen_tree_depth method to populate.
-            self._depthed_tree = dict({0: ['shared']})
-            self.gen_tree_depth(self._reversed_tree)
+        except Exception as e:
+            self._console.log(f"[ Panorama ] Error occurred while parsing device groups : {e}", style="red")
+            raise Exception
 
     def get_panorama_managed_devices(self):
         """
@@ -448,94 +462,6 @@ class PaloCleaner:
             if fw.state.connected:
                 self._panorama_devices[getattr(fw, "serial")] = fw
 
-    def generate_hierarchy_tree(self, result=False):
-        """
-        Reverses the PanoramaDeviceGroupHierarchy dict
-        (permits to have list of childs for each parent, instead of parent for each child)
-
-        :param pano_hierarchy: (dict) PanoramaDeviceGroupHierarchy fetch result
-        :param print_result: (bool) To print or not the reversed hierarchy on stdout
-        :return: (dict) Each key is a device-group name, the associated value is the list of child device-groups
-        """
-        self._analysis_perimeter = self.get_perimeter(self._reversed_tree)
-        if 'shared' in self._analysis_perimeter['direct']:
-            line_value = "+ "
-            line_value += "F " if "shared" in self._analysis_perimeter['full'] else "P "
-            line_value += "shared"
-            if result and 'shared' in self._analysis_perimeter['full']:
-                line_value += "   "
-                line_value += ' '.join([f"{k} : {v['removed']}/{v['replaced']}" for k, v in self._cleaning_counts['shared'].items()])
-            hierarchy_tree = Tree(line_value, style="red")
-        elif 'shared' in self._analysis_perimeter['indirect']:
-            line_value = "* "
-            line_value += "F " if "shared" in self._analysis_perimeter['full'] else "P "
-            line_value += "shared"
-            hierarchy_tree = Tree(line_value, style="yellow")
-
-        # If print_result attribute is True, print the result on screen
-        def add_leafs(tree, tree_branch, start='shared'):
-            for k, v in self._reversed_tree.items():
-                if k == start:
-                    for d in v:
-                        if d in self._analysis_perimeter['direct']:
-                            line_value = "+ "
-                            line_value += "F " if d in self._analysis_perimeter['full'] else "P "
-                            line_value += d
-                            if result and d in self._analysis_perimeter['full']:
-                                line_value += "   "
-                                line_value += ' '.join([f"{k} : {v['removed']}/{v['replaced']}" for k, v in
-                                                        self._cleaning_counts[d].items()])
-                            leaf = tree_branch.add(line_value, style="red")
-                        elif d in self._analysis_perimeter['indirect']:
-                            line_value = "* "
-                            line_value += "F " if d in self._analysis_perimeter['full'] else "P "
-                            line_value += d
-                            if result and d in self._analysis_perimeter['full']:
-                                line_value += "   "
-                                line_value += ' '.join([f"{k} : {v['removed']}/{v['replaced']}" for k, v in
-                                                        self._cleaning_counts[d].items()])
-                            leaf = tree_branch.add(line_value, style="yellow")
-                        else:
-                            leaf = tree_branch.add("- " + d, style="green")
-                        add_leafs(tree, leaf, d)
-
-        add_leafs(self._reversed_tree, hierarchy_tree)
-        return hierarchy_tree
-
-    def get_perimeter(self, reversed_tree):
-        """
-        Returns the list of directly, indirectly, and fully included device groups in the cleaning perimeter.
-        Direct included DG are the ones specified in the CLI argument at startup
-        Indirect included are all upwards DG above and below the directly included ones.
-        Fully included are parents DG having all their child included.
-
-        :param reversed_tree: (dict) Dict where keys are parent device groups and value is the list of childs
-        :return: (dict) Representation of directly, indirectly, and fulled included device-groups
-        """
-        indirectly_included = list()
-        directly_included = list()
-        fully_included = list()
-        for depth in sorted(self._depthed_tree, reverse=True):
-            for dg in self._depthed_tree[depth]:
-                if self._dg_filter:
-                    if dg in self._dg_filter:
-                        directly_included.append(dg)
-                        fully_included.append(dg)
-                    else:
-                        found_child = False
-                        nb_found_child = 0
-                        for child in reversed_tree.get(dg, list()):
-                            if child in directly_included + indirectly_included:
-                                found_child = True
-                                nb_found_child += 1
-                        if found_child:
-                            indirectly_included.append(dg)
-                            if nb_found_child == len(reversed_tree.get(dg)):
-                                fully_included.append(dg)
-                else:
-                    directly_included.append(dg)
-                    fully_included.append(dg)
-        return {'direct': directly_included, 'indirect': indirectly_included, 'full': fully_included}
 
     def count_objects(self, location_name):
         """
@@ -755,9 +681,7 @@ class PaloCleaner:
         # if no object is found at current reference_location, find the upward device-group on the hierarchy
         # and call the current function recursively with this upward level as reference_location
         if not found_object and reference_location not in ['shared', 'predefined']:
-            upward_dg = self._stored_pano_hierarchy[reference_location]
-            if not upward_dg:
-                upward_dg = 'shared'
+            upward_dg = self._dg_hierarchy[reference_location].parent.name
             found_object, found_location = self.get_relative_object_location(obj_name, upward_dg, obj_type)
         elif not found_object and (obj_type == "Service" and reference_location == 'shared'):
             upward_dg = "predefined"
@@ -802,10 +726,7 @@ class PaloCleaner:
                     found_objects.append((obj, reference_location))
         # if we are not yet at the 'shared' level
         if reference_location != 'shared':
-            # find the upward device-group
-            upward_dg = self._stored_pano_hierarchy[reference_location]
-            if not upward_dg:
-                upward_dg = 'shared'
+            upward_dg = self._dg_hierarchy[reference_location].parent.name
             # call the current function recursively with the upward group level
             found_objects += self.get_relative_object_location_by_tag(executable_condition, upward_dg)
         # return list of tuples containing all found objects and their respective location
@@ -1207,10 +1128,8 @@ class PaloCleaner:
                 # add each of them to the result list as a tuple (AddressObject, current location name)
                 found_upward_objects.append((obj, current_location_search))
             # Find the next search location (upward device group)
-            current_location_search = self._stored_pano_hierarchy.get(current_location_search)
-            # If the result of the upward device-group name is "None", it means that the upward device-group is "shared"
-            if not current_location_search:
-                current_location_search = "shared"
+            upward_dg = self._dg_hierarchy[current_location_search].parent
+            current_location_search = "shared" if not upward_dg else upward_dg.name
 
         return found_upward_objects
 
@@ -1254,10 +1173,9 @@ class PaloCleaner:
                             # (AddressGroup, current location name)
                             found_upward_objects.append((obj, current_location_search))
             # Find the next search location (upward device group)
-            current_location_search = self._stored_pano_hierarchy.get(current_location_search)
+            upward_dg = self._dg_hierarchy[current_location_search].parent
             # If the result of the upward device-group name is "None", it means that the upward device-group is "shared"
-            if not current_location_search:
-                current_location_search = "shared"
+            current_location_search = "shared" if not upward_dg else upward_dg.name
 
         return found_upward_objects
 
@@ -1292,10 +1210,9 @@ class PaloCleaner:
                         # (ServiceGroup, current location name)
                         found_upward_objects.append((obj, current_location_search))
             # Find the next search location (upward device group)
-            current_location_search = self._stored_pano_hierarchy.get(current_location_search)
+            upward_dg = self._dg_hierarchy[current_location_search].parent
             # If the result of the upward device-group name is "None", it means that the upward device-group is "shared"
-            if not current_location_search:
-                current_location_search = "shared"
+            current_location_search = "shared" if not upward_dg else upward_dg.name
 
         return found_upward_objects
 
@@ -1327,10 +1244,9 @@ class PaloCleaner:
                 # Add each of them to the result list as a tuple (ServiceObject, current location name)
                 found_upward_objects.append((obj, current_location_search))
             # Find the next search location (upward device group)
-            current_location_search = self._stored_pano_hierarchy.get(current_location_search)
+            upward_dg = self._dg_hierarchy[current_location_search].parent
             # If the result of the upward device-group name is "None", it means that the upward device-group is "shared"
-            if not current_location_search:
-                current_location_search = "shared"
+            current_location_search = "shared" if not upward_dg else upward_dg.name
 
         return found_upward_objects
 
@@ -2402,10 +2318,9 @@ class PaloCleaner:
         # _used_objects_set of the parent.
         # This will permit to protect used objects on the childs of the hierarchy to be deleted when they exist but are
         # not used on the parents
-        parent_dg = self._stored_pano_hierarchy.get(location_name)
-        if not parent_dg:
-            parent_dg = "shared"
-        self._used_objects_sets[parent_dg] = self._used_objects_sets[parent_dg].union(self._used_objects_sets[location_name])
+        upward_dg = self._dg_hierarchy[location_name].parent
+        upward_dg_name = "shared" if not upward_dg else upward_dg.name
+        self._used_objects_sets[upward_dg_name] = self._used_objects_sets[upward_dg_name].union(self._used_objects_sets[location_name])
 
         # Iterating over each object type / object for the current location, and check if each object is member
         # (or still member, as the replaced ones have been suppressed) of the _used_objects_set for the same location
@@ -2415,7 +2330,6 @@ class PaloCleaner:
         def delete_local_objects(obj_item):
             
             while True:
-
                 if self._nb_thread: #TODO MANAGE EXCEPTION
                     if self._queue.empty():
                         break
@@ -2424,7 +2338,7 @@ class PaloCleaner:
                 obj_type = list(obj_item.keys())[0]
                 obj_instance = obj_item[obj_type]
                 for o in self._objects[location_name][obj_type]:
-                    if o.__class__.__name__ is obj_instance.__name__ and not (o, location_name) in self._used_objects_sets[location_name]:
+                    if o.__class__.__name__ is obj_instance.__name__ and not (o, location_name) in self._used_objects_sets[location_name] and not set(o.tag).intersection(self._protect_tags):
                         if self._apply_cleaning:
                             delete_ok = False
                             while not delete_ok:
@@ -2501,19 +2415,3 @@ class PaloCleaner:
                         if self._apply_cleaning:
                             successful_delete = False
         """
-
-    def gen_tree_depth(self, input_tree, start='shared', depth=1):
-        """
-        Submethod used to create a dict with the "depth" value for each device-group, depth for 'shared' being 0
-
-        :param input_tree: (dict) Reversed PanoramaDeviceGroupHierarchy tree
-        :param start: (string) Where to start for depth calculation (function being called recursively)
-        :param depth: (int) Actual depth of analysis
-        :return: (dict) Dict with keys being the depth of the devicegroups and value being list of device-group names
-        """
-
-        for loc in input_tree[start]:
-            if depth not in self._depthed_tree.keys():
-                self._depthed_tree[depth] = list()
-            self._depthed_tree[depth].append(loc)
-            self.gen_tree_depth(input_tree, loc, depth + 1)
