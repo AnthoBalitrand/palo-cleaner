@@ -47,7 +47,7 @@ class HierarchyDG:
         label += "F" if self.inclusion_state == 2 else "P" if self.inclusion_state == 1 else " "
         label += " "
         label += self.name
-        if clean_counts:
+        if clean_counts and clean_counts.get(self.name):
             label += "   " + ' '.join([f"{k} : {v['removed']}/{v['replaced']}" for k, v in clean_counts[self.name].items()])
         return {'label': label, 'style': style}
 
@@ -55,7 +55,7 @@ class HierarchyDG:
         if not root:
             tree = tree.add(**self.tree_repr(clean_counts))
         for c in self.childs:
-            c.add_to_tree(tree)
+            c.add_to_tree(tree, clean_counts=clean_counts)
 
     def get_tree(self, clean_counts=None):
         init_tree = Tree(**self.tree_repr(clean_counts))

@@ -103,6 +103,7 @@ class PaloCleaner:
         self._addr_namesearch = dict()
         self._tag_namesearch = dict()
         self._addr_ipsearch = dict()
+        self._tag_objsearch = dict()
         self._service_namesearch = dict()
         self._service_valuesearch = dict()
         self._used_objects_sets = dict()
@@ -524,12 +525,21 @@ class PaloCleaner:
             self._addr_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Address']}
             self._console.log(f"[ {location_name} ] Objects namesearch structures initialized", level=2)
             self._addr_ipsearch[location_name] = dict()
+            self._tag_objsearch[location_name] = dict()
             for obj in self._objects[location_name]['Address']:
                 if type(obj) is panos.objects.AddressObject:
                     addr = self.hostify_address(obj.value)
                     if addr not in self._addr_ipsearch[location_name].keys():
                         self._addr_ipsearch[location_name][addr] = list()
                     self._addr_ipsearch[location_name][addr].append(obj)
+                    # adding objects tag to the _tag_objsearch structure
+                if type(obj) in [panos.objects.AddressObject, panos.objects.AddressGroup]:
+                    if obj.tag:
+                        for t in obj.tag:
+                            if t not in self._tag_objsearch[location_name]:
+                                self._tag_objsearch[location_name][t] = {obj}
+                            else:
+                                self._tag_objsearch[location_name][t].add(obj)
             self._console.log(f"[ {location_name} ] Objects ipsearch structures initialized", level=2)
             self._objects[location_name]['Tag'] = Tag.refreshall(context)
             self._tag_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Tag']}
@@ -697,39 +707,46 @@ class PaloCleaner:
         # finally return the tuple of the found object and its location
         return (found_object, found_location)
 
-    def get_relative_object_location_by_tag(self, executable_condition, reference_location):
+    def gen_condition_expression(self, condition_string: str, search_location: str):
         """
-        Find Address objects referenced by a dynamic group (based on their tags)
-        Knowing that dynamic groups can reference any object up to the level at which they are used
-        And not only up to the level where they are defined
+        Creates dynamically an executable Python statement used to find objects matching a DAG condition
+        on the self._tag_objsearch structure
+        Example :
+        condition_string = "'tag1' and ('tag2' or 'tag3')"
+        search_location = "fwtest"
+        Output :
+        cond_expr_result = "self._tag_objsearch[fwtest].get('tag1', set()) & (self._tag_objsearch[fwtest].get('tag2', set()) ^ self._tag_objsearch[fwtest].get('tag3', set()))"
 
-        :param executable_condition: (string) Executable python statement to match tags as configured on DAG
-        :param reference_location: (string) Location where to start to find referenced objects (where the group is used)
+        :param condition_string: The DAG (AddressGroup) dynamic statement
+        :param search_location: The location where to find the matching objects
         :return:
         """
 
+        condition = condition_string.replace('and', '&')
+        condition = condition.replace('or', '^')
+        condition = re.sub("('.*?')", rf"self._tag_objsearch['{search_location}'].get(\1, set())", condition)
+        condition = "cond_expr_result = " + condition
+        return condition
+
+    def get_relative_object_location_by_tag(self, dag_condition, reference_location):
+        """
+        Recursive function, used to find all objects matching a DAG statement
+
+        :param dag_condition: The AddressGroup.dynamic_value
+        :param reference_location: The location where to find matching objects for this recursive iteration
+        :return: list((obj, location)): List of tuples of (Object, location) matching the DAG statement
+        """
+
         found_objects = list()
-        # For each object at the reference_location level
-        for obj in self._objects[reference_location]['Address']:
-            # check if current object has tags
-            if obj.tag:
-                # initialize dict which will contain the results of the executable_condition execution
-                expr_result = dict()
-                # obj_tags is the variable name used when generating the condition expression
-                # (on the fetch_used_obj_set). Tags will be searched there.
-                obj_tags = obj.tag
-                # Execute the executable_condition with the locals() context
-                exec(executable_condition, locals(), expr_result)
-                cond_expr_result = expr_result['cond_expr_result']
-                # If the current object tags matches the executable_condition, add it to found_objects
-                if cond_expr_result:
-                    found_objects.append((obj, reference_location))
-        # if we are not yet at the 'shared' level
+        condition_expr = self.gen_condition_expression(dag_condition, reference_location)
+        expr_result = dict()
+        exec(condition_expr, locals(), expr_result)
+        found_objects += [(x, reference_location) for x in expr_result['cond_expr_result']]
+
         if reference_location != 'shared':
             upward_dg = self._dg_hierarchy[reference_location].parent.name
-            # call the current function recursively with the upward group level
-            found_objects += self.get_relative_object_location_by_tag(executable_condition, upward_dg)
-        # return list of tuples containing all found objects and their respective location
+            found_objects += self.get_relative_object_location_by_tag(dag_condition, upward_dg)
+
         return found_objects
 
     def fetch_used_obj_set(self, location_name, progress, task):
@@ -744,21 +761,6 @@ class PaloCleaner:
         :param task: (rich.Task) The rich Task object to update during progression
         :return:
         """
-
-        def gen_condition_expression(condition_string: str, field_name: str):
-            """
-            Transforms a DAG objects match condition in an executable python statement
-            :param condition_string: (string) Condition got from the DAG object
-            :param field_name: (string) List on which the objects will be put for match at statement execution
-            :return: (string) Python executable condition
-            """
-
-            condition1 = re.sub('and(?![^(]*\))', f"in {field_name} and", condition_string)
-            condition2 = re.sub('or(?![^(]*\))', f"in {field_name} or", condition1)
-            condition2 += f" in {field_name}"
-            condition = "cond_expr_result = " + condition2
-
-            return condition
 
         def shorten_object_type(object_type: str):
             """
@@ -865,14 +867,12 @@ class PaloCleaner:
                             f"[ {usage_base} ] {'*' * recursion_level} Object {used_object.name!r} (dynamic AddressGroup) (ref by {referencer_type} {referencer_name!r}) has been found on location {object_location}",
                             style="green", level=2)
 
-                    # call to the gen_condition_expression function, which will convert the DAG value into an executable
-                    # python condition
-                    executable_condition = gen_condition_expression(used_object.dynamic_value, "obj_tags")
-
-                    # for each object matched by the get_relative_object_location_by_tag (using the generated Python expression)
+                    # for each object matched by the get_relative_object_location_by_tag
                     # (= for each object matched by the DAG)
                     for referenced_object, referenced_object_location in self.get_relative_object_location_by_tag(
-                            executable_condition, usage_base):
+                        used_object.dynamic_value,
+                        usage_base
+                    ):
                         self._console.log(
                                 f"[ {usage_base} ] {'*' * recursion_level} Found group member of dynamic AddressGroup {used_object.name!r} : {referenced_object.name!r}",
                                 style="green", level=2)
@@ -2342,10 +2342,12 @@ class PaloCleaner:
                 obj_instance = obj_item[obj_type]
                 for o in self._objects[location_name][obj_type]:
                     if o.__class__.__name__ is obj_instance.__name__ and not (o, location_name) in self._used_objects_sets[location_name]:
-                        if getattr(o, 'tag'):
+                        try:
                             if o.tag:
                                 if set(o.tag).intersection(self._protect_tags):
                                     continue
+                        except AttributeError :
+                            pass
                         if self._apply_cleaning:
                             delete_ok = False
                             while not delete_ok:
