@@ -1642,6 +1642,27 @@ class PaloCleaner:
         # (when an object to be replaced has been found on a group), to display it on the result logs
         replacements_done = dict()
 
+        def multithread_wrapper(wrapped_func):
+            @functools.wraps(wrapped_func)
+            def wrapper(*xargs, **kwargs):
+                if self._nb_thread:
+                    for j in kwargs.pop('jobs_iterator', []):
+                        self._queue.put(j)
+                    lock = Lock()
+                    kwargs['lock'] = lock
+                    for n in range(self._nb_thread):
+                        try:
+                            t = Thread(target=wrapped_func, args=(*xargs,), kwargs=kwargs)
+                            t.start()
+                            self._console.log(f"[ {location_name} ] Started thread {n+1} for function {wrapped_func.__name__}", level=2)
+                        except Exception as e:
+                            self._console.log(f"[ {location_name} ] Error while creating and starting thread {n+1} for function {wrapped_func.__name__} : {e}", style="red")
+                    self._queue.join()
+                else:
+                    wrapped_func(*xargs, **kwargs)
+
+                return wrapped_func(*xargs, **kwargs)
+
         def replace_in_addr_groups(replacement_name, replacement, lock=None):
             """
             This function replaces the addr objects for which a better duplicate has been found on the current location groups
