@@ -1,7 +1,6 @@
 import rich.progress
 from rich.console import Console
 from rich.prompt import Prompt
-from rich.tree import Tree
 from rich.text import Text
 from rich.panel import Panel
 from rich.table import Table
@@ -15,6 +14,8 @@ from panos.predefined import Predefined
 from panos.errors import PanXapiError
 from panos.firewall import Firewall
 from panos.device import SystemSettings
+from hierarchy import HierarchyDG
+from pandas import DataFrame
 import re
 import time
 import functools
@@ -22,6 +23,7 @@ import signal
 from multiprocessing import cpu_count
 from threading import Thread, Lock
 from queue import Queue
+from ctypes import c_int32
 
 """
 Below is a representation of the different types of rules being processed, and for each of them, the name of each 
@@ -70,6 +72,8 @@ class PaloCleaner:
         # Remove api_password from args to avoid it to be printed later (startup arguments printed in log file)
         kwargs['api_password'] = None
         self._dg_filter = kwargs['device_groups']
+        self._protect_tags = kwargs['protect_tags'] if kwargs['protect_tags'] else list()
+        self._analysis_perimeter = None
         self._depthed_tree = dict({0: ['shared']})
         self._apply_cleaning = kwargs['apply_cleaning']
         self._tiebreak_tag = kwargs['tiebreak_tag']
@@ -78,6 +82,7 @@ class PaloCleaner:
         self._split_report = kwargs['split_report']
         self._favorise_tagged_objects = kwargs['favorise_tagged_objects']
         self._nb_thread = kwargs['number_of_threads']
+        self._unused_only = kwargs['unused_only']
         if self._nb_thread is not None:
             if self._nb_thread == 0: # No value provided, we take the number of system's CPU
                 try:
@@ -98,11 +103,12 @@ class PaloCleaner:
         self._addr_namesearch = dict()
         self._tag_namesearch = dict()
         self._addr_ipsearch = dict()
+        self._tag_objsearch = dict()
         self._service_namesearch = dict()
         self._service_valuesearch = dict()
         self._used_objects_sets = dict()
         self._rulebases = dict()
-        self._stored_pano_hierarchy = None
+        self._dg_hierarchy = dict()
         self._removable_objects = list()
         self._tag_referenced = set()
         self._verbosity = int(kwargs['verbosity'])
@@ -222,14 +228,14 @@ class PaloCleaner:
                 # if list of device-groups has been provided, check if all those device-groups exists in the
                 # Panorama downloaded hierarchy. If not, stop.
                 if self._dg_filter:
-                    if not set(self._dg_filter).issubset(self._stored_pano_hierarchy):
+                    if not set(self._dg_filter).issubset(self._dg_hierarchy):
                         self._console.log("[ Panorama ] One of the provided device-groups does not exists !", style="red")
                         return 0
 
                 # get the full device-groups hierarchy and displays is in the console with color code to identify which
                 # device-groups will be concerned by the cleaning process
                 status.update("Parsing device groups list")
-                hierarchy_tree = self.generate_hierarchy_tree()
+                hierarchy_tree = self._dg_hierarchy['shared'].get_tree()
                 time.sleep(1)
                 self._console.print("Discovered hierarchy tree is the following :")
                 self._console.print(
@@ -335,42 +341,48 @@ class PaloCleaner:
                             self.init_console(context_name)
                             self._console.print(Panel(f"  [bold magenta]{context_name}  ", style="magenta"),
                                               justify="left")
-                            # OBJECTS OPTIMIZATION
-                            dg_optimize_task = progress.add_task(
-                                f"[ {context_name} ] - Optimizing objects",
-                                total=len(self._used_objects_sets[context_name])
-                            )
-                            self.optimize_objects(context_name, progress, dg_optimize_task)
-                            self._console.log(f"[ {context_name} ] Objects optimization done")
-                            progress.remove_task(dg_optimize_task)
 
-                            # OBJECTS REPLACEMENT IN GROUPS
-                            dg_replaceingroups_task = progress.add_task(
-                                f"[ {context_name} ] Replacing objects in groups",
-                                total=len(self._replacements[context_name]['Address']) + len(self._replacements[context_name]['Service'])
-                            )
-                            self.replace_object_in_groups(context_name, progress, dg_replaceingroups_task)
-                            self._console.log(f"[ {context_name} ] Objects replaced in groups")
-                            progress.remove_task(dg_replaceingroups_task)
+                            # Initializing a dict (on the global _replacements dict) which will contain information about the replacement
+                            # done for each object type at the current location
+                            self._replacements[context_name] = {'Address': dict(), 'Service': dict(), 'Tag': dict()}
 
-                            # OBJECTS REPLACEMENT IN RULEBASES
-                            dg_replaceinrules_task = progress.add_task(
-                                f"[ {context_name} ] Replacing objects in rules",
-                                total=self.count_rules(context_name)
-                            )
-                            self.replace_object_in_rulebase(context_name, progress, dg_replaceinrules_task)
-                            self._console.log(f"[ {context_name} ] Objects replaced in rulebases")
-                            progress.remove_task(dg_replaceinrules_task)
+                            if not self._unused_only:
+                                # OBJECTS OPTIMIZATION
+                                dg_optimize_task = progress.add_task(
+                                    f"[ {context_name} ] - Optimizing objects",
+                                    total=len(self._used_objects_sets[context_name])
+                                )
+                                self.optimize_objects(context_name, progress, dg_optimize_task)
+                                self._console.log(f"[ {context_name} ] Objects optimization done")
+                                progress.remove_task(dg_optimize_task)
+
+                                # OBJECTS REPLACEMENT IN GROUPS
+                                dg_replaceingroups_task = progress.add_task(
+                                    f"[ {context_name} ] Replacing objects in groups",
+                                    total=len(self._replacements[context_name]['Address']) + len(self._replacements[context_name]['Service'])
+                                )
+                                self.replace_object_in_groups(context_name, progress, dg_replaceingroups_task)
+                                self._console.log(f"[ {context_name} ] Objects replaced in groups")
+                                progress.remove_task(dg_replaceingroups_task)
+
+                                # OBJECTS REPLACEMENT IN RULEBASES
+                                dg_replaceinrules_task = progress.add_task(
+                                    f"[ {context_name} ] Replacing objects in rules",
+                                    total=self.count_rules(context_name)
+                                )
+                                self.replace_object_in_rulebase(context_name, progress, dg_replaceinrules_task)
+                                self._console.log(f"[ {context_name} ] Objects replaced in rulebases")
+                                progress.remove_task(dg_replaceinrules_task)
 
                             # OBJECTS CLEANING (FOR FULLY INCLUDED DEVICE GROUPS ONLY)
                             if context_name in self._analysis_perimeter['full']:
-                                self.clean_local_object_set(context_name, progress, dg_optimize_task)
+                                self.clean_local_object_set(context_name)
                                 self._console.log(f"[ {context_name} ] Objects cleaned (fully included)")
 
             self.init_console("report")
             # Display the cleaning operation result (display again the hierarchy tree, but with the _cleaning_counts
             # information (deleted / replaced objects of each type for each device-group)
-            self._console.print(Panel(self.generate_hierarchy_tree(result=True)))
+            self._console.print(Panel(self._dg_hierarchy['shared'].get_tree(self._cleaning_counts)))
         except KeyboardInterrupt as e:
             self._console.log("PROCESS INTERRUPTED BY USER")
         finally:
@@ -413,21 +425,32 @@ class PaloCleaner:
         Get DeviceGroupHierarchy from Panorama
         :return:
         """
+        try:
+            if not self._dg_hierarchy:
+                temp_pano_hierarchy = PanoramaDeviceGroupHierarchy(self._panorama).fetch()
+                shared_dg = HierarchyDG('shared')
+                shared_dg.level = 0
+                self._dg_hierarchy['shared'] = shared_dg
+                while len(self._dg_hierarchy) < len(temp_pano_hierarchy) + 1:
+                    for k, v in temp_pano_hierarchy.items():
+                        if (v in self._dg_hierarchy or v is None) and k not in self._dg_hierarchy:
+                            self._dg_hierarchy[k] = HierarchyDG(k)
+                            if v:
+                                self._dg_hierarchy[k].add_parent(self._dg_hierarchy[v])
+                            else:
+                                self._dg_hierarchy[k].add_parent(shared_dg)
+                if self._dg_filter:
+                    for dg in self._dg_filter:
+                        self._dg_hierarchy[dg].set_included(direct=True)
+                else:
+                    self._dg_hierarchy['shared'].set_included(direct=True)
 
-        if not self._stored_pano_hierarchy:
-            self._reversed_tree = dict()
-            self._stored_pano_hierarchy = PanoramaDeviceGroupHierarchy(self._panorama).fetch()
-            for k, v in self._stored_pano_hierarchy.items():
-                if v is None:
-                    v = 'shared'
-                self._reversed_tree[v] = self._reversed_tree[v] + [k] if v in self._reversed_tree.keys() else [k]
-                if k not in self._reversed_tree.keys():
-                    self._reversed_tree[k] = list()
+                self._analysis_perimeter = HierarchyDG.get_perimeter(self._dg_hierarchy)
+                self._depthed_tree = HierarchyDG.gen_depth_tree(self._dg_hierarchy)
 
-            # Initializes _depthred_tree dict which is an "ordered list" of device-groups, from higher in hierarchy to
-            # lowest ones. Then calls gen_tree_depth method to populate.
-            self._depthed_tree = dict({0: ['shared']})
-            self.gen_tree_depth(self._reversed_tree)
+        except Exception as e:
+            self._console.log(f"[ Panorama ] Error occurred while parsing device groups : {e}", style="red")
+            raise Exception
 
     def get_panorama_managed_devices(self):
         """
@@ -440,94 +463,6 @@ class PaloCleaner:
             if fw.state.connected:
                 self._panorama_devices[getattr(fw, "serial")] = fw
 
-    def generate_hierarchy_tree(self, result=False):
-        """
-        Reverses the PanoramaDeviceGroupHierarchy dict
-        (permits to have list of childs for each parent, instead of parent for each child)
-
-        :param pano_hierarchy: (dict) PanoramaDeviceGroupHierarchy fetch result
-        :param print_result: (bool) To print or not the reversed hierarchy on stdout
-        :return: (dict) Each key is a device-group name, the associated value is the list of child device-groups
-        """
-        self._analysis_perimeter = self.get_perimeter(self._reversed_tree)
-        if 'shared' in self._analysis_perimeter['direct']:
-            line_value = "+ "
-            line_value += "F " if "shared" in self._analysis_perimeter['full'] else "P "
-            line_value += "shared"
-            if result and 'shared' in self._analysis_perimeter['full']:
-                line_value += "   "
-                line_value += ' '.join([f"{k} : {v['removed']}/{v['replaced']}" for k, v in self._cleaning_counts['shared'].items()])
-            hierarchy_tree = Tree(line_value, style="red")
-        elif 'shared' in self._analysis_perimeter['indirect']:
-            line_value = "* "
-            line_value += "F " if "shared" in self._analysis_perimeter['full'] else "P "
-            line_value += "shared"
-            hierarchy_tree = Tree(line_value, style="yellow")
-
-        # If print_result attribute is True, print the result on screen
-        def add_leafs(tree, tree_branch, start='shared'):
-            for k, v in self._reversed_tree.items():
-                if k == start:
-                    for d in v:
-                        if d in self._analysis_perimeter['direct']:
-                            line_value = "+ "
-                            line_value += "F " if d in self._analysis_perimeter['full'] else "P "
-                            line_value += d
-                            if result and d in self._analysis_perimeter['full']:
-                                line_value += "   "
-                                line_value += ' '.join([f"{k} : {v['removed']}/{v['replaced']}" for k, v in
-                                                        self._cleaning_counts[d].items()])
-                            leaf = tree_branch.add(line_value, style="red")
-                        elif d in self._analysis_perimeter['indirect']:
-                            line_value = "* "
-                            line_value += "F " if d in self._analysis_perimeter['full'] else "P "
-                            line_value += d
-                            if result and d in self._analysis_perimeter['full']:
-                                line_value += "   "
-                                line_value += ' '.join([f"{k} : {v['removed']}/{v['replaced']}" for k, v in
-                                                        self._cleaning_counts[d].items()])
-                            leaf = tree_branch.add(line_value, style="yellow")
-                        else:
-                            leaf = tree_branch.add("- " + d, style="green")
-                        add_leafs(tree, leaf, d)
-
-        add_leafs(self._reversed_tree, hierarchy_tree)
-        return hierarchy_tree
-
-    def get_perimeter(self, reversed_tree):
-        """
-        Returns the list of directly, indirectly, and fully included device groups in the cleaning perimeter.
-        Direct included DG are the ones specified in the CLI argument at startup
-        Indirect included are all upwards DG above and below the directly included ones.
-        Fully included are parents DG having all their child included.
-
-        :param reversed_tree: (dict) Dict where keys are parent device groups and value is the list of childs
-        :return: (dict) Representation of directly, indirectly, and fulled included device-groups
-        """
-        indirectly_included = list()
-        directly_included = list()
-        fully_included = list()
-        for depth in sorted(self._depthed_tree, reverse=True):
-            for dg in self._depthed_tree[depth]:
-                if self._dg_filter:
-                    if dg in self._dg_filter:
-                        directly_included.append(dg)
-                        fully_included.append(dg)
-                    else:
-                        found_child = False
-                        nb_found_child = 0
-                        for child in reversed_tree.get(dg, list()):
-                            if child in directly_included + indirectly_included:
-                                found_child = True
-                                nb_found_child += 1
-                        if found_child:
-                            indirectly_included.append(dg)
-                            if nb_found_child == len(reversed_tree.get(dg)):
-                                fully_included.append(dg)
-                else:
-                    directly_included.append(dg)
-                    fully_included.append(dg)
-        return {'direct': directly_included, 'indirect': indirectly_included, 'full': fully_included}
 
     def count_objects(self, location_name):
         """
@@ -590,12 +525,21 @@ class PaloCleaner:
             self._addr_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Address']}
             self._console.log(f"[ {location_name} ] Objects namesearch structures initialized", level=2)
             self._addr_ipsearch[location_name] = dict()
+            self._tag_objsearch[location_name] = dict()
             for obj in self._objects[location_name]['Address']:
                 if type(obj) is panos.objects.AddressObject:
                     addr = self.hostify_address(obj.value)
                     if addr not in self._addr_ipsearch[location_name].keys():
                         self._addr_ipsearch[location_name][addr] = list()
                     self._addr_ipsearch[location_name][addr].append(obj)
+                    # adding objects tag to the _tag_objsearch structure
+                if type(obj) in [panos.objects.AddressObject, panos.objects.AddressGroup]:
+                    if obj.tag:
+                        for t in obj.tag:
+                            if t not in self._tag_objsearch[location_name]:
+                                self._tag_objsearch[location_name][t] = {obj}
+                            else:
+                                self._tag_objsearch[location_name][t].add(obj)
             self._console.log(f"[ {location_name} ] Objects ipsearch structures initialized", level=2)
             self._objects[location_name]['Tag'] = Tag.refreshall(context)
             self._tag_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Tag']}
@@ -747,9 +691,7 @@ class PaloCleaner:
         # if no object is found at current reference_location, find the upward device-group on the hierarchy
         # and call the current function recursively with this upward level as reference_location
         if not found_object and reference_location not in ['shared', 'predefined']:
-            upward_dg = self._stored_pano_hierarchy[reference_location]
-            if not upward_dg:
-                upward_dg = 'shared'
+            upward_dg = self._dg_hierarchy[reference_location].parent.name
             found_object, found_location = self.get_relative_object_location(obj_name, upward_dg, obj_type)
         elif not found_object and (obj_type == "Service" and reference_location == 'shared'):
             upward_dg = "predefined"
@@ -765,42 +707,46 @@ class PaloCleaner:
         # finally return the tuple of the found object and its location
         return (found_object, found_location)
 
-    def get_relative_object_location_by_tag(self, executable_condition, reference_location):
+    def gen_condition_expression(self, condition_string: str, search_location: str):
         """
-        Find Address objects referenced by a dynamic group (based on their tags)
-        Knowing that dynamic groups can reference any object up to the level at which they are used
-        And not only up to the level where they are defined
+        Creates dynamically an executable Python statement used to find objects matching a DAG condition
+        on the self._tag_objsearch structure
+        Example :
+        condition_string = "'tag1' and ('tag2' or 'tag3')"
+        search_location = "fwtest"
+        Output :
+        cond_expr_result = "self._tag_objsearch[fwtest].get('tag1', set()) & (self._tag_objsearch[fwtest].get('tag2', set()) ^ self._tag_objsearch[fwtest].get('tag3', set()))"
 
-        :param executable_condition: (string) Executable python statement to match tags as configured on DAG
-        :param reference_location: (string) Location where to start to find referenced objects (where the group is used)
+        :param condition_string: The DAG (AddressGroup) dynamic statement
+        :param search_location: The location where to find the matching objects
         :return:
         """
 
+        condition = condition_string.replace('and', '&')
+        condition = condition.replace('or', '^')
+        condition = re.sub("('.*?')", rf"self._tag_objsearch['{search_location}'].get(\1, set())", condition)
+        condition = "cond_expr_result = " + condition
+        return condition
+
+    def get_relative_object_location_by_tag(self, dag_condition, reference_location):
+        """
+        Recursive function, used to find all objects matching a DAG statement
+
+        :param dag_condition: The AddressGroup.dynamic_value
+        :param reference_location: The location where to find matching objects for this recursive iteration
+        :return: list((obj, location)): List of tuples of (Object, location) matching the DAG statement
+        """
+
         found_objects = list()
-        # For each object at the reference_location level
-        for obj in self._objects[reference_location]['Address']:
-            # check if current object has tags
-            if obj.tag:
-                # initialize dict which will contain the results of the executable_condition execution
-                expr_result = dict()
-                # obj_tags is the variable name used when generating the condition expression
-                # (on the fetch_used_obj_set). Tags will be searched there.
-                obj_tags = obj.tag
-                # Execute the executable_condition with the locals() context
-                exec(executable_condition, locals(), expr_result)
-                cond_expr_result = expr_result['cond_expr_result']
-                # If the current object tags matches the executable_condition, add it to found_objects
-                if cond_expr_result:
-                    found_objects.append((obj, reference_location))
-        # if we are not yet at the 'shared' level
+        condition_expr = self.gen_condition_expression(dag_condition, reference_location)
+        expr_result = dict()
+        exec(condition_expr, locals(), expr_result)
+        found_objects += [(x, reference_location) for x in expr_result['cond_expr_result']]
+
         if reference_location != 'shared':
-            # find the upward device-group
-            upward_dg = self._stored_pano_hierarchy[reference_location]
-            if not upward_dg:
-                upward_dg = 'shared'
-            # call the current function recursively with the upward group level
-            found_objects += self.get_relative_object_location_by_tag(executable_condition, upward_dg)
-        # return list of tuples containing all found objects and their respective location
+            upward_dg = self._dg_hierarchy[reference_location].parent.name
+            found_objects += self.get_relative_object_location_by_tag(dag_condition, upward_dg)
+
         return found_objects
 
     def fetch_used_obj_set(self, location_name, progress, task):
@@ -816,20 +762,6 @@ class PaloCleaner:
         :return:
         """
 
-        def gen_condition_expression(condition_string: str, field_name: str):
-            """
-            Transforms a DAG objects match condition in an executable python statement
-            :param condition_string: (string) Condition got from the DAG object
-            :param field_name: (string) List on which the objects will be put for match at statement execution
-            :return: (string) Python executable condition
-            """
-
-            condition1 = re.sub('and(?![^(]*\))', f"in {field_name} and", condition_string)
-            condition2 = re.sub('or(?![^(]*\))', f"in {field_name} or", condition1)
-            condition2 += f" in {field_name}"
-            condition = "cond_expr_result = " + condition2
-            return condition
-
         def shorten_object_type(object_type: str):
             """
             (Overkill function) which returns a panos.Object type, after removing the "Group" and "Object" characters
@@ -841,7 +773,8 @@ class PaloCleaner:
             return object_type.replace('Group', '').replace('Object', '')
 
         def flatten_object(used_object: panos.objects, object_location: str, usage_base: str,
-                           referencer_type: str = None, referencer_name: str = None, recursion_level: int = 1, protect_call=False):
+                           referencer_type: str = None, referencer_name: str = None, recursion_level: int = 1,
+                           protect_call=False):
             """
             Recursively called function, charged of returning the obj_set (list of (panos.objects, location)) for a given rule
             (first call is from a loop iterating over the different rules of a rulebase at a given location)
@@ -934,14 +867,12 @@ class PaloCleaner:
                             f"[ {usage_base} ] {'*' * recursion_level} Object {used_object.name!r} (dynamic AddressGroup) (ref by {referencer_type} {referencer_name!r}) has been found on location {object_location}",
                             style="green", level=2)
 
-                    # call to the gen_condition_expression function, which will convert the DAG value into an executable
-                    # python condition
-                    executable_condition = gen_condition_expression(used_object.dynamic_value, "obj_tags")
-
-                    # for each object matched by the get_relative_object_location_by_tag (using the generated Python expression)
+                    # for each object matched by the get_relative_object_location_by_tag
                     # (= for each object matched by the DAG)
                     for referenced_object, referenced_object_location in self.get_relative_object_location_by_tag(
-                            executable_condition, usage_base):
+                        used_object.dynamic_value,
+                        usage_base
+                    ):
                         self._console.log(
                                 f"[ {usage_base} ] {'*' * recursion_level} Found group member of dynamic AddressGroup {used_object.name!r} : {referenced_object.name!r}",
                                 style="green", level=2)
@@ -1088,7 +1019,8 @@ class PaloCleaner:
                                     *self.get_relative_object_location(obj, location_name, obj_type),
                                     location_name,
                                     r.__class__.__name__,
-                                    r.name)
+                                    r.name
+                                )
                             )
 
                             # the following will be executed if the object used has not been found by the
@@ -1199,10 +1131,8 @@ class PaloCleaner:
                 # add each of them to the result list as a tuple (AddressObject, current location name)
                 found_upward_objects.append((obj, current_location_search))
             # Find the next search location (upward device group)
-            current_location_search = self._stored_pano_hierarchy.get(current_location_search)
-            # If the result of the upward device-group name is "None", it means that the upward device-group is "shared"
-            if not current_location_search:
-                current_location_search = "shared"
+            upward_dg = self._dg_hierarchy[current_location_search].parent
+            current_location_search = "shared" if not upward_dg else upward_dg.name
 
         return found_upward_objects
 
@@ -1246,10 +1176,9 @@ class PaloCleaner:
                             # (AddressGroup, current location name)
                             found_upward_objects.append((obj, current_location_search))
             # Find the next search location (upward device group)
-            current_location_search = self._stored_pano_hierarchy.get(current_location_search)
+            upward_dg = self._dg_hierarchy[current_location_search].parent
             # If the result of the upward device-group name is "None", it means that the upward device-group is "shared"
-            if not current_location_search:
-                current_location_search = "shared"
+            current_location_search = "shared" if not upward_dg else upward_dg.name
 
         return found_upward_objects
 
@@ -1284,10 +1213,9 @@ class PaloCleaner:
                         # (ServiceGroup, current location name)
                         found_upward_objects.append((obj, current_location_search))
             # Find the next search location (upward device group)
-            current_location_search = self._stored_pano_hierarchy.get(current_location_search)
+            upward_dg = self._dg_hierarchy[current_location_search].parent
             # If the result of the upward device-group name is "None", it means that the upward device-group is "shared"
-            if not current_location_search:
-                current_location_search = "shared"
+            current_location_search = "shared" if not upward_dg else upward_dg.name
 
         return found_upward_objects
 
@@ -1319,10 +1247,9 @@ class PaloCleaner:
                 # Add each of them to the result list as a tuple (ServiceObject, current location name)
                 found_upward_objects.append((obj, current_location_search))
             # Find the next search location (upward device group)
-            current_location_search = self._stored_pano_hierarchy.get(current_location_search)
+            upward_dg = self._dg_hierarchy[current_location_search].parent
             # If the result of the upward device-group name is "None", it means that the upward device-group is "shared"
-            if not current_location_search:
-                current_location_search = "shared"
+            current_location_search = "shared" if not upward_dg else upward_dg.name
 
         return found_upward_objects
 
@@ -1643,10 +1570,6 @@ class PaloCleaner:
 
         # for each object and associated location found on the _used_objects_set for the current location
 
-        # Initializing a dict (on the global _replacements dict) which will contain information about the replacement
-        # done for each object type at the current location
-        self._replacements[location_name] = {'Address': dict(), 'Service': dict(), 'Tag': dict()}
-
         # This dict references the function to be used to match the best replacement for each object type
         find_maps = {
             AddressObject: self.find_upward_obj_by_addr,
@@ -1718,6 +1641,27 @@ class PaloCleaner:
         # Initializing a dict which will contain information about the replacements done on the different groups
         # (when an object to be replaced has been found on a group), to display it on the result logs
         replacements_done = dict()
+
+        def multithread_wrapper(wrapped_func):
+            @functools.wraps(wrapped_func)
+            def wrapper(*xargs, **kwargs):
+                if self._nb_thread:
+                    for j in kwargs.pop('jobs_iterator', []):
+                        self._queue.put(j)
+                    lock = Lock()
+                    kwargs['lock'] = lock
+                    for n in range(self._nb_thread):
+                        try:
+                            t = Thread(target=wrapped_func, args=(*xargs,), kwargs=kwargs)
+                            t.start()
+                            self._console.log(f"[ {location_name} ] Started thread {n+1} for function {wrapped_func.__name__}", level=2)
+                        except Exception as e:
+                            self._console.log(f"[ {location_name} ] Error while creating and starting thread {n+1} for function {wrapped_func.__name__} : {e}", style="red")
+                    self._queue.join()
+                else:
+                    wrapped_func(*xargs, **kwargs)
+
+                return wrapped_func(*xargs, **kwargs)
 
         def replace_in_addr_groups(replacement_name, replacement, lock=None):
             """
@@ -1856,7 +1800,7 @@ class PaloCleaner:
                     
         progress.update(task, advance=1)
 
-        def replace_objects_in_service_groups(replacement, replacement_name, lock=None):
+        def replace_objects_in_service_groups(replacement_name, replacement, lock=None):
             """
             This function replaces the services objects for which a better duplicate has been found on the current location groups
 
@@ -2142,15 +2086,14 @@ class PaloCleaner:
             formatted_return += f"[/{type_map[repl_type]}]" if repl_type > 0 else ""
             return formatted_return
 
-
         # for each rulebase at the current location
         for rulebase_name, rulebase in self._rulebases[location_name].items():
             # if the current item is a rulebase (and not the context DeviceGroup object), and is not empty
             if rulebase_name != "context" and len(rulebase) > 0:
                 # initialize a variable which will count the number of replacements done for this rulebase
-                total_replacements = 0
+                total_replacements = c_int32(0)
                 # initialize a variable which will count the number of edited rules for the current rulebase
-                modified_rules = 0
+                modified_rules = c_int32(0)
                 # find the opstate hitcount name for the current rulebase type (panos-python stuff)
                 # IE : SecurityRule becomes "security", NatRule becomes "nat"
                 # Note also that the rulebase_name has the following value format : PreRulebase_SecurityRule (for example)
@@ -2210,7 +2153,7 @@ class PaloCleaner:
                         if replacements_count:
                             # Add the number of replacements for the current rule to the total number of replacements for
                             # the current rulebase
-                            total_replacements += replacements_count
+                            total_replacements.value += replacements_count
 
                             # if the rule has changes but is not considered as editable (not in timestamp boundaries
                             # regarding opstate timestamps), protect the rule objects from deletion
@@ -2223,7 +2166,7 @@ class PaloCleaner:
                                                     self._replacements[location_name][obj_type][object_name][
                                                         "blocked"] = True
                             else:
-                                modified_rules += 1
+                                modified_rules.value += 1
 
                             # Iterate up to the value of the max_replace variable (which is the highest number of
                             # replacements for a given field of the current rule
@@ -2273,7 +2216,6 @@ class PaloCleaner:
                             self._queue.task_done()
                         else:
                             break
-                
 
                 # for each rule in the current rulebase
                 for r in rulebase:
@@ -2282,12 +2224,14 @@ class PaloCleaner:
                         # add the rule to the multithreading queue
                         self._queue.put(r) #TODO MANAGE EXCEPTION
                     else:
-                        replace_objects(r, total_replacements, modified_rules) # r is passed to be treated are we are not using threads
+                        # r is passed to be treated as we are not using threads
+                        replace_objects(r, total_replacements, modified_rules)
                 
                 if self._nb_thread:
                     for n in range(self._nb_thread):
                         try:
-                            t = Thread(target=replace_objects, args=(None, total_replacements, modified_rules, )) # r is set to None as threads ill manage all the replacements from the queue
+                            # r is set to None as threads will get all the replacements from the queue
+                            t = Thread(target=replace_objects, args=(None, total_replacements, modified_rules, ))
                             t.start()   # TO TEST MANAGE THREAD CREATION AT UPPER LEVEL WITH IN & OUT QUEUES
                             self._console.log(f"[ {location_name} ] Started thread {n+1}", level=2)
                         except Exception as e:
@@ -2299,14 +2243,13 @@ class PaloCleaner:
                 
                 progress.update(task, advance=1)
 
-
                 # If there are replacements on the current rulebase, display the generated rich.Table on the console
                 if total_replacements:
                     self._console.print(rulebase_table)
                     self._console.log(
                         f"[ {location_name} ] {modified_rules} rules edited for the current rulebase ({rulebase_name})")
 
-    def clean_local_object_set(self, location_name: str, progress: rich.progress.Progress, task: rich.progress.TaskID):
+    def clean_local_object_set(self, location_name: str):
         """
         In charge of removing the unused objects at a given location (if this location is fully included in the analysis,
         = all child device-groups also included)
@@ -2399,10 +2342,9 @@ class PaloCleaner:
         # _used_objects_set of the parent.
         # This will permit to protect used objects on the childs of the hierarchy to be deleted when they exist but are
         # not used on the parents
-        parent_dg = self._stored_pano_hierarchy.get(location_name)
-        if not parent_dg:
-            parent_dg = "shared"
-        self._used_objects_sets[parent_dg] = self._used_objects_sets[parent_dg].union(self._used_objects_sets[location_name])
+        upward_dg = self._dg_hierarchy[location_name].parent
+        upward_dg_name = "shared" if not upward_dg else upward_dg.name
+        self._used_objects_sets[upward_dg_name] = self._used_objects_sets[upward_dg_name].union(self._used_objects_sets[location_name])
 
         # Iterating over each object type / object for the current location, and check if each object is member
         # (or still member, as the replaced ones have been suppressed) of the _used_objects_set for the same location
@@ -2412,7 +2354,6 @@ class PaloCleaner:
         def delete_local_objects(obj_item):
             
             while True:
-
                 if self._nb_thread: #TODO MANAGE EXCEPTION
                     if self._queue.empty():
                         break
@@ -2422,6 +2363,12 @@ class PaloCleaner:
                 obj_instance = obj_item[obj_type]
                 for o in self._objects[location_name][obj_type]:
                     if o.__class__.__name__ is obj_instance.__name__ and not (o, location_name) in self._used_objects_sets[location_name]:
+                        try:
+                            if o.tag:
+                                if set(o.tag).intersection(self._protect_tags):
+                                    continue
+                        except AttributeError :
+                            pass
                         if self._apply_cleaning:
                             delete_ok = False
                             while not delete_ok:
@@ -2498,19 +2445,3 @@ class PaloCleaner:
                         if self._apply_cleaning:
                             successful_delete = False
         """
-
-    def gen_tree_depth(self, input_tree, start='shared', depth=1):
-        """
-        Submethod used to create a dict with the "depth" value for each device-group, depth for 'shared' being 0
-
-        :param input_tree: (dict) Reversed PanoramaDeviceGroupHierarchy tree
-        :param start: (string) Where to start for depth calculation (function being called recursively)
-        :param depth: (int) Actual depth of analysis
-        :return: (dict) Dict with keys being the depth of the devicegroups and value being list of device-group names
-        """
-
-        for loc in input_tree[start]:
-            if depth not in self._depthed_tree.keys():
-                self._depthed_tree[depth] = list()
-            self._depthed_tree[depth].append(loc)
-            self.gen_tree_depth(input_tree, loc, depth + 1)

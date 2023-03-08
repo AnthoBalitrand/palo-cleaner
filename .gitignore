@@ -6,3 +6,5 @@ src/panos/*
 src/panos
 reports/*
 .DS_Store
+*.swp
+src/*.swp
