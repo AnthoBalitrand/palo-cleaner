@@ -4,6 +4,7 @@ src/__pycache__/*
 src/bkp.py
 src/panos/*
 src/panos
+src/*.key
 reports/*
 .DS_Store
 *.swp
