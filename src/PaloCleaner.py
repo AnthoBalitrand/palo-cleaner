@@ -211,7 +211,6 @@ class PaloCleaner:
                 try:
                     self._panorama = Panorama(self._panorama_url, self._panorama_user, self._panorama_password)
                     self.get_pano_dg_hierarchy()
-                    time.sleep(1)
                     self._console.log("[ Panorama ] Connection established")
                 except PanXapiError as e:
                     self._console.log(f"[ Panorama ] Error while connecting to Panorama : {e.message}", style="red")
@@ -396,7 +395,7 @@ class PaloCleaner:
         """
 
         if not context_name and not self._console:
-            self._console = Console(record=True if not self._no_report else False)
+            self._console = Console(record=not self._no_report)
             self._console_context = "init"
         elif context_name and not self._no_report and self._split_report:
             self._console.save_html(self._report_folder+'/'+self._console_context+'.html')
