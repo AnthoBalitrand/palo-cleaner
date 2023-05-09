@@ -91,11 +91,7 @@ class PaloCleaner:
                     self._console.log(f"Error: cannot collect the number of available CPUs for multithreading : {e}", style="red")     
             elif self._nb_thread < 0:
                 self._console.log(f"Error: number of threads must be positive", style="red")   
-                exit()  
-            try:  
-                self._queue = Queue()
-            except Exception as e:
-                self._console.log(f"Error: cannot create the queue for multithreading : {e}", style="red")    
+                exit()
         self._report_folder = report_folder
         self._panorama = None
         self._objects = dict()
@@ -215,7 +211,6 @@ class PaloCleaner:
                 try:
                     self._panorama = Panorama(self._panorama_url, self._panorama_user, self._panorama_password)
                     self.get_pano_dg_hierarchy()
-                    time.sleep(1)
                     self._console.log("[ Panorama ] Connection established")
                 except PanXapiError as e:
                     self._console.log(f"[ Panorama ] Error while connecting to Panorama : {e.message}", style="red")
@@ -400,7 +395,7 @@ class PaloCleaner:
         """
 
         if not context_name and not self._console:
-            self._console = Console(record=True if not self._no_report else False)
+            self._console = Console(record=not self._no_report)
             self._console_context = "init"
         elif context_name and not self._no_report and self._split_report:
             self._console.save_html(self._report_folder+'/'+self._console_context+'.html')
@@ -416,7 +411,7 @@ class PaloCleaner:
         :return: (list) List of DeviceGroup objects
         """
 
-        dg_list = DeviceGroup.refreshall(self._panorama)
+        dg_list = DeviceGroup.refreshall(self._panorama, name_only=True)
         return dg_list
 
     def get_pano_dg_hierarchy(self):
@@ -1635,7 +1630,8 @@ class PaloCleaner:
                 kwargs['lock'] = lock
                 for n in range(self._nb_thread):
                     try:
-                        t = Thread(target=wrapped_func, args=(*xargs,), kwargs=kwargs)
+                        kwargs['thread_id'] = n + 1
+                        t = Thread(target=wrapped_func, args=(*xargs,), kwargs=kwargs, daemon=True)
                         t.start()
                         self._console.log(
                             f"[ ] Started thread {n + 1} for function {wrapped_func.__name__}", level=2)
@@ -1665,7 +1661,7 @@ class PaloCleaner:
         replacements_done = dict()
 
         @self.multithread_wrapper
-        def replace_in_addr_groups_2(jobs_queue, progress, task, lock=None):
+        def replace_in_addr_groups(jobs_queue, progress, task, lock=None, thread_id=0):
             """
             This function replaces the addr objects for which a better duplicate has been found on the current location groups
 
@@ -1677,113 +1673,121 @@ class PaloCleaner:
             while True:
                 if jobs_queue.empty():
                     break
-                else:
+
+                try:
                     replacement_name, replacement = jobs_queue.get()
 
-                # the source object name is the key on the _replacements dict
-                source_obj = replacement_name
-                # the source_obj_instance and source_obj_location are found in the 'source' key of the dict item
-                source_obj_instance, source_obj_location = replacement['source']
-                # the replacement_obj_instance and replacement_obj_location are found in the 'replacement' key of the dict item
-                replacement_obj_instance, replacement_obj_location = replacement['replacement']
+                    # the source object name is the key on the _replacements dict
+                    source_obj = replacement_name
+                    # the source_obj_instance and source_obj_location are found in the 'source' key of the dict item
+                    source_obj_instance, source_obj_location = replacement['source']
+                    # the replacement_obj_instance and replacement_obj_location are found in the 'replacement' key of the dict item
+                    replacement_obj_instance, replacement_obj_location = replacement['replacement']
 
-                # if the source object has been referenced thanks to a tag (DAG member), the tags of the source object needs
-                # to be replicated on the replacement one, so that it will be still matched by the DAG
-                # TODO : replicate only the tags used by the DAG match
-                if (source_obj_instance, source_obj_location) in self._tag_referenced:
-                    # for each tag used on the source object instance
-                    for tag in source_obj_instance.tag:
-                        # if the tag does not exists as a "shared" object
-                        if not [x for x in self._objects['shared']['Tag'] if x.name == tag]:
-                            # find the original tag (on its actual location)
-                            tag_instance, tag_location = self.get_relative_object_location(tag, location_name,
-                                                                                           obj_type="tag")
-                            self._console.log(
-                                f"[ Panorama ] Creating tag {tag!r} (copy from {tag_location}), to be used on ({replacement_obj_instance.about()['name']} at location {replacement_obj_location})")
-                            # if the cleaning application has been requested, create the new tag on Panorama
-                            if self._apply_cleaning:
-                                try:
-                                    self._panorama.add(tag_instance).create()
-                                except Exception as e:
-                                    self._console.log(f"[ Panorama ] Error while creating tag {tag!r} ! : {e.message}",
-                                                      style="red")
-                            # also add the new Tag object at the proper location (shared) on the local cache
-                            self._objects['shared']['Tag'].append(tag_instance)
-                            self._used_objects_sets['shared'].add((tag_instance, 'shared'))
-
-                        # add the new tag to the replacement object
-                        if self._nb_thread: lock.acquire()
-                        if replacement_obj_instance.tag:
-                            if not tag in replacement_obj_instance.tag:
-                                replacement_obj_instance.tag.append(tag)
+                    # if the source object has been referenced thanks to a tag (DAG member), the tags of the source object needs
+                    # to be replicated on the replacement one, so that it will be still matched by the DAG
+                    # TODO : replicate only the tags used by the DAG match
+                    if (source_obj_instance, source_obj_location) in self._tag_referenced:
+                        # for each tag used on the source object instance
+                        for tag in source_obj_instance.tag:
+                            # if the tag does not exists as a "shared" object
+                            if not [x for x in self._objects['shared']['Tag'] if x.name == tag]:
+                                # find the original tag (on its actual location)
+                                tag_instance, tag_location = self.get_relative_object_location(tag, location_name,
+                                                                                               obj_type="tag")
                                 self._console.log(
-                                    f"[ {replacement_obj_location} ] Adding tag {tag} to object {replacement_obj_instance.about()['name']!r} ({replacement_obj_instance.__class__.__name__})",
+                                    f"[ Panorama ] [Thread-{thread_id}] Creating tag {tag!r} (copy from {tag_location}), to be used on ({replacement_obj_instance.about()['name']} at location {replacement_obj_location})")
+                                # if the cleaning application has been requested, create the new tag on Panorama
+                                if self._apply_cleaning:
+                                    try:
+                                        self._panorama.add(tag_instance).create()
+                                    except Exception as e:
+                                        self._console.log(f"[ Panorama ] [Thread-{thread_id}] Error while creating tag {tag!r} ! : {e.message}",
+                                                          style="red")
+                                # also add the new Tag object at the proper location (shared) on the local cache
+                                self._objects['shared']['Tag'].append(tag_instance)
+                                self._used_objects_sets['shared'].add((tag_instance, 'shared'))
+
+                            # add the new tag to the replacement object
+                            if self._nb_thread: lock.acquire()
+                            if replacement_obj_instance.tag:
+                                if not tag in replacement_obj_instance.tag:
+                                    replacement_obj_instance.tag.append(tag)
+                                    self._console.log(
+                                        f"[ {replacement_obj_location} ] [Thread-{thread_id}] Adding tag {tag} to object {replacement_obj_instance.about()['name']!r} ({replacement_obj_instance.__class__.__name__})",
+                                        style="yellow")
+                            else:
+                                replacement_obj_instance.tag = [tag]
+                                self._console.log(
+                                    f"[ {replacement_obj_location} ] [Thread-{thread_id}] Adding tag {tag} to object {replacement_obj_instance.about()['name']!r} ({replacement_obj_instance.__class__.__name__})",
                                     style="yellow")
-                        else:
-                            replacement_obj_instance.tag = [tag]
-                            self._console.log(
-                                f"[ {replacement_obj_location} ] Adding tag {tag} to object {replacement_obj_instance.about()['name']!r} ({replacement_obj_instance.__class__.__name__})",
-                                style="yellow")
-                        # if the cleaning application has been requested, apply the change to the replacement object
-                        if self._apply_cleaning:
-                            replacement_obj_instance.apply()
-                        if self._nb_thread: lock.release()
+                            # if the cleaning application has been requested, apply the change to the replacement object
+                            if self._apply_cleaning:
+                                replacement_obj_instance.apply()
+                            if self._nb_thread: lock.release()
 
-                # for each Address type object in the current location objects
-                for checked_object in self._objects[location_name]['Address']:
-                    # if the type of the current object is a static AddressGroup
-                    if type(checked_object) is panos.objects.AddressGroup and checked_object.static_value:
-                        changed = False
-                        matched = False
-                        try:
-                            # if the name of the replacement object is different than the origin one, then the static
-                            # group members values needs to be updated
-                            if source_obj_instance.about()['name'] != replacement_obj_instance.about()['name']:
-                                checked_object.static_value.remove(source_obj_instance.about()['name'])
-                                # adding the replacement object to the group only if it has not been already used to replace
-                                # another one (case where we have duplicate objects on a static group)
-                                if not replacement_obj_instance.about()['name'] in checked_object.static_value:
-                                    checked_object.static_value.append(replacement_obj_instance.about()['name'])
-                                changed = True
-                                matched = True
-                            # if the name of the replacement object is the same than the original one, the static
-                            # group members values remains the same
-                            elif source_obj_instance.about()['name'] in checked_object.static_value:
-                                matched = True
+                    # for each Address type object in the current location objects
+                    for checked_object in self._objects[location_name]['Address']:
+                        # if the type of the current object is a static AddressGroup
+                        if type(checked_object) is panos.objects.AddressGroup and checked_object.static_value:
+                            changed = False
+                            matched = False
+                            try:
+                                # if the name of the replacement object is different than the origin one, then the static
+                                # group members values needs to be updated
+                                if source_obj_instance.about()['name'] != replacement_obj_instance.about()['name']:
+                                    checked_object.static_value.remove(source_obj_instance.about()['name'])
+                                    # adding the replacement object to the group only if it has not been already used to replace
+                                    # another one (case where we have duplicate objects on a static group)
+                                    if not replacement_obj_instance.about()['name'] in checked_object.static_value:
+                                        checked_object.static_value.append(replacement_obj_instance.about()['name'])
+                                    changed = True
+                                    matched = True
+                                # if the name of the replacement object is the same than the original one, the static
+                                # group members values remains the same
+                                elif source_obj_instance.about()['name'] in checked_object.static_value:
+                                    matched = True
 
-                            # If the current object to be replaced has been matched as a member of a static group at the
-                            # current location level, add it to the replacements_done tracking dict
-                            if matched:
+                                # If the current object to be replaced has been matched as a member of a static group at the
+                                # current location level, add it to the replacements_done tracking dict
+                                if matched:
+                                    self._console.log(
+                                        f"[ {location_name} ] [Thread-{thread_id}] Replacing {source_obj_instance.about()['name']!r} ({source_obj_location}) by {replacement_obj_instance.about()['name']!r} ({replacement_obj_location}) on {checked_object.about()['name']!r} ({checked_object.__class__.__name__})",
+                                        style="yellow", level=2)
+                                    # create a list (if not existing already) for the current static group object
+                                    # which will contain the list of all replacements done on this group
+                                    if self._nb_thread: lock.acquire()
+                                    if checked_object.name not in replacements_done:
+                                        replacements_done[checked_object.name] = list()
+                                    # then append the current replacement information to this list (as a tuple format)
+                                    replacements_done[checked_object.name].append((source_obj_instance.about()['name'],
+                                                                                   source_obj_location,
+                                                                                   replacement_obj_instance.about()['name'],
+                                                                                   replacement_obj_location))
+                                    if self._nb_thread: lock.release()
+                            # TODO : check when this error is matched ?? (don't remember, but it probably needs to be here)
+                            except ValueError:
+                                continue
+                            except Exception as e:
                                 self._console.log(
-                                    f"[ {location_name} ] Replacing {source_obj_instance.about()['name']!r} ({source_obj_location}) by {replacement_obj_instance.about()['name']!r} ({replacement_obj_location}) on {checked_object.about()['name']!r} ({checked_object.__class__.__name__})",
-                                    style="yellow", level=2)
-                                # create a list (if not existing already) for the current static group object
-                                # which will contain the list of all replacements done on this group
-                                if self._nb_thread: lock.acquire()
-                                if checked_object.name not in replacements_done:
-                                    replacements_done[checked_object.name] = list()
-                                # then append the current replacement information to this list (as a tuple format)
-                                replacements_done[checked_object.name].append((source_obj_instance.about()['name'],
-                                                                               source_obj_location,
-                                                                               replacement_obj_instance.about()['name'],
-                                                                               replacement_obj_location))
-                                if self._nb_thread: lock.release()
-                        # TODO : check when this error is matched ?? (don't remember, but it probably needs to be here)
-                        except ValueError:
-                            continue
-                        except Exception as e:
-                            self._console.log(
-                                f"[ {location_name} ] Unknown error while replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} on {checked_object.about()['name']!r} ({checked_object.__class__.__name__}) : {e.message}",
-                                style="red")
-                        # if the cleaning application has been requested, update the modified group on Panorama
-                        if self._apply_cleaning and changed:
-                            checked_object.apply()
+                                    f"[ {location_name} ] [Thread-{thread_id}] Unknown error while replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} on {checked_object.about()['name']!r} ({checked_object.__class__.__name__}) : {e}",
+                                    style="red")
+                            # if the cleaning application has been requested, update the modified group on Panorama
+                            if self._apply_cleaning and changed:
+                                checked_object.apply()
 
-                jobs_queue.task_done()
-                progress.update(task, advance=1)
+                except Exception as e:
+                    self._console.log(
+                        f"[ {location_name} ] [Thread-{thread_id}] Unknown error : {e}"
+                    )
+                finally:
+                    jobs_queue.task_done()
+                    progress.update(task, advance=1)
+                    if self._nb_thread and lock.locked():
+                        lock.release()
 
         @self.multithread_wrapper
-        def replace_in_service_groups_2(jobs_queue, progress, task, lock=None):
+        def replace_in_service_groups(jobs_queue, progress, task, lock=None, thread_id=0):
             """
             This function replaces the services objects for which a better duplicate has been found on the current location groups
 
@@ -1795,84 +1799,90 @@ class PaloCleaner:
             while True:
                 if jobs_queue.empty():  # TODO MANAGE EXCPETION
                     break
-                else:
+                try:
                     replacement_name, replacement = jobs_queue.get()
 
-                # the source object name is the key on the _replacements dict
-                source_obj = replacement_name
-                # the source_obj_instance and source_obj_location are found in the 'source' key of the dict item
-                source_obj_instance, source_obj_location = replacement['source']
-                # the replacement_obj_instance and replacement_obj_location are found in the 'replacement' key of the dict item
-                replacement_obj_instance, replacement_obj_location = replacement['replacement']
+                    # the source object name is the key on the _replacements dict
+                    source_obj = replacement_name
+                    # the source_obj_instance and source_obj_location are found in the 'source' key of the dict item
+                    source_obj_instance, source_obj_location = replacement['source']
+                    # the replacement_obj_instance and replacement_obj_location are found in the 'replacement' key of the dict item
+                    replacement_obj_instance, replacement_obj_location = replacement['replacement']
 
-                # for each ServiceObject type object in the current location objects
-                for checked_object in self._objects[location_name]['Service']:
-                    # if the type of the current object is a ServiceGroup
-                    if type(checked_object) is panos.objects.ServiceGroup and checked_object.value:
-                        changed = False
-                        matched = False
-                        try:
-                            # if the name of the replacement object is different than the origin one, then the static
-                            # group members values needs to be updated
-                            if source_obj_instance.about()['name'] != replacement_obj_instance.about()['name']:
-                                checked_object.value.remove(source_obj_instance.about()['name'])
-                                # adding the replacement object to the group only if it has not been already used to replace
-                                # another one (case where we have duplicate objects on a static group)
-                                if self._nb_thread: lock.acquire()
-                                if not replacement_obj_instance.about()['name'] in checked_object.value:
-                                    checked_object.value.append(replacement_obj_instance.about()['name'])
-                                if self._nb_thread: lock.release()
-                                changed = True
-                                matched = True
-                            # if the name of the replacement object is the same than the original one, the static
-                            # group members values remains the same
-                            elif source_obj_instance.about()['name'] in checked_object.value:
-                                matched = True
+                    # for each ServiceObject type object in the current location objects
+                    for checked_object in self._objects[location_name]['Service']:
+                        # if the type of the current object is a ServiceGroup
+                        if type(checked_object) is panos.objects.ServiceGroup and checked_object.value:
+                            changed = False
+                            matched = False
+                            try:
+                                # if the name of the replacement object is different than the origin one, then the static
+                                # group members values needs to be updated
+                                if source_obj_instance.about()['name'] != replacement_obj_instance.about()['name']:
+                                    checked_object.value.remove(source_obj_instance.about()['name'])
+                                    # adding the replacement object to the group only if it has not been already used to replace
+                                    # another one (case where we have duplicate objects on a static group)
+                                    if self._nb_thread: lock.acquire()
+                                    if not replacement_obj_instance.about()['name'] in checked_object.value:
+                                        checked_object.value.append(replacement_obj_instance.about()['name'])
+                                    if self._nb_thread: lock.release()
+                                    changed = True
+                                    matched = True
+                                # if the name of the replacement object is the same than the original one, the static
+                                # group members values remains the same
+                                elif source_obj_instance.about()['name'] in checked_object.value:
+                                    matched = True
 
-                            # If the current object to be replaced has been matched as a member of a static group at the
-                            # current location level, add it to the replacements_done tracking dict
-                            if matched:
+                                # If the current object to be replaced has been matched as a member of a static group at the
+                                # current location level, add it to the replacements_done tracking dict
+                                if matched:
+                                    self._console.log(
+                                        f"[ {location_name} ] [Thread-{thread_id}] Replacing {source_obj_instance.about()['name']!r} ({source_obj_location}) by {replacement_obj_instance.about()['name']!r} ({replacement_obj_location}) on {checked_object.about()['name']!r} ({checked_object.__class__.__name__})",
+                                        style="yellow", level=2)
+                                    # create a list (if not existing already) for the current static group object
+                                    # which will contain the list of all replacements done on this group
+                                    if self._nb_thread: lock.acquire()
+                                    if checked_object.name not in replacements_done:
+                                        replacements_done[checked_object.name] = list()
+                                    # then append the current replacement information to this list (as a tuple format)
+                                    replacements_done[checked_object.name].append((source_obj_instance.about()['name'],
+                                                                                   source_obj_location,
+                                                                                   replacement_obj_instance.about()['name'],
+                                                                                   replacement_obj_location))
+                                    if self._nb_thread: lock.release()
+                            # TODO : check when this error is matched ?? (don't remember, but it probably needs to be here)
+                            except ValueError:
+                                continue
+                            except Exception as e:
                                 self._console.log(
-                                    f"[ {location_name} ] Replacing {source_obj_instance.about()['name']!r} ({source_obj_location}) by {replacement_obj_instance.about()['name']!r} ({replacement_obj_location}) on {checked_object.about()['name']!r} ({checked_object.__class__.__name__})",
-                                    style="yellow", level=2)
-                                # create a list (if not existing already) for the current static group object
-                                # which will contain the list of all replacements done on this group
-                                if self._nb_thread: lock.acquire()
-                                if checked_object.name not in replacements_done:
-                                    replacements_done[checked_object.name] = list()
-                                # then append the current replacement information to this list (as a tuple format)
-                                replacements_done[checked_object.name].append((source_obj_instance.about()['name'],
-                                                                               source_obj_location,
-                                                                               replacement_obj_instance.about()['name'],
-                                                                               replacement_obj_location))
-                                if self._nb_thread: lock.release()
-                        # TODO : check when this error is matched ?? (don't remember, but it probably needs to be here)
-                        except ValueError:
-                            continue
-                        except Exception as e:
-                            self._console.log(
-                                f"[ {location_name} ] Unknown error while replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} on {checked_object.about()['name']!r} ({checked_object.__class__.__name__}) : {e.message}",
-                                style="red")
-                        # if the cleaning application has been requested, update the modified group on Panorama
-                        if self._apply_cleaning and changed:
-                            checked_object.apply()
-
-                jobs_queue.task_done()
-                progress.update(task, advance=1)
+                                    f"[ {location_name} ] Unknown error while replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} on {checked_object.about()['name']!r} ({checked_object.__class__.__name__}) : {e}",
+                                    style="red")
+                            # if the cleaning application has been requested, update the modified group on Panorama
+                            if self._apply_cleaning and changed:
+                                checked_object.apply()
+                except Exception as e:
+                    self._console.log(
+                        f"[ {location_name} ] [Thread-{thread_id}] Unknown error : {e}"
+                    )
+                finally:
+                    jobs_queue.task_done()
+                    progress.update(task, advance=1)
+                    if self._nb_thread and lock.locked():
+                        lock.release()
 
         jobs_queue = Queue()
         # for each replacement for object type "Address" (AddressObject, AddressGroup) at the current location level
         for replacement_name, replacement in self._replacements[location_name]['Address'].items():
             jobs_queue.put((replacement_name, replacement))
 
-        replace_in_addr_groups_2(jobs_queue, progress, task)
+        replace_in_addr_groups(jobs_queue, progress, task)
         jobs_queue.join()
 
         jobs_queue = Queue()
         for replacement_name, replacement in self._replacements[location_name]['Service'].items():
             jobs_queue.put((replacement_name, replacement))
 
-        replace_in_service_groups_2(jobs_queue, progress, task)
+        replace_in_service_groups(jobs_queue, progress, task)
         jobs_queue.join()
 
         # for each group on which a replacement has been done
@@ -2079,7 +2089,7 @@ class PaloCleaner:
                     rulebase_table.add_column(c_name)
 
                 @self.multithread_wrapper
-                def replace_objects(jobs_queue, total_replacements, modified_rules, progress, task, lock=None):
+                def replace_objects(jobs_queue, total_replacements, modified_rules, progress, task, lock=None, thread_id=0):
                     """
                     This function will be run by each thread which will perform the objects replacement for all the rules in the rulebase
                     :param queue: Queue for objects treatment by multithreading
@@ -2089,97 +2099,104 @@ class PaloCleaner:
                     while True:
                         if jobs_queue.empty():
                             break
-                        else:
+                        try:
                             r = jobs_queue.get()
-                        # this boolean variable will define is the rule timestamps are in the boundaries to allow modifications
-                        # (if opstate check is used for this processing, regarding last_hit_timestamp and last_change_timestamp)
-                        editable_rule = False
-                        rule_counters = self._hitcounts.get(location_name, dict()).get(hitcount_rb_name, dict()).get(r.name,
-                                                                                                                    dict())
-                        rule_modification_timestamp = rule_counters.get('rule_modification_timestamp', 0)
-                        last_hit_timestamp = rule_counters.get('last_hit_timestamp', 0)
+                            # this boolean variable will define is the rule timestamps are in the boundaries to allow modifications
+                            # (if opstate check is used for this processing, regarding last_hit_timestamp and last_change_timestamp)
+                            editable_rule = False
+                            rule_counters = self._hitcounts.get(location_name, dict()).get(hitcount_rb_name, dict()).get(r.name,
+                                                                                                                        dict())
+                            rule_modification_timestamp = rule_counters.get('rule_modification_timestamp', 0)
+                            last_hit_timestamp = rule_counters.get('last_hit_timestamp', 0)
 
-                        # if rule is disabled or if the job does not needs to rely on rule timestamps
-                        # or if the hitcounts for a rule cannot be found (ie : new rule not yet pushed on device)
-                        # then just consider that the rule can be modified (editable_rule = True)
-                        # Note that the rule hitcount information is stored on the rule_counters dict
-                        # TODO : validate if disabled rules are considered editable or not (issue #19)
-                        if r.disabled or not self._need_opstate or not rule_counters:
-                            editable_rule = True
-                        elif rule_modification_timestamp > self._max_change_timestamp and last_hit_timestamp > self._max_hit_timestamp:
-                            editable_rule = True
+                            # if rule is disabled or if the job does not needs to rely on rule timestamps
+                            # or if the hitcounts for a rule cannot be found (ie : new rule not yet pushed on device)
+                            # then just consider that the rule can be modified (editable_rule = True)
+                            # Note that the rule hitcount information is stored on the rule_counters dict
+                            # TODO : validate if disabled rules are considered editable or not (issue #19)
+                            if r.disabled or not self._need_opstate or not rule_counters:
+                                editable_rule = True
+                            elif rule_modification_timestamp > self._max_change_timestamp and last_hit_timestamp > self._max_hit_timestamp:
+                                editable_rule = True
 
-                        # call the replace_in_rule function for the current rule, which will reply with :
-                        # replacements_in_rule : dict with the details of replacements for the current rule
-                        # replacements_count : total number of replacements for the rule
-                        # max_replace : the highest number of replacements for a given field, for rich.Table rows sizing
-                        replacements_in_rule, replacements_count, max_replace = replace_in_rule(r, editable_rule)
+                            # call the replace_in_rule function for the current rule, which will reply with :
+                            # replacements_in_rule : dict with the details of replacements for the current rule
+                            # replacements_count : total number of replacements for the rule
+                            # max_replace : the highest number of replacements for a given field, for rich.Table rows sizing
+                            replacements_in_rule, replacements_count, max_replace = replace_in_rule(r, editable_rule)
 
-                        # If there's at least one replacement on the current rule, it needs to be displayed and applied
-                        if replacements_count:
-                            # Add the number of replacements for the current rule to the total number of replacements for
-                            # the current rulebase
-                            total_replacements.value += replacements_count
+                            # If there's at least one replacement on the current rule, it needs to be displayed and applied
+                            if replacements_count:
+                                # Add the number of replacements for the current rule to the total number of replacements for
+                                # the current rulebase
+                                total_replacements.value += replacements_count
 
-                            # if the rule has changes but is not considered as editable (not in timestamp boundaries
-                            # regarding opstate timestamps), protect the rule objects from deletion
-                            if not editable_rule:
-                                for obj_type, fields in repl_map[type(r)].items():
-                                    for f in fields:
-                                        if (field_values := getattr(r, f[0]) if type(f) is list else [getattr(r, f)]):
-                                            for object_name in field_values:
-                                                if object_name in self._replacements[location_name][obj_type]:
-                                                    self._replacements[location_name][obj_type][object_name][
-                                                        "blocked"] = True
-                            else:
-                                modified_rules.value += 1
-
-                            # Iterate up to the value of the max_replace variable (which is the highest number of
-                            # replacements for a given field of the current rule
-                            # This number is the "line number" in the current row (1 row = 1 rule)
-                            for table_add_loop in range(max_replace):
-                                # row_values is the list of values for the current row (current rule) for the rich.Table
-                                # The values have to be put in the same order than the columns headers, defined in the
-                                # tab_headers variable
-                                row_values = list()
-
-                                # First column contains the name of the rule
-                                row_values.append(r.name if table_add_loop == 0 else "")
-
-                                # For each object type (Address, Service, Tag...) / field name for the current rule
-                                # type (as defined on the repl_map descriptor)
-                                for obj_type, fields in repl_map.get(type(r)).items():
-                                    # For each field name for the current object type
-                                    for f in [x[0] if type(x) is list else x for x in fields]:
-                                        # Call the format_for_table function, which will return the text to put on the
-                                        # current column for the current line in the current row
-                                        # (if the current line number is not above the number of replacements to be displayed
-                                        # for the current field)
-                                        # (yes, that's tricky)
-                                        row_values.append(
-                                            format_for_table(*replacements_in_rule[obj_type][f][table_add_loop])
-                                            if table_add_loop < len(replacements_in_rule[obj_type][f])
-                                            else ""
-                                        )
-                                # if we are on the first line of the current row, display the rule interesting timestamps
-                                row_values.append(str(rule_modification_timestamp) if table_add_loop == 0 else "")
-                                row_values.append(str(last_hit_timestamp) if table_add_loop == 0 else "")
-                                # Display Y or N on the last column, depending if the current rule is indeed modified or not
-                                # (based on timestamp values)
-                                if table_add_loop == 0:
-                                    row_values.append("Y" if editable_rule else "N")
+                                # if the rule has changes but is not considered as editable (not in timestamp boundaries
+                                # regarding opstate timestamps), protect the rule objects from deletion
+                                if not editable_rule:
+                                    for obj_type, fields in repl_map[type(r)].items():
+                                        for f in fields:
+                                            if (field_values := getattr(r, f[0]) if type(f) is list else [getattr(r, f)]):
+                                                for object_name in field_values:
+                                                    if object_name in self._replacements[location_name][obj_type]:
+                                                        self._replacements[location_name][obj_type][object_name][
+                                                            "blocked"] = True
                                 else:
-                                    row_values.append("")
-                                # Add the current line to the rich.Table
-                                # The end_section parameter will be set to True if the current line is the last line for the
-                                # current row (moving to the next rule)
-                                rulebase_table.add_row(
-                                    *row_values,
-                                    end_section=True if table_add_loop == max_replace - 1 else False,
-                                    style="dim" if r.disabled else None,
-                                )
-                        jobs_queue.task_done()
-                        progress.update(task, advance=1)
+                                    modified_rules.value += 1
+
+                                # Iterate up to the value of the max_replace variable (which is the highest number of
+                                # replacements for a given field of the current rule
+                                # This number is the "line number" in the current row (1 row = 1 rule)
+                                for table_add_loop in range(max_replace):
+                                    # row_values is the list of values for the current row (current rule) for the rich.Table
+                                    # The values have to be put in the same order than the columns headers, defined in the
+                                    # tab_headers variable
+                                    row_values = list()
+
+                                    # First column contains the name of the rule
+                                    row_values.append(r.name if table_add_loop == 0 else "")
+
+                                    # For each object type (Address, Service, Tag...) / field name for the current rule
+                                    # type (as defined on the repl_map descriptor)
+                                    for obj_type, fields in repl_map.get(type(r)).items():
+                                        # For each field name for the current object type
+                                        for f in [x[0] if type(x) is list else x for x in fields]:
+                                            # Call the format_for_table function, which will return the text to put on the
+                                            # current column for the current line in the current row
+                                            # (if the current line number is not above the number of replacements to be displayed
+                                            # for the current field)
+                                            # (yes, that's tricky)
+                                            row_values.append(
+                                                format_for_table(*replacements_in_rule[obj_type][f][table_add_loop])
+                                                if table_add_loop < len(replacements_in_rule[obj_type][f])
+                                                else ""
+                                            )
+                                    # if we are on the first line of the current row, display the rule interesting timestamps
+                                    row_values.append(str(rule_modification_timestamp) if table_add_loop == 0 else "")
+                                    row_values.append(str(last_hit_timestamp) if table_add_loop == 0 else "")
+                                    # Display Y or N on the last column, depending if the current rule is indeed modified or not
+                                    # (based on timestamp values)
+                                    if table_add_loop == 0:
+                                        row_values.append("Y" if editable_rule else "N")
+                                    else:
+                                        row_values.append("")
+                                    # Add the current line to the rich.Table
+                                    # The end_section parameter will be set to True if the current line is the last line for the
+                                    # current row (moving to the next rule)
+                                    rulebase_table.add_row(
+                                        *row_values,
+                                        end_section=True if table_add_loop == max_replace - 1 else False,
+                                        style="dim" if r.disabled else None,
+                                    )
+                        except Exception as e:
+                            self._console.log(
+                                f"[ {location_name} ] [Thread-{thread_id}] Unknown error : {e}"
+                            )
+                        finally:
+                            jobs_queue.task_done()
+                            progress.update(task, advance=1)
+                            if self._nb_thread and lock.locked():
+                                lock.release()
 
                 jobs_queue = Queue()
                 for r in rulebase:
@@ -2295,89 +2312,81 @@ class PaloCleaner:
         # If they are not, they can be deleted
         # We start by the groups (removing all members before deleting the group, to avoid inter-dependency between groups)
         # Then we delete AddressObjects and ServiceObjects, then Tags
-        def delete_local_objects(obj_item):
-            
+        @self.multithread_wrapper
+        def delete_local_objects(jobs_queue, lock=None, thread_id=0):
+
             while True:
-                if self._nb_thread: #TODO MANAGE EXCEPTION
-                    if self._queue.empty():
-                        break
-                    else:
-                        obj_item = self._queue.get()
-                obj_type = list(obj_item.keys())[0]
-                obj_instance = obj_item[obj_type]
-                for o in self._objects[location_name][obj_type]:
-                    if o.__class__.__name__ is obj_instance.__name__ and not (o, location_name) in self._used_objects_sets[location_name]:
-                        try:
-                            if o.tag:
-                                if set(o.tag).intersection(self._protect_tags):
-                                    continue
-                        except AttributeError :
-                            pass
-                        if self._apply_cleaning:
-                            delete_ok = False
-                            while not delete_ok:
-                                try:
-                                    o.delete()
-                                    self._console.log(f"[ {location_name} ] Object {o.name} ({o.__class__.__name__}) has been successfuly deleted ", style="red")
-                                    self._cleaning_counts[location_name][obj_type]['removed'] += 1
-                                    delete_ok = True
-                                except panos.errors.PanDeviceXapiError as e:
-                                    dependencies, all_matched = parse_PanDeviceXapiError_references(e.message)
-                                    if not all_matched:
-                                        self._console.log(f"[ {location_name} ] ERROR : It seems that object {o.name} ({o.__class__.__name__}) is used somewhere in the configuration, on device-group {location_name}. It will not be deleted. Please check manually")
-                                        self._console.log(f"[ {location_name} ] ERROR content : {e.message}")
-                                        delete_ok = True
-                                        continue
-                                    else:
-                                        # The following should never be matched, as we are not supposed to try to delete
-                                        # an object which is still used on a rule at this time of the process
-                                        # Keeping it for security purposes
-                                        for rule_dependency in dependencies["Rules"]:
-                                            self._console.log(f"[ {location_name} ] ERROR : It seems that object {o.name} ({o.__class__.__name__}) is still used on the following rule : {rule_dependency['rule_location']} / {rule_dependency['rulename']}. It will not be deleted. Please check manually")
-                                            delete_ok = True
-                                        if delete_ok:
-                                            continue
-
-                                        for group_dependency in dependencies["AddressGroups"]:
-                                            self._console.log(f"[ {location_name} ] Group {o.name} ({o.__class__.__name__}) is still used on another AddressGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
-                                            referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'])
-                                            referencer_group.static_value.remove(o.name)
-                                            referencer_group.apply()
-
-                                        for group_dependency in dependencies["ServiceGroups"]:
-                                            self._console.log(f"[ {location_name} ] Group {o.name} ({o.__class__.__name__}) is still used on another ServiceGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
-                                            referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'], obj_type="Service")
-                                            referencer_group.value.remove(o.name)
-                                            referencer_group.apply()
-                        else:
-                            self._console.log(
-                                f"[ {location_name} ] Object {o.name} ({o.__class__.__name__}) can be deleted", style="red")
-                            self._cleaning_counts[location_name][obj_type]['removed'] += 1
-
-                if self._nb_thread: 
-                    self._queue.task_done() 
-                else:
+                if jobs_queue.empty():
                     break
+                try:
+                    obj_item = jobs_queue.get()
+                    obj_type = list(obj_item.keys())[0]
+                    obj_instance = obj_item[obj_type]
+                    for o in self._objects[location_name][obj_type]:
+                        if o.__class__.__name__ is obj_instance.__name__ and not (o, location_name) in self._used_objects_sets[location_name]:
+                            try:
+                                if o.tag:
+                                    if set(o.tag).intersection(self._protect_tags):
+                                        continue
+                            except AttributeError :
+                                pass
+                            if self._apply_cleaning:
+                                delete_ok = False
+                                while not delete_ok:
+                                    try:
+                                        o.delete()
+                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Object {o.name} ({o.__class__.__name__}) has been successfuly deleted ", style="red")
+                                        self._cleaning_counts[location_name][obj_type]['removed'] += 1
+                                        delete_ok = True
+                                    except panos.errors.PanDeviceXapiError as e:
+                                        dependencies, all_matched = parse_PanDeviceXapiError_references(e.message)
+                                        if not all_matched:
+                                            self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR : It seems that object {o.name} ({o.__class__.__name__}) is used somewhere in the configuration, on device-group {location_name}. It will not be deleted. Please check manually")
+                                            self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR content : {e.message}")
+                                            delete_ok = True
+                                            continue
+                                        else:
+                                            # The following should never be matched, as we are not supposed to try to delete
+                                            # an object which is still used on a rule at this time of the process
+                                            # Keeping it for security purposes
+                                            for rule_dependency in dependencies["Rules"]:
+                                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR : It seems that object {o.name} ({o.__class__.__name__}) is still used on the following rule : {rule_dependency['rule_location']} / {rule_dependency['rulename']}. It will not be deleted. Please check manually")
+                                                delete_ok = True
+                                            if delete_ok:
+                                                continue
 
+                                            for group_dependency in dependencies["AddressGroups"]:
+                                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Group {o.name} ({o.__class__.__name__}) is still used on another AddressGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
+                                                referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'])
+                                                referencer_group.static_value.remove(o.name)
+                                                referencer_group.apply()
+
+                                            for group_dependency in dependencies["ServiceGroups"]:
+                                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Group {o.name} ({o.__class__.__name__}) is still used on another ServiceGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
+                                                referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'], obj_type="Service")
+                                                referencer_group.value.remove(o.name)
+                                                referencer_group.apply()
+                            else:
+                                self._console.log(
+                                    f"[ {location_name} ] [Thread-{thread_id}] Object {o.name} ({o.__class__.__name__}) can be deleted", style="red")
+                                self._cleaning_counts[location_name][obj_type]['removed'] += 1
+                except Exception as e:
+                    self._console.log(
+                        f"[ {location_name} ] [Thread-{thread_id}] Unknown error : {e}"
+                    )
+                finally:
+                    jobs_queue.task_done()
+                    if self._nb_thread and lock.locked():
+                        lock.release()
+
+        jobs_queue = Queue()
         # for each object item of the current location
         for obj_item in [v for k, v in sorted(cleaning_order.items())]:
             # Apply multithreading if requested
-            if self._nb_thread:
-                # add the rule to the multithreading queue
-                self._queue.put(obj_item) #TODO MANAGE EXCEPTION
-            else:
-                delete_local_objects(obj_item) # obj_item is passed to be treated are we are not using threads
-        
-        if self._nb_thread:
-            for n in range(self._nb_thread):
-                try:
-                    t = Thread(target=delete_local_objects, args=(None,)) # obj_item is set to None as threads ill manage all the replacements from the queue
-                    t.start()   # TO TEST MANAGE THREAD CREATION AT UPPER LEVEL WITH IN & OUT QUEUES
-                    self._console.log(f"[ {location_name} ] Started thread {n+1}", level=2)
-                except Exception as e:
-                    self._console.log(f"[ {location_name} ] Error while creating and starting a thread for multithreading : {e}", style="red")   
-            # blocks until all items in the queue have been gotten and processed
-            self._queue.join() #TODO MANAGE EXCEPTION
+            jobs_queue.put(obj_item)
+
+        delete_local_objects(jobs_queue) # obj_item is passed to be treated are we are not using threads
+        jobs_queue.join()
 
         """
         for type in sorted(self._objects[location_name].items(), reverse=True):
