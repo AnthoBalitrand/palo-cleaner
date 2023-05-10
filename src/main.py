@@ -65,15 +65,17 @@ def parse_cli_args():
 
     parser.add_argument(
         "--tiebreak-tag",
-        action = "store",
-        help = "Tag used to choose preferred replacement object in case of multiple ones (overrides default choice)",
+        nargs="+",
+        action="extend",
+        type=str,
+        help = "Tag(s) used to choose preferred replacement object in case of multiple ones (overrides default choice)",
         default = None,
     )
 
     parser.add_argument(
         "--apply-tiebreak-tag",
         action = "store_true",
-        help = "Applies the tag defined on the --tiebreak-tag argument to objects choosen by the choice algorithm",
+        help = "Applies the first tag defined on the --tiebreak-tag argument to objects choosen by the choice algorithm",
         default = False,
     )
 

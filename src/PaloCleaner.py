@@ -76,6 +76,7 @@ class PaloCleaner:
         self._depthed_tree = dict({0: ['shared']})
         self._apply_cleaning = kwargs['apply_cleaning']
         self._tiebreak_tag = kwargs['tiebreak_tag']
+        self._tiebreak_tag_set = set(self._tiebreak_tag)
         self._apply_tiebreak_tag = kwargs['apply_tiebreak_tag']
         self._no_report = kwargs['no_report']
         self._split_report = kwargs['split_report']
@@ -647,11 +648,11 @@ class PaloCleaner:
         """
 
         if self._tiebreak_tag:
-            if not self._tiebreak_tag in self._tag_namesearch['shared']:
-                self._console.log(f"[ Panorama ] Creating tiebreak tag {self._tiebreak_tag} on shared context")
-                tiebreak_tag = Tag(name=self._tiebreak_tag)
+            if not self._tiebreak_tag[0] in self._tag_namesearch['shared']:
+                self._console.log(f"[ Panorama ] Creating tiebreak tag {self._tiebreak_tag[0]} on shared context")
+                tiebreak_tag = Tag(name=self._tiebreak_tag[0])
                 self._objects['shared']['Tag'].append(tiebreak_tag)
-                self._tag_namesearch['shared'][self._tiebreak_tag] = tiebreak_tag
+                self._tag_namesearch['shared'][self._tiebreak_tag[0]] = tiebreak_tag
                 if self._apply_cleaning:
                     self._panorama.add(tiebreak_tag).create()
 
@@ -1295,11 +1296,11 @@ class PaloCleaner:
         # If a tiebreak tag has been specified, this is the decision factor to choose the "best" object
         # Not that if several objects have the tiebreak tag (which is not supposed to happen), the first one of the list
         # will be chosen, which can leads to some randomness
-        if self._tiebreak_tag:
+        if self._tiebreak_tag_set:
             for o in sorted(obj_list, key=lambda x: x[0].about()['name']):
                 if not choosen_object:
                     try:
-                        if self._tiebreak_tag in o[0].tag:
+                        if self._tiebreak_tag_set.intersection(o[0].tag):
                             choosen_object = o
                         self._console.log(f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen by tiebreak", level=2)
                     except TypeError:
@@ -1409,15 +1410,15 @@ class PaloCleaner:
             tag_changed = False
             # If the object already has some tags, adding the tiebreak tag to the list
             if choosen_object[0].tag:
-                if not self._tiebreak_tag in choosen_object[0].tag:
+                if not self._tiebreak_tag[0] in choosen_object[0].tag:
                     choosen_object[0].tag.append(self._tiebreak_tag)
                     tag_changed = True
             # Else if the object has no tags, initialize the list with the tiebreak tag
             else:
-                choosen_object[0].tag = [self._tiebreak_tag]
+                choosen_object[0].tag = [self._tiebreak_tag[0]]
                 tag_changed = True
             if tag_changed:
-                self._console.log(f"[ {base_location} ] Adding tiebreak tag {self._tiebreak_tag} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]} ")
+                self._console.log(f"[ {base_location} ] Adding tiebreak tag {self._tiebreak_tag[0]} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]} ")
             # If cleaning application is requested and tag has been changed, apply it to Panorama
             if self._apply_cleaning and tag_changed:
                 try:
@@ -1455,11 +1456,11 @@ class PaloCleaner:
         # If a tiebreak tag has been specified, this is the decision factor to choose the "best" object
         # Not that if several objects have the tiebreak tag (which is not supposed to happen), the first one of the list
         # will be chosen, which can leads to some randomness
-        if self._tiebreak_tag:
+        if self._tiebreak_tag_set:
             for o in sorted(obj_list, key=lambda x: x[0].about()['name']):
                 if not choosen_object:
                     try:
-                        if self._tiebreak_tag in o[0].tag:
+                        if self._tiebreak_tag_set.intersection(o[0].tag):
                             choosen_object = o
                         self._console.log(
                                 f"[ {base_location} ] Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen by tiebreak", level=2)
@@ -1532,16 +1533,16 @@ class PaloCleaner:
             tag_changed = False
             # If the object already has some tags, adding the tiebreak tag to the list
             if choosen_object[0].tag:
-                if not self._tiebreak_tag in choosen_object[0].tag:
-                    choosen_object[0].tag.append(self._tiebreak_tag)
+                if not self._tiebreak_tag[0] in choosen_object[0].tag:
+                    choosen_object[0].tag.append(self._tiebreak_tag[0])
                     tag_changed = True
             # Else if the object has no tags, initialize the list with the tiebreak tag
             else:
-                choosen_object[0].tag = [self._tiebreak_tag]
+                choosen_object[0].tag = [self._tiebreak_tag[0]]
                 tag_changed = True
             if tag_changed:
                 self._console.log(
-                    f"[ {base_location} ] Adding tiebreak tag {self._tiebreak_tag} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]}")
+                    f"[ {base_location} ] Adding tiebreak tag {self._tiebreak_tag[0]} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]}")
             # If cleaning application is requested and tag has been changed, apply it to Panorama
             if self._apply_cleaning and tag_changed:
                 try:
