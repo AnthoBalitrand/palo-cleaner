@@ -1300,12 +1300,13 @@ class PaloCleaner:
             for o in sorted(obj_list, key=lambda x: x[0].about()['name']):
                 if not choosen_object:
                     try:
-                        if self._tiebreak_tag_set.intersection(o[0].tag):
+                        if (tag_intersect := self._tiebreak_tag_set.intersection(o[0].tag)):
                             choosen_object = o
-                        self._console.log(f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen by tiebreak", level=2)
-                    except TypeError:
+                            self._console.log(f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen by tiebreak. Intersection set : {tag_intersect}", level=2)
+                    except TypeError as e:
                         # This exception is matched when checking if the tiebreak tag is on the list of tags of an
                         # object which has no tags
+                        # self._console.log(f"[ {base_location} ] TypeError : {e} checking tags on object {o} --> {o[0].tag}")
                         pass
 
         # If the tiebreak tag was not used to find the "best" object
@@ -1411,7 +1412,7 @@ class PaloCleaner:
             # If the object already has some tags, adding the tiebreak tag to the list
             if choosen_object[0].tag:
                 if not self._tiebreak_tag[0] in choosen_object[0].tag:
-                    choosen_object[0].tag.append(self._tiebreak_tag)
+                    choosen_object[0].tag.append(self._tiebreak_tag[0])
                     tag_changed = True
             # Else if the object has no tags, initialize the list with the tiebreak tag
             else:
@@ -1460,10 +1461,10 @@ class PaloCleaner:
             for o in sorted(obj_list, key=lambda x: x[0].about()['name']):
                 if not choosen_object:
                     try:
-                        if self._tiebreak_tag_set.intersection(o[0].tag):
+                        if (tag_intersect := self._tiebreak_tag_set.intersection(o[0].tag)):
                             choosen_object = o
-                        self._console.log(
-                                f"[ {base_location} ] Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen by tiebreak", level=2)
+                            self._console.log(
+                                f"[ {base_location} ] Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen by tiebreak. Intersection set : {tag_intersect}", level=2)
                     except:
                         # This exception is matched when checking if the tiebreak tag is on the list of tags of an
                         # object which has no tags
@@ -1677,7 +1678,6 @@ class PaloCleaner:
 
                 try:
                     replacement_name, replacement = jobs_queue.get()
-
                     # the source object name is the key on the _replacements dict
                     source_obj = replacement_name
                     # the source_obj_instance and source_obj_location are found in the 'source' key of the dict item
@@ -1776,6 +1776,9 @@ class PaloCleaner:
                             # if the cleaning application has been requested, update the modified group on Panorama
                             if self._apply_cleaning and changed:
                                 checked_object.apply()
+                    self._console.log(
+                        f"[ {location_name} ] [Thread-{thread_id}] Finished replacement of {source_obj_instance.about()['name']!r} ({source_obj_location}) by {replacement_obj_instance.about()['name']!r} ({replacement_obj_location}). {jobs_queue.qsize()} replacements remaining on queue"
+                    )
 
                 except Exception as e:
                     self._console.log(
@@ -1861,6 +1864,9 @@ class PaloCleaner:
                             # if the cleaning application has been requested, update the modified group on Panorama
                             if self._apply_cleaning and changed:
                                 checked_object.apply()
+                    self._console.log(
+                        f"[ {location_name} ] [Thread-{thread_id}] Finished replacement of {source_obj_instance.about()['name']!r} ({source_obj_location}) by {replacement_obj_instance.about()['name']!r} ({replacement_obj_location}). {jobs_queue.qsize()} replacements remaining on queue"
+                    )
                 except Exception as e:
                     self._console.log(
                         f"[ {location_name} ] [Thread-{thread_id}] Unknown error : {e}"
@@ -2189,6 +2195,9 @@ class PaloCleaner:
                                         end_section=True if table_add_loop == max_replace - 1 else False,
                                         style="dim" if r.disabled else None,
                                     )
+                            self._console.log(
+                                f"[ {location_name} ] [Thread-{thread_id}] Finished replacements on rule {r.name!r}. {jobs_queue.qsize()} rules remaining on queue"
+                            )
                         except Exception as e:
                             self._console.log(
                                 f"[ {location_name} ] [Thread-{thread_id}] Unknown error : {e}"
@@ -2324,12 +2333,19 @@ class PaloCleaner:
                     obj_type = list(obj_item.keys())[0]
                     obj_instance = obj_item[obj_type]
                     for o in self._objects[location_name][obj_type]:
-                        if o.__class__.__name__ is obj_instance.__name__ and not (o, location_name) in self._used_objects_sets[location_name]:
+                        if o.__class__.__name__ is obj_instance.__name__ and not (o, location_name) in self._used_objects_sets[location_name] and not o.name in indirect_protect[obj_type]:
                             try:
                                 if o.tag:
                                     if set(o.tag).intersection(self._protect_tags):
+                                        # protecting the other tags used on the protected object from being deleted later
+                                        indirect_protect["Tag"].extend(o.tag)
+
+                                        # in case of a protected group, protecting the members from being deleted later
+                                        if "Group" in obj_instance.__name__:
+                                            indirect_protect[obj_type].extend(o.static_value)
+
                                         continue
-                            except AttributeError :
+                            except AttributeError as e:
                                 pass
                             if self._apply_cleaning:
                                 delete_ok = False
@@ -2381,10 +2397,17 @@ class PaloCleaner:
                         lock.release()
 
         jobs_queue = Queue()
+
+        # dict used to store indirectly protected object (because of protect-tags parameter used at startup)
+        indirect_protect = dict()
+
         # for each object item of the current location
         for obj_item in [v for k, v in sorted(cleaning_order.items())]:
-            # Apply multithreading if requested
             jobs_queue.put(obj_item)
+            indirect_protect[list(obj_item.keys())[0]] = list()
+
+        indirect_protect["Tag"].extend(self._protect_tags)
+        indirect_protect["Tag"].extend(self._tiebreak_tag)
 
         delete_local_objects(jobs_queue) # obj_item is passed to be treated are we are not using threads
         jobs_queue.join()
