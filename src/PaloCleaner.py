@@ -341,7 +341,7 @@ class PaloCleaner:
                             # done for each object type at the current location
                             self._replacements[context_name] = {'Address': dict(), 'Service': dict(), 'Tag': dict()}
 
-                            if not self._unused_only:
+                            if self._unused_only is None:
                                 # OBJECTS OPTIMIZATION
                                 dg_optimize_task = progress.add_task(
                                     f"[ {context_name} ] - Optimizing objects",
@@ -2320,6 +2320,9 @@ class PaloCleaner:
         upward_dg = self._dg_hierarchy[location_name].parent
         upward_dg_name = "shared" if not upward_dg else upward_dg.name
         self._used_objects_sets[upward_dg_name] = self._used_objects_sets[upward_dg_name].union(self._used_objects_sets[location_name])
+
+        if self._unused_only and location_name not in self._unused_only:
+            return
 
         # Iterating over each object type / object for the current location, and check if each object is member
         # (or still member, as the replaced ones have been suppressed) of the _used_objects_set for the same location

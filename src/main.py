@@ -119,9 +119,11 @@ def parse_cli_args():
 
     parser.add_argument(
         "--unused-only",
-        action = "store_true",
+        nargs="*",
+        action = "extend",
+        type=str,
         help = "Only deletes unused objects. No replacements are realized",
-        default = False
+        default = None
     )
 
     parser.add_argument(

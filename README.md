@@ -54,11 +54,13 @@ optional arguments:
   --max-days-since-hit MAX_DAYS_SINCE_HIT
                         Don't apply any change to rules not being hit since more than X days
   --tiebreak-tag TIEBREAK_TAG
-                        Tag used to choose preferred replacement object in case of multiple ones (overrides default choice)
-  --apply-tiebreak-tag  Applies the tag defined on the --tiebreak-tag argument to objects choosen by the choice algorithm
+                        Tag used to choose preferred replacement object in case of multiple ones (overrides default choice). 
+                        Multiple tags can be given here. 
+  --apply-tiebreak-tag  Applies the first tag defined on the --tiebreak-tag argument to objects choosen by the choice algorithm
   --no-report           Does not generates job reports
   --split-report        Split the report file (1 per device-group)
-  --unused-only         Only deletes unused objects. No replacements are realized 
+  --unused-only         Only deletes unused objects. No replacements are realized. You can give a list of device-groups where you want to perform the operation. 
+  --protect-tags        List of tags that you want to protect (not to delete) even if the tagged objects are not used in any policy
 
 ```
 
@@ -75,11 +77,11 @@ Here's a more detailed description of those different parameters :
 | -v or --verbosity | N/A | Add this argument several times (from 1 to 3) to increase the output log verbosity level | 
 | --max-days-since-change | Integer | The number of days since when, if a rule has not been modified, it will not be included in the cleaning process. Needs to be used in conjunction with --max-days-since-hit | 
 | --max-days-since-hit | Integer | The number of days since when, if a rule has not been hit, it will not be included in the cleaning process. Needs to be used in conjunction with --max-days-since-change | 
-| --tiebreak-tag | string | To force usage of specific objects (which would normally not be chosen by the algorithm) if the provided tag has been applied to those objects | 
-| --apply-tiebreak-tag | | Applies the taf defined on the --tiebreak-tag parameter to the choosen objects by the algorithm, to make sure they will remain choose at next script usages | 
+| --tiebreak-tag | string | To force usage of specific objects (which would normally not be chosen by the algorithm) if at least one of the provided tags has been applied to those objects | 
+| --apply-tiebreak-tag | | Applies the first tag defined on the --tiebreak-tag parameter to the choosen objects by the algorithm, to make sure they will remain choose at next script usages | 
 | --no-report | | When used, does not create any html report for the run | 
 | --split-report | | Will create multiple reports files (globally, one per device-group). Highly recommended in large environments if you don't want huge unexploitables html reports | 
-| --unused-only | | The script will only delete unused objects but will not perform any further optimization |
+| --unused-only | | The script will only delete unused objects but will not perform any further optimization. Argument can be provided alone, or with a list of device-groups where you want to perform the operation. <br>ie : You might want to perform an analysis on the full device-groups hierarchy, but delete unused objects only at shared level. |
 
 ## Capabilities 
 
