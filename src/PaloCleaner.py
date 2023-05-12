@@ -719,32 +719,38 @@ class PaloCleaner:
 
         condition = condition_string.replace('and', '&')
         condition = condition.replace('or', '^')
+        condition = condition.replace('AND', '&')
+        condition = condition.replace('OR', '^')
         # remove all quotes from the logical expression
         condition = condition.replace('\'', '')
         condition = condition.replace('\"', '')
-        condition = re.sub("((\w|-)+)", rf"self._tag_objsearch['{search_location}'].get('\1', set())", condition)
+        condition = re.sub("((\w|-|:|\+)+)", rf"self._tag_objsearch['{search_location}'].get('\1', set())", condition)
 
         condition = "cond_expr_result = " + condition
         return condition
 
-    def get_relative_object_location_by_tag(self, dag_condition, reference_location):
+    def get_relative_object_location_by_tag(self, dag_condition, reference_location, dag_name):
         """
         Recursive function, used to find all objects matching a DAG statement
 
         :param dag_condition: The AddressGroup.dynamic_value
         :param reference_location: The location where to find matching objects for this recursive iteration
+        :param dag_name: The name of the DAG being analyzed (only used for logging purposes if exception is matched)
         :return: list((obj, location)): List of tuples of (Object, location) matching the DAG statement
         """
 
         found_objects = list()
         condition_expr = self.gen_condition_expression(dag_condition, reference_location)
         expr_result = dict()
-        exec(condition_expr, locals(), expr_result)
+        try:
+            exec(condition_expr, locals(), expr_result)
+        except Exception as e:
+            self._console.log(f"[ {reference_location} ] Exception {e} while executing DAG {dag_name} match condition {dag_condition} (transformed to {condition_expr}", style="red")
         found_objects += [(x, reference_location) for x in expr_result['cond_expr_result']]
 
         if reference_location != 'shared':
             upward_dg = self._dg_hierarchy[reference_location].parent.name
-            found_objects += self.get_relative_object_location_by_tag(dag_condition, upward_dg)
+            found_objects += self.get_relative_object_location_by_tag(dag_condition, upward_dg, dag_name)
 
         return found_objects
 
@@ -870,7 +876,8 @@ class PaloCleaner:
                     # (= for each object matched by the DAG)
                     for referenced_object, referenced_object_location in self.get_relative_object_location_by_tag(
                         used_object.dynamic_value,
-                        usage_base
+                        usage_base,
+                        used_object.name
                     ):
                         self._console.log(
                                 f"[ {usage_base} ] {'*' * recursion_level} Found group member of dynamic AddressGroup {used_object.name!r} : {referenced_object.name!r}",
@@ -2340,20 +2347,22 @@ class PaloCleaner:
                     obj_type = list(obj_item.keys())[0]
                     obj_instance = obj_item[obj_type]
                     for o in self._objects[location_name][obj_type]:
-                        if o.__class__.__name__ is obj_instance.__name__ and not (o, location_name) in self._used_objects_sets[location_name] and not o.name in indirect_protect[obj_type]:
+                        #if o.__class__.__name__ is obj_instance.__name__ and not (o, location_name) in self._used_objects_sets[location_name] and not o.name in indirect_protect[obj_type]:
+                        if o.__class__.__name__ is obj_instance.__name__ and not (o, location_name) in self._used_objects_sets[location_name]:
                             try:
                                 if o.tag:
-                                    if set(o.tag).intersection(self._protect_tags):
+                                    if set(o.tag).intersection(self._protect_tags) or o.name in indirect_protect[obj_type]:
                                         # protecting the other tags used on the protected object from being deleted later
-                                        indirect_protect["Tag"].extend(o.tag)
-
+                                        indirect_protect["Tag"].update(o.tag)
                                         # in case of a protected group, protecting the members from being deleted later
                                         if "Group" in obj_instance.__name__:
-                                            indirect_protect[obj_type].extend(o.static_value)
-
+                                            indirect_protect[obj_type].update(o.static_value)
                                         continue
                             except AttributeError as e:
                                 pass
+                            if o.name in indirect_protect[obj_type]:
+                                continue
+
                             if self._apply_cleaning:
                                 delete_ok = False
                                 while not delete_ok:
@@ -2411,10 +2420,10 @@ class PaloCleaner:
         # for each object item of the current location
         for obj_item in [v for k, v in sorted(cleaning_order.items())]:
             jobs_queue.put(obj_item)
-            indirect_protect[list(obj_item.keys())[0]] = list()
+            indirect_protect[list(obj_item.keys())[0]] = set()
 
-        indirect_protect["Tag"].extend(self._protect_tags)
-        indirect_protect["Tag"].extend(self._tiebreak_tag)
+        indirect_protect["Tag"].update(self._protect_tags)
+        indirect_protect["Tag"].update(self._tiebreak_tag)
 
         delete_local_objects(jobs_queue) # obj_item is passed to be treated are we are not using threads
         jobs_queue.join()
