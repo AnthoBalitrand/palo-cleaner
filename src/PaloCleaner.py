@@ -719,7 +719,11 @@ class PaloCleaner:
 
         condition = condition_string.replace('and', '&')
         condition = condition.replace('or', '^')
-        condition = re.sub("('.*?')", rf"self._tag_objsearch['{search_location}'].get(\1, set())", condition)
+        # remove all quotes from the logical expression
+        condition = condition.replace('\'', '')
+        condition = condition.replace('\"', '')
+        condition = re.sub("((\w|-)+)", rf"self._tag_objsearch['{search_location}'].get('\1', set())", condition)
+
         condition = "cond_expr_result = " + condition
         return condition
 
