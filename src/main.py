@@ -122,8 +122,15 @@ def parse_cli_args():
         nargs="*",
         action = "extend",
         type=str,
-        help = "Only deletes unused objects. No replacements are realized",
+        help = "Only deletes unused objects. No replacements are realized. List of device-groups can be provided. Will work only if the provided device-groups are fully included in the analysis",
         default = None
+    )
+
+    parser.add_argument(
+        "--protect-potential-replacements",
+        action = "store_true",
+        help = "Only when using --unused-only. Permits to not delete objects that could be used as replacements, even if they are not used for now",
+        default = False
     )
 
     parser.add_argument(
@@ -144,6 +151,10 @@ def main():
     # if the --apply-tiebreak-tag has been used without the --tiebreak-tag argument value, raise en error and exit
     if start_cli_args.apply_tiebreak_tag and not start_cli_args.tiebreak_tag:
         print("\n ERROR - --apply-tiebreak-tag has been called without --tiebreak-tag \n")
+        exit(0)
+
+    if start_cli_args.protect_potential_replacements and start_cli_args.unused_only is None:
+        print("\n ERROR - --protect-potential-replacements has been called without --unused-only \n")
         exit(0)
 
     # create the report directory if requested

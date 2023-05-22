@@ -76,7 +76,7 @@ class PaloCleaner:
         self._depthed_tree = dict({0: ['shared']})
         self._apply_cleaning = kwargs['apply_cleaning']
         self._tiebreak_tag = kwargs['tiebreak_tag']
-        self._tiebreak_tag_set = set(self._tiebreak_tag)
+        self._tiebreak_tag_set = set(self._tiebreak_tag) if self._tiebreak_tag else set()
         self._apply_tiebreak_tag = kwargs['apply_tiebreak_tag']
         self._no_report = kwargs['no_report']
         self._split_report = kwargs['split_report']
@@ -119,6 +119,7 @@ class PaloCleaner:
         self._panorama_devices = dict()
         self._hitcounts = dict()
         self._cleaning_counts = dict()
+        self._protect_potential_replacements = kwargs['protect_potential_replacements']
         signal.signal(signal.SIGINT, self.signal_handler)
         self._console.log(f"STARTUP ARGUMENTS : {kwargs}")
 
@@ -179,7 +180,7 @@ class PaloCleaner:
         :return:
         """
 
-        res = input("  Do you really want to interrupt the running operations ? y/n ")
+        res = input("\n\n  Do you really want to interrupt the running operations ? y/n ")
         if res == 'y':
             raise KeyboardInterrupt
 
@@ -196,7 +197,7 @@ class PaloCleaner:
  |  _/ _` | / _ \ | (__| / -_) _` | ' \/ -_) '_|
  |_| \__,_|_\___/  \___|_\___\__,_|_||_\___|_|  
                                                 
-        by Anthony BALITRAND v1.0                                           
+        by Anthony BALITRAND v1.2                                           
 
 """)
         self._console.print(header_text, style="green", justify="left")
@@ -341,7 +342,7 @@ class PaloCleaner:
                             # done for each object type at the current location
                             self._replacements[context_name] = {'Address': dict(), 'Service': dict(), 'Tag': dict()}
 
-                            if self._unused_only is None:
+                            if self._unused_only is None or self._protect_potential_replacements:
                                 # OBJECTS OPTIMIZATION
                                 dg_optimize_task = progress.add_task(
                                     f"[ {context_name} ] - Optimizing objects",
@@ -351,6 +352,7 @@ class PaloCleaner:
                                 self._console.log(f"[ {context_name} ] Objects optimization done")
                                 progress.remove_task(dg_optimize_task)
 
+                            if self._unused_only is None:
                                 # OBJECTS REPLACEMENT IN GROUPS
                                 dg_replaceingroups_task = progress.add_task(
                                     f"[ {context_name} ] Replacing objects in groups",
@@ -2297,6 +2299,8 @@ class PaloCleaner:
             x: {'removed': 0, 'replaced': 0} for x in self._replacements.get(location_name, list())
         }
 
+        optimized_only = True if (self._unused_only is not None and len(self._unused_only) > 0 and location_name not in self._unused_only) else False
+
         # removing replaced objects from used_objects_set for current location_name
         for obj_type in self._replacements.get(location_name, list()):
             for name, infos in self._replacements[location_name][obj_type].items():
@@ -2307,12 +2311,13 @@ class PaloCleaner:
                     try:
                         # For the current replacement, remove the original object from the _used_objects_set for the
                         # current location, and replace it with the replacement object
-                        self._used_objects_sets[location_name].remove(infos['source'])
+                        if self._unused_only is None or self._protect_potential_replacements:
+                            self._used_objects_sets[location_name].remove(infos['source'])
                         self._used_objects_sets[location_name].add(infos['replacement'])
                         self._console.log(f"[ {location_name} ] Removing unprotected object {name} (location {infos['source'][1]}) from used objects set", level=2)
                         # If the name of the current replacement object is different than the replacement one, count it
                         # as a replacement on the _cleaning_counts tracker
-                        if infos['source'][1] == location_name and infos['source'][0].name != infos['replacement'][0].name:
+                        if not optimized_only and infos['source'][1] == location_name and infos['source'][0].name != infos['replacement'][0].name:
                             self._cleaning_counts[location_name][obj_type]['replaced'] += 1
                     # This exception should never be raised but protects the execution
                     except ValueError:
@@ -2328,8 +2333,8 @@ class PaloCleaner:
         upward_dg_name = "shared" if not upward_dg else upward_dg.name
         self._used_objects_sets[upward_dg_name] = self._used_objects_sets[upward_dg_name].union(self._used_objects_sets[location_name])
 
-        if self._unused_only and location_name not in self._unused_only:
-            return
+        if optimized_only:
+            return None
 
         # Iterating over each object type / object for the current location, and check if each object is member
         # (or still member, as the replaced ones have been suppressed) of the _used_objects_set for the same location
