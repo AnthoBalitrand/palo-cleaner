@@ -141,6 +141,13 @@ def parse_cli_args():
         help = "List of tags which will protect objects from deletion"
     )
 
+    parser.add_argument(
+        "--bulk-operations",
+        action = "store_true",
+        help = "API calls using bulk operations",
+        default = False
+    )
+
     return parser.parse_args()
 
 

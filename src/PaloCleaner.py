@@ -120,6 +120,7 @@ class PaloCleaner:
         self._hitcounts = dict()
         self._cleaning_counts = dict()
         self._protect_potential_replacements = kwargs['protect_potential_replacements']
+        self._bulk_operations = kwargs['bulk_operations']
         signal.signal(signal.SIGINT, self.signal_handler)
         self._console.log(f"STARTUP ARGUMENTS : {kwargs}")
 
@@ -328,7 +329,7 @@ class PaloCleaner:
                 # Starting objects usage optimization
                 # From the most "deep" device-group (far from shared), going up to the shared location
                 self._console.print(
-                    Panel("[bold green]Optimizing objects duplicates",
+                    Panel("[bold green] Optimizing objects duplicates",
                           style="green"),
                     justify="left")
                 for depth, contexts in sorted(self._depthed_tree.items(), key=lambda x: x[0], reverse=True):
@@ -2153,7 +2154,7 @@ class PaloCleaner:
 
                                 # if the rule has changes but is not considered as editable (not in timestamp boundaries
                                 # regarding opstate timestamps), protect the rule objects from deletion
-                                if not editable_rule:
+                                if not editable_rule or "noopstate" in r.name:
                                     for obj_type, fields in repl_map[type(r)].items():
                                         for f in fields:
                                             if (field_values := getattr(r, f[0]) if type(f) is list else [getattr(r, f)]):
@@ -2310,10 +2311,13 @@ class PaloCleaner:
                 if not infos['blocked']:
                     try:
                         # For the current replacement, remove the original object from the _used_objects_set for the
-                        # current location, and replace it with the replacement object
-                        if self._unused_only is None or self._protect_potential_replacements:
+                        # current location (if not using --protect-replacement-objects with the --unused-only argument),
+                        # and replace it with the replacement object
+                        if self._unused_only is None:
+                        #if self._unused_only is None or self._protect_potential_replacements:
                             self._used_objects_sets[location_name].remove(infos['source'])
-                        self._used_objects_sets[location_name].add(infos['replacement'])
+                        if self._unused_only is None or self._protect_potential_replacements:
+                            self._used_objects_sets[location_name].add(infos['replacement'])
                         self._console.log(f"[ {location_name} ] Removing unprotected object {name} (location {infos['source'][1]}) from used objects set", level=2)
                         # If the name of the current replacement object is different than the replacement one, count it
                         # as a replacement on the _cleaning_counts tracker
@@ -2352,23 +2356,27 @@ class PaloCleaner:
                     obj_type = list(obj_item.keys())[0]
                     obj_instance = obj_item[obj_type]
                     for o in self._objects[location_name][obj_type]:
-                        #if o.__class__.__name__ is obj_instance.__name__ and not (o, location_name) in self._used_objects_sets[location_name] and not o.name in indirect_protect[obj_type]:
-                        if o.__class__.__name__ is obj_instance.__name__ and not (o, location_name) in self._used_objects_sets[location_name]:
+                        if o.__class__.__name__ is obj_instance.__name__:
                             try:
                                 if o.tag:
                                     if set(o.tag).intersection(self._protect_tags) or o.name in indirect_protect[obj_type]:
                                         # protecting the other tags used on the protected object from being deleted later
+                                        self._console.log(f"[{location_name}] Object {o.name} is protected by tag(s) {set(o.tag).intersection(self._protect_tags)}. Extending protected tags with {o.tag}")
                                         indirect_protect["Tag"].update(o.tag)
                                         # in case of a protected group, protecting the members from being deleted later
                                         if "Group" in obj_instance.__name__:
+                                            self._console.log(f"[{location_name}] Object {o.name} has static group members. Extending protected names with {o.static_value}")
                                             indirect_protect[obj_type].update(o.static_value)
                                         continue
                             except AttributeError as e:
                                 pass
+                            except Exception as e:
+                                self._console.log(f"UNKNOWN EXCEPTION : {e}", style="red")
+
                             if o.name in indirect_protect[obj_type]:
                                 continue
 
-                            if self._apply_cleaning:
+                            if self._apply_cleaning and not (o, location_name) in self._used_objects_sets[location_name]:
                                 delete_ok = False
                                 while not delete_ok:
                                     try:
@@ -2404,7 +2412,7 @@ class PaloCleaner:
                                                 referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'], obj_type="Service")
                                                 referencer_group.value.remove(o.name)
                                                 referencer_group.apply()
-                            else:
+                            elif not (o, location_name) in self._used_objects_sets[location_name]:
                                 self._console.log(
                                     f"[ {location_name} ] [Thread-{thread_id}] Object {o.name} ({o.__class__.__name__}) can be deleted", style="red")
                                 self._cleaning_counts[location_name][obj_type]['removed'] += 1
@@ -2425,7 +2433,8 @@ class PaloCleaner:
         # for each object item of the current location
         for obj_item in [v for k, v in sorted(cleaning_order.items())]:
             jobs_queue.put(obj_item)
-            indirect_protect[list(obj_item.keys())[0]] = set()
+            if not indirect_protect.get(list(obj_item.keys())[0]):
+                indirect_protect[list(obj_item.keys())[0]] = set()
 
         indirect_protect["Tag"].update(self._protect_tags)
         indirect_protect["Tag"].update(self._tiebreak_tag)
