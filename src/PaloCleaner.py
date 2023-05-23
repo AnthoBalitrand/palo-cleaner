@@ -757,30 +757,31 @@ class PaloCleaner:
 
         return found_objects
 
-    def fetch_used_obj_set(self, location_name, progress, task):
+    def shorten_object_type(self, object_type: str):
         """
-        This function generates a "set" of used objects of each type (Address, AddressGroup, Tag, Service, ServiceGroup...)
-        at each requested location.
-        This set is a set of tuples of (panos.Object, location (str))
-        Group objects are explored (recursively) to find all members, which are of course also considered as used.
+        (Overkill function) which returns a panos.Object type, after removing the "Group" and "Object" characters
 
-        :param location_name: (str) The location name where to start used objects exploration
-        :param progress: (rich.Progress) The rich Progress object to update during progression
-        :param task: (rich.Task) The rich Task object to update during progression
+        :param object_type: (str) panos.Object.__class__.__name__
+        :return: (str) the panos.Object type name without "Group" nor "Object"
+        """
+
+        return object_type.replace('Group', '').replace('Object', '')
+
+    def flatten_object(self, used_object: panos.objects, object_location: str, usage_base: str,
+                           referencer_type: str = None, referencer_name: str = None,
+                           resolved_cache=dict()):
+        """
+        Recursive caller for the inner flatten_object_recurser function.
+        :param used_object:
+        :param object_location:
+        :param usage_base:
+        :param referencer_type:
+        :param referencer_name:
+        :param resolved_cache:
         :return:
         """
 
-        def shorten_object_type(object_type: str):
-            """
-            (Overkill function) which returns a panos.Object type, after removing the "Group" and "Object" characters
-
-            :param object_type: (str) panos.Object.__class__.__name__
-            :return: (str) the panos.Object type name without "Group" nor "Object"
-            """
-
-            return object_type.replace('Group', '').replace('Object', '')
-
-        def flatten_object(used_object: panos.objects, object_location: str, usage_base: str,
+        def flatten_object_recurser(used_object: panos.objects, object_location: str, usage_base: str,
                            referencer_type: str = None, referencer_name: str = None, recursion_level: int = 1,
                            protect_call=False):
             """
@@ -811,7 +812,7 @@ class PaloCleaner:
                 self._console.log(
                         f"[ {usage_base} ] {'*' * recursion_level} Marking {used_object.name!r} ({used_object.__class__.__name__}) as resolved on cache",
                         style="green", level=2)
-                resolved_cache[shorten_object_type(used_object.__class__.__name__)].append(
+                resolved_cache[self.shorten_object_type(used_object.__class__.__name__)].append(
                     used_object.name)
 
                 # adding the resolved (used_object, object_location) itself to the obj_set list
@@ -851,7 +852,7 @@ class PaloCleaner:
                             # used_object.name = the name of the object where the member has been found (= the group name, actually)
                             # recursion_level = the current recursion_level + 1
 
-                            obj_set += flatten_object(
+                            obj_set += flatten_object_recurser(
                                 *self.get_relative_object_location(group_member,usage_base),
                                 usage_base,
                                 used_object.__class__.__name__,
@@ -863,7 +864,7 @@ class PaloCleaner:
                         self._console.log(
                                 f"[ {usage_base} ] {'*' * recursion_level} AddressGroup {used_object.name!r} location ({object_location}) is different than referencer location ({usage_base}). Protecting group at its location level",
                                 style="red", level=2)
-                        obj_set += flatten_object(used_object, object_location, object_location, referencer_type,
+                        obj_set += flatten_object_recurser(used_object, object_location, object_location, referencer_type,
                                                   referencer_name, recursion_level, protect_call=True)
 
 
@@ -905,7 +906,7 @@ class PaloCleaner:
                             # used_object.name = the name of the object where the member has been found (= the group name, actually)
                             # recursion_level = the current recursion_level + 1
 
-                            obj_set += flatten_object(
+                            obj_set += flatten_object_recurser(
                                 referenced_object,
                                 referenced_object_location,
                                 usage_base,
@@ -935,7 +936,7 @@ class PaloCleaner:
                         if group_member not in resolved_cache['Service'] or protect_call:
                             self._console.log(
                                     f"[ {usage_base} ] {'*' * recursion_level} Found group member of ServiceGroup {used_object.name} : {group_member}", level=2)
-                            obj_set += flatten_object(
+                            obj_set += flatten_object_recurser(
                                 *self.get_relative_object_location(group_member, usage_base, obj_type="Service"),
                                 usage_base,
                                 used_object.__class__.__name__,
@@ -962,7 +963,7 @@ class PaloCleaner:
                                 # used_object.name = the name of the object where the member has been found (= the group name, actually)
                                 # recursion_level = the current recursion_level (not incremented)
 
-                                obj_set += flatten_object(
+                                obj_set += flatten_object_recurser(
                                     *self.get_relative_object_location(tag, object_location, obj_type="Tag"),
                                     usage_base,
                                     used_object.__class__.__name__,
@@ -971,6 +972,26 @@ class PaloCleaner:
 
             # return the populated obj_set (when fully flattened)
             return obj_set
+
+        if not resolved_cache:
+            resolved_cache = dict({'Address': list(), 'Service': list(), 'Tag': list()})
+
+        return flatten_object_recurser(used_object, object_location, usage_base,
+                           referencer_type, referencer_name)
+
+
+    def fetch_used_obj_set(self, location_name, progress, task):
+        """
+        This function generates a "set" of used objects of each type (Address, AddressGroup, Tag, Service, ServiceGroup...)
+        at each requested location.
+        This set is a set of tuples of (panos.Object, location (str))
+        Group objects are explored (recursively) to find all members, which are of course also considered as used.
+
+        :param location_name: (str) The location name where to start used objects exploration
+        :param progress: (rich.Progress) The rich Progress object to update during progression
+        :param task: (rich.Task) The rich Task object to update during progression
+        :return:
+        """
 
         # Initialized the location obj set list
         location_obj_set = list()
@@ -1024,11 +1045,12 @@ class PaloCleaner:
                             # r.name = the rule name
 
                             location_obj_set += (
-                                flattened := flatten_object(
+                                flattened := self.flatten_object(
                                     *self.get_relative_object_location(obj, location_name, obj_type),
                                     location_name,
                                     r.__class__.__name__,
-                                    r.name
+                                    r.name,
+                                    resolved_cache
                                 )
                             )
 
@@ -2300,6 +2322,10 @@ class PaloCleaner:
             x: {'removed': 0, 'replaced': 0} for x in self._replacements.get(location_name, list())
         }
 
+        # Cache used for flatten objects when using tags protection
+        # TODO : better comments
+        resolved_cache = dict({'Address': list(), 'Service': list(), 'Tag': list()})
+
         optimized_only = True if (self._unused_only is not None and len(self._unused_only) > 0 and location_name not in self._unused_only) else False
 
         # removing replaced objects from used_objects_set for current location_name
@@ -2311,10 +2337,9 @@ class PaloCleaner:
                 if not infos['blocked']:
                     try:
                         # For the current replacement, remove the original object from the _used_objects_set for the
-                        # current location (if not using --protect-replacement-objects with the --unused-only argument),
+                        # current location (if not using the --unused-only argument),
                         # and replace it with the replacement object
                         if self._unused_only is None:
-                        #if self._unused_only is None or self._protect_potential_replacements:
                             self._used_objects_sets[location_name].remove(infos['source'])
                         if self._unused_only is None or self._protect_potential_replacements:
                             self._used_objects_sets[location_name].add(infos['replacement'])
@@ -2361,12 +2386,21 @@ class PaloCleaner:
                                 if o.tag:
                                     if set(o.tag).intersection(self._protect_tags) or o.name in indirect_protect[obj_type]:
                                         # protecting the other tags used on the protected object from being deleted later
-                                        self._console.log(f"[{location_name}] Object {o.name} is protected by tag(s) {set(o.tag).intersection(self._protect_tags)}. Extending protected tags with {o.tag}")
+                                        # this is done for all type of objects (Service, Address, ServiceGroup, AddressGroup)
                                         indirect_protect["Tag"].update(o.tag)
-                                        # in case of a protected group, protecting the members from being deleted later
+
+                                        # in case of a protected group, protecting the members from being deleted later (+ all associated objects, like tags)
+                                        # this is done only for static groups, using the flatten_objects method
+                                        # dynamic groups members are not protected (except if they have a --protect-tags matching tag)
                                         if "Group" in obj_instance.__name__:
-                                            self._console.log(f"[{location_name}] Object {o.name} has static group members. Extending protected names with {o.static_value}")
-                                            indirect_protect[obj_type].update(o.static_value)
+                                            if o.static_value:
+                                                self._console.log(f"[ {location_name} ] Object {o.name} ({obj_instance.__name__}) has static members. Flattening to protect all linked objects")
+                                                linked_objects = self.flatten_object(o, location_name, location_name, resolved_cache=resolved_cache)
+
+                                                for (o, o_location) in linked_objects:
+                                                    shorten_type = self.shorten_object_type(o.__class__.__name__)
+                                                    self._console.log(f"[ {o_location} ] Protecting object {o.name} ({o.__class__.__name__} / {shorten_type})")
+                                                    indirect_protect[shorten_type].add(o.name)
                                         continue
                             except AttributeError as e:
                                 pass
