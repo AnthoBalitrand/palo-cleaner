@@ -43,7 +43,7 @@ def tag_counter(obj: (panos.objects.PanObject, str)) -> int:
     if not getattr(obj[0], 'tag', None):
         return 0
     else:
-        return len(obj.tag)
+        return len(obj[0].tag)
 
 
 def shorten_object_type(object_type: str) -> str:

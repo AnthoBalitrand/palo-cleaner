@@ -28,6 +28,7 @@ from ctypes import c_int32
 
 # TODO : when using bulk-actions, make sure that tag-protected objects are not deleted (can be added to device-group for deletion before this check !)
 # TODO : block bulk operations depending of Panorama / PAN-OS version !!!
+# TODO : check if replace in rules behavior is the same than replace in groups (when using bulk actions) : merge instead to update ? 
 
 
 class PaloCleaner:
@@ -38,24 +39,27 @@ class PaloCleaner:
         :param report_folder: (string) The path to the folder where to store the operation report
         :param kwargs: (dict) Dict of arguments provided by argparse
         """
-        self._panorama_url = kwargs['panorama_url']
-        self._panorama_user = kwargs['api_user']
-        self._panorama_password = kwargs['api_password']
-        # Remove api_password from args to avoid it to be printed later (startup arguments printed in log file)
+        self._panorama_url = kwargs['panorama_url']             # the target Panorama URL
+        self._panorama_user = kwargs['api_user']                # the XML API user for interacting with Panorama
+        self._panorama_password = kwargs['api_password']        # the associated XML API password
+
+        # Remove api_password from args to avoid it to be printed later (startup arguments are printed in log file)
         kwargs['api_password'] = None
-        self._dg_filter = kwargs['device_groups']
-        self._protect_tags = kwargs['protect_tags'] if kwargs['protect_tags'] else list()
-        self._analysis_perimeter = None
-        self._depthed_tree = dict({0: ['shared']})
-        self._apply_cleaning = kwargs['apply_cleaning']
-        self._tiebreak_tag = kwargs['tiebreak_tag']
-        self._tiebreak_tag_set = set(self._tiebreak_tag) if self._tiebreak_tag else set()
-        self._apply_tiebreak_tag = kwargs['apply_tiebreak_tag']
-        self._no_report = kwargs['no_report']
-        self._split_report = kwargs['split_report']
-        self._favorise_tagged_objects = kwargs['favorise_tagged_objects']
-        self._nb_thread = kwargs['number_of_threads']
-        self._unused_only = kwargs['unused_only']
+
+        self._dg_filter = kwargs['device_groups']               # list of device-groups to be included in the operation
+        self._protect_tags = kwargs['protect_tags'] if kwargs['protect_tags'] else list()   # list of tags for which associated objects need to be preserverd
+        self._analysis_perimeter = None                         # initialized in the get_pano_dg_hierarchy() function. Contains a dict with fully, direct and indirect included device-groups 
+        self._depthed_tree = dict({0: ['shared']})              # initialized in the get_pano_dg_hierarchy() function. Contains a dict representing the DG hierarchy depth level (key is the depth level, associated with the list of DG at this level)
+        self._reversed_tree = dict()                            # initialized in the get_pano_dg_hierarchy() function. Each key (device group name) contains the list of names of the child device groups 
+        self._apply_cleaning = kwargs['apply_cleaning']         # boolean, indicating if this is just a dry-run or a real cleaning operation
+        self._tiebreak_tag = kwargs['tiebreak_tag']             # the tiebreak tag name to be applied on tiebreaked objects 
+        self._tiebreak_tag_set = set(self._tiebreak_tag) if self._tiebreak_tag else set() # the tiebreak tag in a set() instance, used later in this form 
+        self._apply_tiebreak_tag = kwargs['apply_tiebreak_tag'] # boolean, indicating if the tiebreak tag needs to be applied to tiebreaked objects or not 
+        self._no_report = kwargs['no_report']                   # boolean, indicating if the generation of a report should be avoided or not 
+        self._split_report = kwargs['split_report']             # boolean, indicating if we need to generate a distinct report for each device-group 
+        self._favorise_tagged_objects = kwargs['favorise_tagged_objects']   # boolean, indicated if tagged objects should be favorised by the tiebreak logic 
+        self._nb_thread = kwargs['number_of_threads']           # number of threads to generate when using multithread mode 
+        self._unused_only = kwargs['unused_only']               # list of device-groups on which we want to delete unused only objects. If this argument has been provided at startup without specifying device-groups, it will be an empty list. If not provided at all, will be None 
         if self._nb_thread is not None:
             if self._nb_thread == 0: # No value provided, we take the number of system's CPU
                 try:
@@ -66,34 +70,34 @@ class PaloCleaner:
             elif self._nb_thread < 0:
                 self._console.log(f"Error: number of threads must be positive", style="red")   
                 exit()
-        self._report_folder = report_folder
-        self._panorama = None
-        self._objects = dict()
-        self._addr_namesearch = dict()
-        self._tag_namesearch = dict()
-        self._addr_ipsearch = dict()
-        self._tag_objsearch = dict()
-        self._service_namesearch = dict()
-        self._service_valuesearch = dict()
-        self._used_objects_sets = dict()
-        self._rulebases = dict()
-        self._dg_hierarchy = dict()
-        self._removable_objects = list()
-        self._tag_referenced = set()
-        self._verbosity = int(kwargs['verbosity'])
-        self._max_change_timestamp = int(time.time()) - int(kwargs['max_days_since_change']) * 86400 if kwargs['max_days_since_change'] else 0
-        self._max_hit_timestamp = int(time.time()) - int(kwargs['max_days_since_hit']) * 86400 if kwargs['max_days_since_hit'] else 0
-        self._need_opstate = self._max_change_timestamp or self._max_hit_timestamp
-        self._ignore_opstate_ip = [] if kwargs['ignore_appliances_opstate'] is None else kwargs['ignore_appliances_opstate']
-        self._console = None
-        self._console_context = None
-        self.init_console()
-        self._replacements = dict()
-        self._panorama_devices = dict()
-        self._hitcounts = dict()
-        self._cleaning_counts = dict()
-        self._protect_potential_replacements = kwargs['protect_potential_replacements']
-        self._bulk_operations = kwargs['bulk_operations']
+        self._report_folder = report_folder                     # The path to the folder were the report will eventually be stored (if generated)
+        self._panorama = None                                   # Will hold the panos.Panorama object 
+        self._objects = dict()                                  # Huge dict datastructure which will hold all of the panos.objects instances by device-group and type 
+        self._addr_namesearch = dict()                          # Search datastructure which permits to find a panos.objects.AddressObject or panos.objects.AddressGroup by its name (per device-group) 
+        self._tag_namesearch = dict()                           # Search datastructure which permits to find a panos.objects.Tag by its name (per device-group) 
+        self._addr_ipsearch = dict()                            # Search datastructure which permits to find all panos.objects.AddressObject matching a given IP address (per device-group)
+        self._tag_objsearch = dict()                            # Search datastructure which permits to find all panos.objects.AddressObject and panos.objects.AddressGroup by their associated tags (per device-group)
+        self._service_namesearch = dict()                       # Search datastructure which permits to find all panos.objects.ServiceObject and panos.objects.ServiceGroup by its name (per device-group)
+        self._service_valuesearch = dict()                      # Search datastructure which permits to find all panos.objects.ServiceObject matching a value (generated by PaloCleanerTools.stringify_service) (per device-group)
+        self._used_objects_sets = dict()                        # Huge dict datastructure which contains, for each device-group, a list of tuples (panos.objects, location) of used objects at this level
+        self._rulebases = dict()                                # Dict datastructure which contains the reference to the different panos.policies instances (per device-group) 
+        self._dg_hierarchy = dict()                             # initialized in the get_pano_dg_hierarchy() function. Contains a hierarchy.HierarchyDG object representing the device-groups hierarchy at each level
+        self._tag_referenced = set()                            # Contains a set of tuples (panos.objects, location) listing all tag-referenced objects (used on DAG). Used for replacement of such objects (duplicating tags to the replacement object)
+        self._verbosity = int(kwargs['verbosity'])              # Verbosity level of the rich console logs 
+        self._max_change_timestamp = int(time.time()) - int(kwargs['max_days_since_change']) * 86400 if kwargs['max_days_since_change'] else 0      # Contains the timestamp after which updated rules cannot be cleaned (when specifying it) 
+        self._max_hit_timestamp = int(time.time()) - int(kwargs['max_days_since_hit']) * 86400 if kwargs['max_days_since_hit'] else 0               # Contains the timestamp after which hitted rules cannot be cleaned (when specifying it)
+        self._need_opstate = self._max_change_timestamp or self._max_hit_timestamp                                                                  # Boolean, indicating if opstate information will have to be used (using timestamps ?) 
+        self._ignore_opstate_ip = [] if kwargs['ignore_appliances_opstate'] is None else kwargs['ignore_appliances_opstate']                        # List of IP addresses of appliances for which we explicitly don't want to check opstate information
+        self._console = None                                    # Holds the rich.Console object 
+        self._console_context = None                            # Contains the current console context (init, or location). Used in conjunction with self._split_report 
+        self.init_console() 
+        self._replacements = dict()                             # Huge dict datastructure containing the replacement info (source / replacement) for each type of object (per device-group) 
+        self._panorama_devices = dict()                         # When using opstate inforation, dict whose key is the serial number and the value is a panos.firewall.Firewall object 
+        self._hitcounts = dict()                                # Dict containing the last_hit_timestamp and rule_modification_timestamp for each rule of each type (per device-group) 
+        self._cleaning_counts = dict()                          # Dict tracking the number of deleted / replaced objects of each type (per device-group)
+        self._protect_potential_replacements = kwargs['protect_potential_replacements']     # boolean, indicating wether potential replacement objects need to be kept (when using unused-only argument) 
+        self._bulk_operations = kwargs['bulk_operations']       # boolean, indicating wether we use bulk XML API requests or not 
+
         signal.signal(signal.SIGINT, self.signal_handler)
         self._console.log(f"STARTUP ARGUMENTS : {kwargs}")
 
@@ -321,10 +325,11 @@ class PaloCleaner:
                     Panel("[bold green] Optimizing objects duplicates",
                           style="green"),
                     justify="left")
+                # starting objects optimization from the most "depth" device-groups, up to "shared"
                 for depth, contexts in sorted(self._depthed_tree.items(), key=lambda x: x[0], reverse=True):
                     for context_name in contexts:
                         if context_name in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']:
-
+                            # initialize the console with a new context name (used when splitting reports)
                             self.init_console(context_name)
                             self._console.print(Panel(f"  [bold magenta]{context_name}  ", style="magenta"),
                                               justify="left")
@@ -336,6 +341,9 @@ class PaloCleaner:
                             if context_name not in ['shared', 'predefined']:
                                 self._panorama.add(self._objects[context_name]['context'])
 
+                            # if unused-only has not been specified (normal use-case), or if it has been used with protect-potential-replacements 
+                            # we need to start an objects optimization for the current context 
+                            # (note that the tiebreak tag will be added to choosen objects at this step) 
                             if self._unused_only is None or self._protect_potential_replacements:
                                 # OBJECTS OPTIMIZATION
                                 dg_optimize_task = progress.add_task(
@@ -346,6 +354,7 @@ class PaloCleaner:
                                 self._console.log(f"[ {context_name} ] Objects optimization done")
                                 progress.remove_task(dg_optimize_task)
 
+                            # if we have not specified an unused-only cleaning operation, we need to replace the non-optimal objects by their processed replacements (in groups, rules, etc)
                             if self._unused_only is None:
                                 # OBJECTS REPLACEMENT IN GROUPS
                                 dg_replaceingroups_task = progress.add_task(
@@ -445,6 +454,11 @@ class PaloCleaner:
                                 self._dg_hierarchy[k].add_parent(self._dg_hierarchy[v])
                             else:
                                 self._dg_hierarchy[k].add_parent(shared_dg)
+                        if v is None:
+                            v = 'shared'
+                        self._reversed_tree[v] = self._reversed_tree[v] + [k] if v in self._reversed_tree.keys() else [k]
+                        if k not in self._reversed_tree.keys():
+                            self._reversed_tree[k] = list()
                 if self._dg_filter:
                     for dg in self._dg_filter:
                         self._dg_hierarchy[dg].set_included(direct=True)
@@ -729,7 +743,7 @@ class PaloCleaner:
                 self._tag_namesearch['shared'][self._tiebreak_tag[0]] = tiebreak_tag
                 if self._apply_cleaning:
                     self._panorama.add(tiebreak_tag).create()
-                self._panorama.remove(tiebreak_tag)
+                    self._panorama.remove(tiebreak_tag)
 
     def get_relative_object_location(self, obj_name, reference_location, obj_type="Address"):
         """
@@ -1798,13 +1812,13 @@ class PaloCleaner:
                             # if the tag does not exists as a "shared" object
                             # TODO : test replaced line
                             if not tag in self._tag_namesearch['shared']:
-                            #if not [x for x in self._objects['shared']['Tag'] if x.name == tag]:
                                 # find the original tag (on its actual location)
                                 tag_instance, tag_location = self.get_relative_object_location(tag, location_name,
                                                                                                obj_type="tag")
                                 self._console.log(
                                     f"[ Panorama ] [Thread-{thread_id}] Creating tag {tag!r} (copy from {tag_location}), to be used on ({replacement_obj_instance.about()['name']} at location {replacement_obj_location})")
                                 # if the cleaning application has been requested, create the new tag on Panorama
+                                # (this operation is never done using bulk XML API calls)
                                 if self._apply_cleaning:
                                     try:
                                         self._panorama.add(tag_instance).create()
@@ -1857,6 +1871,7 @@ class PaloCleaner:
                             matched = source_obj_instance.about()['name'] in checked_object.static_value
                             if matched and source_obj_instance.about()['name'] != replacement_obj_instance.about()['name']:
                                 checked_object.static_value.remove(source_obj_instance.about()['name'])
+                                # acquiring lock to avoid multiple threads to try to change a static group members list at the same time 
                                 if self._nb_thread: lock.acquire()
                                 if not replacement_obj_instance.about()['name'] in checked_object.static_value:
                                     checked_object.static_value.append(replacement_obj_instance.about()['name'])
@@ -2010,13 +2025,14 @@ class PaloCleaner:
         jobs_queue.join()
 
         # applying bulk operations in the pool
+        # THIS SHOULD NEVER BE USED AS GROUP UPDATES ARE NOT DONE THROUGH BULK XML CALLS 
         if self._bulk_operations:
             # extract objects types in DG childrens
             child_obj_types = {type(x) for x in self._objects[location_name]['context'].children if "Group" in str(type(x))}
             for curr_type in child_obj_types:
                 bulk_targets = [x for x in self._objects[location_name]['context'].children if type(x) is curr_type]
                 self._console.log(
-                    f"[ {location_name} ] Applying bulk operation for {bulk_targets[0].__class__.__name__} updates ({len(bulk_targets)} objects targeted)")
+                    f"[ {location_name} ] Applying bulk operation for {bulk_targets[0].__class__.__name__} updates ({len(bulk_targets)} objects targeted). THIS SHOULD NOT BE USED !!!", style="red")
                 if self._apply_cleaning:
                     try:
                         bulk_targets[0].apply_similar()
@@ -2439,6 +2455,8 @@ class PaloCleaner:
         # TODO : better comments
         resolved_cache = dict({'Address': list(), 'Service': list(), 'Tag': list()})
 
+        # optimized_only set to True if we are on unused-only mode with a list of device-groups specified, and the current location being cleaned is not in this list
+        # (which means that we don't want to delete anything at this level, but we need to make sure that used objects at this level will be protected upward, if the upward device-group is on the list)
         optimized_only = True if (self._unused_only is not None and len(self._unused_only) > 0 and location_name not in self._unused_only) else False
 
         # removing replaced objects from used_objects_set for current location_name
@@ -2507,7 +2525,6 @@ class PaloCleaner:
                     first_to_be_deleted = None
 
                     for o in self._objects[location_name][obj_type]:
-                        #if o.__class__.__name__ is obj_instance.__name__:
                         if type(o) is obj_instance:
                             self._console.log(f"[ {location_name} ] Checking tag protection of object {o.name} ({obj_instance.__name__})", level=2)
                             try:
