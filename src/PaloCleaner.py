@@ -2500,18 +2500,113 @@ class PaloCleaner:
         upward_dg = self._dg_hierarchy[location_name].parent
         upward_dg_name = "shared" if not upward_dg else upward_dg.name
         self._console.log(f"[ {location_name} ] Found parent DG is {upward_dg_name}", level=3)
-        self._used_objects_sets[upward_dg_name] = self._used_objects_sets[upward_dg_name].union(self._used_objects_sets[location_name])
+
+        # improvement : try to replicate upward only objects not attached to the current device-group (useless) 
+        #self._used_objects_sets[upward_dg_name] = self._used_objects_sets[upward_dg_name].union(self._used_objects_sets[location_name])
+        self._used_objects_sets[upward_dg_name] = self._used_objects_sets[upward_dg_name].union([x for x in self._used_objects_sets[location_name] if not x[1]==location_name])
 
         if optimized_only:
             return None
+
+        @self.multithread_wrapper
+        def delete_local_objects_mthread(jobs_queue: Queue, dg: DeviceGroup, lock=None, thread_id=0):
+            while True:
+                if jobs_queue.empty():
+                    break
+                try:
+                    obj = jobs_queue.get()
+                    shortened_obj_type = PaloCleanerTools.shorten_object_type(obj.__class__.__name__)
+                    self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Checking tag protection of object {obj.name} ({obj.__class__.__name__})", level=2)
+                    try:
+                        if obj.tag:
+                            self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Object has tags : {obj.tag}", level=2)
+                            if set(obj.tag).intersection(self._protect_tags) or obj.name in indirect_protect[shortened_obj_type]:
+                                indirect_protect["Tag"].update(obj.tag)
+
+                                if "Group" in obj.__class__.__name__:
+                                    if obj.static_value:
+                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Object {obj.name} ({obj.__class__.__name__}) has static members. Flattening to protect all linked objects")
+                                        linked_objects = self.flatten_object(obj, location_name, location_name, resolved_cache=resolved_cache)
+                                        for (o, o_location) in linked_objects:
+                                            self._console.log(f"[ {o_location} ] [Thread-{thread_id}] Protecting object {o.name} ({o.__class__.__name__} / {shortened_obj_type})", level=2)
+                                            indirect_protect[shortened_obj_type].add(o.name)
+                                continue
+                    except AttributeError as e:
+                        pass
+                    except Exception as e:
+                        self._console.log(f"[Thread-{thread_id}] UNKNOWN EXCEPTION : {e}", style="red")
+
+                    if obj.name in indirect_protect[shortened_obj_type]:
+                        continue
+
+                    if self._apply_cleaning and not (obj, location_name) in self._used_objects_sets[location_name]:
+                        delete_ok = False
+                        while not delete_ok:
+                            try:
+                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Trying to delete object {obj.name} ({obj.__class__.__name__})")
+                                dg.add(obj)
+                                obj.delete()
+                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Object {obj.name} ({obj.__class__.__name__}) has been successfuly deleted ")
+                                self._cleaning_counts[location_name][shortened_obj_type]['removed'] += 1
+                                delete_ok = True
+                            except panos.errors.PanDeviceXapiError as e:
+                                dependencies, all_matched = parse_PanDeviceXapiError_references(e.message)
+                                if not all_matched:
+                                    self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR : It seems that object {obj.name} ({obj.__class__.__name__}) is used somewhere in the configuration, on device-group {location_name}. It will not be deleted. Please check manually")
+                                    self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR content : {e.message}")
+                                    delete_ok = True
+                                    continue
+                                else:
+                                    # The following should never be matched, as we are not supposed to try to delete
+                                    # an object which is still used on a rule at this time of the process
+                                    # Keeping it for security purposes
+
+                                    # first catching error where Panorama refuses to delete an object while it does not returns any valid dependency
+                                    if sum(len(dep) for dep_type, dep in dependencies.items()) == 0:
+                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR : It seems that object {obj.name} ({obj.__class__.__name__}) has invalid dependencies. Please try to fix it manually !!!")
+                                        delete_ok = True
+
+                                    # then proceed with actions for the different types of dependencies
+                                    for rule_dependency in dependencies["Rules"]:
+                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR : It seems that object {obj.name} ({obj.__class__.__name__}) is still used on the following rule : {rule_dependency['rule_location']} / {rule_dependency['rulename']}. It will not be deleted. Please check manually")
+                                        delete_ok = True
+                                    if delete_ok:
+                                        continue
+
+                                    for group_dependency in dependencies["AddressGroups"]:
+                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Group {obj.name} ({obj.__class__.__name__}) is still used on another AddressGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
+                                        referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'])
+                                        referencer_group.static_value.remove(obj.name)
+                                        referencer_group.apply()
+
+                                    for group_dependency in dependencies["ServiceGroups"]:
+                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Group {obj.name} ({obj.__class__.__name__}) is still used on another ServiceGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
+                                        referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'], obj_type="Service")
+                                        referencer_group.value.remove(obj.name)
+                                        referencer_group.apply()
+                            except Exception as e:
+                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR when trying to delete object {obj.name} ({obj.__class__.__name__}) : {e}")
+
+                    elif not (obj, location_name) in self._used_objects_sets[location_name]:
+                        self._console.log(
+                            f"[ {location_name} ] [Thread-{thread_id}] Object {obj.name} ({obj.__class__.__name__}) can be deleted")
+                        self._cleaning_counts[location_name][shortened_obj_type]['removed'] += 1
+                except Exception as e:
+                    self._console.log(
+                        f"[ {location_name} ] [Thread-{thread_id}] Unknown error on delete_local_objects() : {e}"
+                    )
+                finally:
+                    jobs_queue.task_done()
+                    if self._nb_thread and lock.locked():
+                        lock.release()
+
 
         # Iterating over each object type / object for the current location, and check if each object is member
         # (or still member, as the replaced ones have been suppressed) of the _used_objects_set for the same location
         # If they are not, they can be deleted
         # We start by the groups (removing all members before deleting the group, to avoid inter-dependency between groups)
         # Then we delete AddressObjects and ServiceObjects, then Tags
-        @self.multithread_wrapper
-        def delete_local_objects(jobs_queue: Queue, dg: DeviceGroup, lock=None, thread_id=0):
+        def delete_local_objects_bulk(jobs_queue: Queue, dg: DeviceGroup, lock=None, thread_id=0):
 
             while True:
                 if jobs_queue.empty():
@@ -2557,63 +2652,15 @@ class PaloCleaner:
                                 continue
 
                             if self._apply_cleaning and not (o, location_name) in self._used_objects_sets[location_name]:
-                                if not self._bulk_operations:
-                                    delete_ok = False
-                                    while not delete_ok:
-                                        try:
-                                            self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Trying to delete object {o.name} ({o.__class__.__name__})")
-                                            dg.add(o)
-                                            o.delete()
-                                            self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Object {o.name} ({o.__class__.__name__}) has been successfuly deleted ", style="red")
-                                            self._cleaning_counts[location_name][obj_type]['removed'] += 1
-                                            delete_ok = True
-                                        except panos.errors.PanDeviceXapiError as e:
-                                            dependencies, all_matched = parse_PanDeviceXapiError_references(e.message)
-                                            if not all_matched:
-                                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR : It seems that object {o.name} ({o.__class__.__name__}) is used somewhere in the configuration, on device-group {location_name}. It will not be deleted. Please check manually")
-                                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR content : {e.message}")
-                                                delete_ok = True
-                                                continue
-                                            else:
-                                                # The following should never be matched, as we are not supposed to try to delete
-                                                # an object which is still used on a rule at this time of the process
-                                                # Keeping it for security purposes
-
-                                                # first catching error where Panorama refuses to delete an object while it does not returns any valid dependency
-                                                if sum(len(dep) for dep_type, dep in dependencies.items()) == 0:
-                                                    self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR : It seems that object {o.name} ({o.__class__.__name__}) has invalid dependencies. Please try to fix it manually !!!")
-                                                    delete_ok = True
-
-                                                # then proceed with actions for the different types of dependencies
-                                                for rule_dependency in dependencies["Rules"]:
-                                                    self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR : It seems that object {o.name} ({o.__class__.__name__}) is still used on the following rule : {rule_dependency['rule_location']} / {rule_dependency['rulename']}. It will not be deleted. Please check manually")
-                                                    delete_ok = True
-                                                if delete_ok:
-                                                    continue
-
-                                                for group_dependency in dependencies["AddressGroups"]:
-                                                    self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Group {o.name} ({o.__class__.__name__}) is still used on another AddressGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
-                                                    referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'])
-                                                    referencer_group.static_value.remove(o.name)
-                                                    referencer_group.apply()
-
-                                                for group_dependency in dependencies["ServiceGroups"]:
-                                                    self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Group {o.name} ({o.__class__.__name__}) is still used on another ServiceGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
-                                                    referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'], obj_type="Service")
-                                                    referencer_group.value.remove(o.name)
-                                                    referencer_group.apply()
-                                        except Exception as e:
-                                            self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR when trying to delete object {o.name} ({o.__class__.__name__})")
-                                else:
-                                    dg.add(o)
-                                    if not first_to_be_deleted:
-                                        first_to_be_deleted = o
+                                dg.add(o)
+                                if not first_to_be_deleted:
+                                    first_to_be_deleted = o
                             elif not (o, location_name) in self._used_objects_sets[location_name]:
                                 self._console.log(
-                                    f"[ {location_name} ] [Thread-{thread_id}] Object {o.name} ({o.__class__.__name__}) can be deleted", style="red")
+                                    f"[ {location_name} ] [Thread-{thread_id}] Object {o.name} ({o.__class__.__name__}) can be deleted")
                                 self._cleaning_counts[location_name][obj_type]['removed'] += 1
 
-                    if self._apply_cleaning and self._bulk_operations and first_to_be_deleted:
+                    if self._apply_cleaning and first_to_be_deleted:
                         try:
                             # if objects to be deleted are static groups, first empty them to avoid deletion issues because of circular references
                             # this cannot be done as a bulk action as apply_similar would delete all other groups, and create_similar would not to anything (merging members)
@@ -2634,30 +2681,39 @@ class PaloCleaner:
                     )
                 finally:
                     jobs_queue.task_done()
-                    if self._nb_thread and lock.locked():
-                        lock.release()
 
                     self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Cleaning done for object type {obj_instance.__name__}")
 
+        # Queue to which the jobs will be stored, waiting to be executed
+        # It will be used differently, based if we are in single / multithreading mode (each job will consist in deleting a single object)
+        # while if in bulk delete mode, each job will consist in deleting all objects of a given type 
         jobs_queue = Queue()
 
         # dict used to store indirectly protected object (because of protect-tags parameter used at startup)
         indirect_protect = dict()
+        indirect_protect['Tag'] = set()
+        indirect_protect['Tag'].update(self._protect_tags)
+        indirect_protect['Tag'].update(self._tiebreak_tag)
 
-        # for each object item of the current location
-        for obj_item in [v for k, v in sorted(cleaning_order.items())]:
-            jobs_queue.put(obj_item)
-            if not indirect_protect.get(list(obj_item.keys())[0]):
-                indirect_protect[list(obj_item.keys())[0]] = set()
-
-        indirect_protect["Tag"].update(self._protect_tags)
-        indirect_protect["Tag"].update(self._tiebreak_tag)
-
-        # finding the current location device-group object as it avoids finding it multiple times on delete_local_objects()
         local_dg = self._objects[location_name]['context']
 
-        delete_local_objects(jobs_queue, local_dg) # starting the cleaning workers (if threaded) or method (if non-threaded)
-        jobs_queue.join()
+        if self._bulk_operations:
+            for obj_item in [v for k, v in sorted(cleaning_order.items())]:
+                jobs_queue.put(obj_item)
+                if not indirect_protect.get(list(obj_item.keys())[0]):
+                    indirect_protect[list(obj_item.keys())[0]] = set()
+            delete_local_objects_bulk(jobs_queue, local_dg)
+            jobs_queue.join()
+        else:
+            for obj_item in [v for k, v in sorted(cleaning_order.items())]:
+                for obj in self._objects[location_name][list(obj_item.keys())[0]]:
+                    if type(obj) is obj_item[list(obj_item.keys())[0]]:
+                        jobs_queue.put(obj)
+                if not indirect_protect.get(list(obj_item.keys())[0]):
+                    indirect_protect[list(obj_item.keys())[0]] = set()
+                delete_local_objects_mthread(jobs_queue, local_dg)
+                jobs_queue.join()
+                self._console.log(f"[ {location_name} ] Queue joined before moving to next object type", level=2)
 
         #if local_dg != self._panorama:
         #    self._panorama.remove(local_dg)

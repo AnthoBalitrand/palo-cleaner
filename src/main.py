@@ -112,6 +112,7 @@ def parse_cli_args():
 
     parser.add_argument(
         "--ignore-appliances-opstate",
+        nargs = "+",
         action = "extend",
         type = str,
         help = "List of appliances IP address for which opstate needs to be ignored (will not connect to get hitcounts)"
@@ -162,6 +163,10 @@ def main():
 
     if start_cli_args.protect_potential_replacements and start_cli_args.unused_only is None:
         print("\n ERROR - --protect-potential-replacements has been called without --unused-only \n")
+        exit(0)
+
+    if start_cli_args.bulk_operations and start_cli_args.number_of_threads is not None:
+        print("\n Error - --bulk-operations cannot be used in conjunction with --multithread \n")
         exit(0)
 
     # create the report directory if requested
