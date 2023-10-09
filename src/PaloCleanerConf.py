@@ -8,7 +8,7 @@ repl_map = {
         "Tag": [["tag"]],
     },
     NatRule: {
-        "Address": [["source"], ["destination"], ["source_translation_translated_addresses"], "destination_translated_address"],
+        "Address": [["source"], ["destination"], "source_translation_ip_address", ["source_translation_translated_addresses"], "source_translation_static_translated_address", "destination_translated_address"],
         "Service": ["service"],
         "Tag": [["tag"]],
     },

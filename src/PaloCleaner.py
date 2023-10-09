@@ -343,7 +343,7 @@ class PaloCleaner:
 
                             # if unused-only has not been specified (normal use-case), or if it has been used with protect-potential-replacements 
                             # we need to start an objects optimization for the current context 
-                            # (note that the tiebreak tag will be added to choosen objects at this step) 
+                            # (note that the tiebreak tag will be added to choosen objects at this step)
                             if self._unused_only is None or self._protect_potential_replacements:
                                 # OBJECTS OPTIMIZATION
                                 dg_optimize_task = progress.add_task(
@@ -1107,6 +1107,9 @@ class PaloCleaner:
                 continue
             # for each rule in the current rulebase
             for r in v:
+                backup_verb = self._verbosity
+                if r.name == "Rule 7":
+                    self._verbosity = 2
                 self._console.log(f"[ {location_name} ] Processing used objects on rule {r.name!r}", level=2)
 
                 # Use the repl_map descriptor to find the different types of objects which can be found on the current
@@ -1204,6 +1207,8 @@ class PaloCleaner:
                                                   style="yellow", level=3)
                 # update progress bar for each processed rule
                 progress.update(task, advance=1)
+                if self._verbosity != backup_verb:
+                    self._verbosity = backup_verb
 
         # add the processed object set for the current location to the global _used_objects_set dict
         self._used_objects_sets[location_name] = set(location_obj_set)
@@ -2484,7 +2489,7 @@ class PaloCleaner:
                         self._console.log(f"[ {location_name} ] Removing unprotected object {name} (location {infos['source'][1]}) from used objects set", level=2)
                         # If the name of the current replacement object is different than the replacement one, count it
                         # as a replacement on the _cleaning_counts tracker
-                        if not optimized_only and infos['source'][1] == location_name and infos['source'][0].name != infos['replacement'][0].name:
+                        if not optimized_only and not self._unused_only and infos['source'][1] == location_name and infos['source'][0].name != infos['replacement'][0].name:
                             self._cleaning_counts[location_name][obj_type]['replaced'] += 1
                     # This exception should never be raised but protects the execution
                     except ValueError:
