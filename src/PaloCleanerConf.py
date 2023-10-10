@@ -1,5 +1,12 @@
 from panos.objects import AddressObject, AddressGroup, Tag, ServiceObject, ServiceGroup
-from panos.policies import SecurityRule, NatRule, AuthenticationRule
+from panos.policies import SecurityRule, NatRule, AuthenticationRule, PolicyBasedForwarding
+
+# The structure below identifies the attributes and their format used on each type of rules
+# it permits to identify which "referenced object type" can be found on each rule attribute,
+# and with which format (string or list)
+
+# For PolicyBasedForwarding rules, type can vary. The ones which can be either string or list are referenced as list
+# and mismatching situations are handled directly on the PaloCleaner code
 
 repl_map = {
     SecurityRule: {
@@ -8,7 +15,16 @@ repl_map = {
         "Tag": [["tag"]],
     },
     NatRule: {
-        "Address": [["source"], ["destination"], "source_translation_ip_address", ["source_translation_translated_addresses"], "source_translation_static_translated_address", "destination_translated_address"],
+        "Address": [
+            ["source"],
+            ["destination"],
+            "source_translation_ip_address",
+            ["source_translation_translated_addresses"],
+            "source_translation_static_translated_address",
+            "destination_translated_address",
+            ["source_translation_fallback_translated_addresses"],
+            "source_translation_fallback_ip_address"
+        ],
         "Service": ["service"],
         "Tag": [["tag"]],
     },
@@ -16,7 +32,16 @@ repl_map = {
         "Address": [["source_addresses"], ["destination_addresses"]],
         "Service": [["service"]],
         "Tag": [["tag"]],
+    },
+    PolicyBasedForwarding: {
+        "Address": [
+            ["source_addresses"],
+            ["destination_addresses"]
+        ],
+        "Service": [["services"]],
+        "Tag": [["tags"]]
     }
+
 }
 
 # Keep your big fingers away than this unless you really know what you are doing

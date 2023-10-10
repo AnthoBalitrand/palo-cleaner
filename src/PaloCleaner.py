@@ -9,7 +9,7 @@ from rich.traceback import install
 import panos.objects
 from panos.panorama import Panorama, DeviceGroup, PanoramaDeviceGroupHierarchy
 from panos.objects import AddressObject, AddressGroup, Tag, ServiceObject, ServiceGroup
-from panos.policies import SecurityRule, PreRulebase, PostRulebase, Rulebase, NatRule, AuthenticationRule
+from panos.policies import SecurityRule, PreRulebase, PostRulebase, Rulebase, NatRule, AuthenticationRule, PolicyBasedForwarding
 from panos.predefined import Predefined
 from panos.errors import PanXapiError
 from panos.firewall import Firewall
@@ -1099,7 +1099,7 @@ class PaloCleaner:
 
         # initializing a list which will create "on-the-fly" created objects for direct IP used in rules
         created_addr_object = list()
-
+        bkp_loglevel = self._verbosity
         # iterates on all rulebases for the concerned location
         for k, v in self._rulebases[location_name].items():
             if k == "context":
@@ -1107,9 +1107,10 @@ class PaloCleaner:
                 continue
             # for each rule in the current rulebase
             for r in v:
-                backup_verb = self._verbosity
-                if r.name == "Rule 7":
-                    self._verbosity = 2
+                if type(r) is PolicyBasedForwarding:
+                    self._verbosity = 3
+                else:
+                    self._verbosity = bkp_loglevel
                 self._console.log(f"[ {location_name} ] Processing used objects on rule {r.name!r}", level=2)
 
                 # Use the repl_map descriptor to find the different types of objects which can be found on the current
@@ -1128,7 +1129,14 @@ class PaloCleaner:
                                 rule_objects[obj_type].append(to_add)
                         # else if the rule field is a list, add this list to the rule_objects dict
                         else:
-                            if (to_add := getattr(r, field[0])):
+                            # if the rule is a PolicyBasedForwarding rule, the object type can vary...
+                            # handling this specific case
+                            if type(r) is PolicyBasedForwarding:
+                                if type(to_add := getattr(r, field[0])) is str:
+                                    rule_objects[obj_type].append(to_add)
+                                elif type(to_add) is list:
+                                    rule_objects[obj_type] += to_add
+                            elif (to_add := getattr(r, field[0])):
                                 rule_objects[obj_type] += to_add
 
                     # for each object (of the current object type) used on the current rule
@@ -1207,9 +1215,7 @@ class PaloCleaner:
                                                   style="yellow", level=3)
                 # update progress bar for each processed rule
                 progress.update(task, advance=1)
-                if self._verbosity != backup_verb:
-                    self._verbosity = backup_verb
-
+        self._verbosity = bkp_loglevel
         # add the processed object set for the current location to the global _used_objects_set dict
         self._used_objects_sets[location_name] = set(location_obj_set)
 
@@ -2147,7 +2153,10 @@ class PaloCleaner:
 
                         # Thanks to the field format obtained from the repl_map descriptor, iterate directly over the
                         # not_null_field list (if it is already a list), or convert it to a list to iterate
-                        field_values = not_null_field if field_type is list else [not_null_field]
+
+                        # modified to use directly the obtained field format instead of relying on the repl_map descriptor information
+                        #field_values = not_null_field if field_type is list else [not_null_field]
+                        field_values = not_null_field if type(not_null_field) is list else [not_null_field]
                         for o in field_values:
                             # Using the Walrus operator again to get the replacement information for the current object
                             # (if there's any)
@@ -2310,7 +2319,10 @@ class PaloCleaner:
                                 if not editable_rule or "noopstate" in r.name:
                                     for obj_type, fields in repl_map[type(r)].items():
                                         for f in fields:
-                                            if (field_values := getattr(r, f[0]) if type(f) is list else [getattr(r, f)]):
+                                            field_values = getattr(r, f[0])
+                                            field_values = [field_values] if type(field_values) is str else field_values
+                                            #if (field_values := getattr(r, f[0]) if type(f) is list else [getattr(r, f)]):
+                                            if field_values:
                                                 for object_name in field_values:
                                                     if object_name in self._replacements[location_name][obj_type]:
                                                         self._replacements[location_name][obj_type][object_name][
