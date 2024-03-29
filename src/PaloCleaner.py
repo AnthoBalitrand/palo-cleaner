@@ -57,7 +57,8 @@ class PaloCleaner:
         self._apply_tiebreak_tag = kwargs['apply_tiebreak_tag'] # boolean, indicating if the tiebreak tag needs to be applied to tiebreaked objects or not 
         self._no_report = kwargs['no_report']                   # boolean, indicating if the generation of a report should be avoided or not 
         self._split_report = kwargs['split_report']             # boolean, indicating if we need to generate a distinct report for each device-group 
-        self._favorise_tagged_objects = kwargs['favorise_tagged_objects']   # boolean, indicated if tagged objects should be favorised by the tiebreak logic 
+        self._favorise_tagged_objects = kwargs['favorise_tagged_objects']   # boolean, indicated if tagged objects should be favorised by the tiebreak logic
+        self._same_name_only = kwargs['same_name_only']         # boolean, indicating if we are running in a mode where we only replace objects existing with same name (and value) upward
         self._nb_thread = kwargs['number_of_threads']           # number of threads to generate when using multithread mode 
         self._unused_only = kwargs['unused_only']               # list of device-groups on which we want to delete unused only objects. If this argument has been provided at startup without specifying device-groups, it will be an empty list. If not provided at all, will be None 
         if self._nb_thread is not None:
@@ -745,7 +746,7 @@ class PaloCleaner:
                     self._panorama.add(tiebreak_tag).create()
                     self._panorama.remove(tiebreak_tag)
 
-    def get_relative_object_location(self, obj_name, reference_location, obj_type="Address"):
+    def get_relative_object_location(self, obj_name, reference_location, obj_type="Address", find_all=False, iterative_call=False):
         """
         Find referenced object by location (permits to get the referenced object on current location if
         existing at this level, or on upper levels of the device-groups hierarchy)
@@ -758,37 +759,45 @@ class PaloCleaner:
         """
 
         # Initialize return variables
+        found_tuples = list()
         found_object = None
-        found_location = None
+
         # For each object at the reference_location level, find any object having the searched name
         if obj_type == "Address":
             found_object = self._addr_namesearch[reference_location].get(obj_name, None)
-            found_location = reference_location
         elif obj_type == "Tag":
             found_object = self._tag_namesearch[reference_location].get(obj_name, None)
-            found_location = reference_location
         elif obj_type == "Service":
             found_object = self._service_namesearch[reference_location].get(obj_name, None)
-            found_location = reference_location
+
+        if found_object:
+            found_tuples.append((found_object, reference_location))
 
         # if no object is found at current reference_location, find the upward device-group on the hierarchy
         # and call the current function recursively with this upward level as reference_location
-        if not found_object and reference_location not in ['shared', 'predefined']:
+        if (not found_tuples or find_all) and reference_location not in ['shared', 'predefined']:
             upward_dg = self._dg_hierarchy[reference_location].parent.name
-            found_object, found_location = self.get_relative_object_location(obj_name, upward_dg, obj_type)
-        elif not found_object and (obj_type == "Service" and reference_location == 'shared'):
+            found_tuples += self.get_relative_object_location(obj_name, upward_dg, obj_type, find_all, iterative_call=True)
+        elif (not found_tuples or find_all) and (obj_type == "Service" and reference_location == 'shared'):
             upward_dg = "predefined"
-            found_object, found_location = self.get_relative_object_location(obj_name, upward_dg, obj_type)
+            found_tuples += self.get_relative_object_location(obj_name, upward_dg, obj_type, find_all, iterative_call=True)
 
         # log an error message if the requested object has not been found at this step
-        if not found_object:
+        if not found_tuples:
             self._console.log(
                 f"[ {reference_location} ] ERROR Unable to find object {obj_name} (type {obj_type}) here and above",
                 level=2,
             )
 
         # finally return the tuple of the found object and its location
-        return (found_object, found_location)
+        if iterative_call:
+            return found_tuples
+        elif find_all:
+            return found_tuples
+        else:
+            if not found_tuples:
+                return (None, None)
+            return found_tuples[0]
 
     def gen_condition_expression(self, condition_string: str, search_location: str):
         """
@@ -1099,7 +1108,6 @@ class PaloCleaner:
 
         # initializing a list which will create "on-the-fly" created objects for direct IP used in rules
         created_addr_object = list()
-        bkp_loglevel = self._verbosity
         # iterates on all rulebases for the concerned location
         for k, v in self._rulebases[location_name].items():
             if k == "context":
@@ -1107,10 +1115,6 @@ class PaloCleaner:
                 continue
             # for each rule in the current rulebase
             for r in v:
-                if type(r) is PolicyBasedForwarding:
-                    self._verbosity = 3
-                else:
-                    self._verbosity = bkp_loglevel
                 self._console.log(f"[ {location_name} ] Processing used objects on rule {r.name!r}", level=2)
 
                 # Use the repl_map descriptor to find the different types of objects which can be found on the current
@@ -1215,7 +1219,7 @@ class PaloCleaner:
                                                   style="yellow", level=3)
                 # update progress bar for each processed rule
                 progress.update(task, advance=1)
-        self._verbosity = bkp_loglevel
+
         # add the processed object set for the current location to the global _used_objects_set dict
         self._used_objects_sets[location_name] = set(location_obj_set)
 
@@ -1680,7 +1684,7 @@ class PaloCleaner:
         # TODO : find best replacement for servicegroup ?
 
         for obj_type in [panos.objects.AddressObject, panos.objects.AddressGroup, panos.objects.ServiceObject]:
-            self._console.log(f"[ {location_name} ] Child for DeviceGroup {self._objects[location_name]['context']} when optimizing {obj_type} is {self._objects[location_name]['context'].children}")
+            #self._console.log(f"[ {location_name} ] Child for DeviceGroup {self._objects[location_name]['context']} when optimizing {obj_type} is {self._objects[location_name]['context'].children}")
 
             # for each object of the current type found at the current location
             for (obj, location) in [(o, l) for (o, l) in self._used_objects_sets[location_name] if type(o) is obj_type]:

@@ -149,6 +149,13 @@ def parse_cli_args():
         default = False
     )
 
+    parser.add_argument(
+        "--same-name-only",
+        action = "store_true",
+        help = "Only replaces objects by ones existing at upward levels, and having same values",
+        default = False
+    )
+
     return parser.parse_args()
 
 
