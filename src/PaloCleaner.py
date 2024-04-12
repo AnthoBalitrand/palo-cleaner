@@ -9,12 +9,14 @@ from rich.traceback import install
 import panos.objects
 from panos.panorama import Panorama, DeviceGroup, PanoramaDeviceGroupHierarchy
 from panos.objects import AddressObject, AddressGroup, Tag, ServiceObject, ServiceGroup
-from panos.policies import SecurityRule, PreRulebase, PostRulebase, Rulebase, NatRule, AuthenticationRule
+from panos.policies import SecurityRule, PreRulebase, PostRulebase, Rulebase, NatRule, AuthenticationRule, PolicyBasedForwarding
 from panos.predefined import Predefined
 from panos.errors import PanXapiError
 from panos.firewall import Firewall
 from panos.device import SystemSettings
 from hierarchy import HierarchyDG
+import PaloCleanerTools
+from PaloCleanerConf import repl_map, cleaning_order
 import re
 import time
 import functools
@@ -24,37 +26,9 @@ from threading import Thread, Lock
 from queue import Queue
 from ctypes import c_int32
 
-"""
-Below is a representation of the different types of rules being processed, and for each of them, the name of each 
-field (+ format : string "" or ["list"]) containing each type of object 
-"""
-
-repl_map = {
-    SecurityRule: {
-        "Address": [["source"], ["destination"]],
-        "Service": [["service"]],
-        "Tag": [["tag"]],
-    },
-    NatRule: {
-        "Address": [["source"], ["destination"], ["source_translation_translated_addresses"], "destination_translated_address"],
-        "Service": ["service"],
-        "Tag": [["tag"]],
-    },
-    AuthenticationRule: {
-        "Address": [["source_addresses"], ["destination_addresses"]],
-        "Service": [["service"]],
-        "Tag": [["tag"]],
-    }
-}
-
-# Keep your big fingers away than this unless you really know what you are doing
-cleaning_order = {
-    1: {"Address": AddressGroup},
-    2: {"Service": ServiceGroup},
-    3: {"Address": AddressObject},
-    4: {"Service": ServiceObject},
-    5: {"Tag": Tag}
-}
+# TODO : when using bulk-actions, make sure that tag-protected objects are not deleted (can be added to device-group for deletion before this check !)
+# TODO : block bulk operations depending of Panorama / PAN-OS version !!!
+# TODO : check if replace in rules behavior is the same than replace in groups (when using bulk actions) : merge instead to update ? 
 
 
 class PaloCleaner:
@@ -65,24 +39,28 @@ class PaloCleaner:
         :param report_folder: (string) The path to the folder where to store the operation report
         :param kwargs: (dict) Dict of arguments provided by argparse
         """
-        self._panorama_url = kwargs['panorama_url']
-        self._panorama_user = kwargs['api_user']
-        self._panorama_password = kwargs['api_password']
-        # Remove api_password from args to avoid it to be printed later (startup arguments printed in log file)
+        self._panorama_url = kwargs['panorama_url']             # the target Panorama URL
+        self._panorama_user = kwargs['api_user']                # the XML API user for interacting with Panorama
+        self._panorama_password = kwargs['api_password']        # the associated XML API password
+
+        # Remove api_password from args to avoid it to be printed later (startup arguments are printed in log file)
         kwargs['api_password'] = None
-        self._dg_filter = kwargs['device_groups']
-        self._protect_tags = kwargs['protect_tags'] if kwargs['protect_tags'] else list()
-        self._analysis_perimeter = None
-        self._depthed_tree = dict({0: ['shared']})
-        self._apply_cleaning = kwargs['apply_cleaning']
-        self._tiebreak_tag = kwargs['tiebreak_tag']
-        self._tiebreak_tag_set = set(self._tiebreak_tag)
-        self._apply_tiebreak_tag = kwargs['apply_tiebreak_tag']
-        self._no_report = kwargs['no_report']
-        self._split_report = kwargs['split_report']
-        self._favorise_tagged_objects = kwargs['favorise_tagged_objects']
-        self._nb_thread = kwargs['number_of_threads']
-        self._unused_only = kwargs['unused_only']
+
+        self._dg_filter = kwargs['device_groups']               # list of device-groups to be included in the operation
+        self._protect_tags = kwargs['protect_tags'] if kwargs['protect_tags'] else list()   # list of tags for which associated objects need to be preserverd
+        self._analysis_perimeter = None                         # initialized in the get_pano_dg_hierarchy() function. Contains a dict with fully, direct and indirect included device-groups 
+        self._depthed_tree = dict({0: ['shared']})              # initialized in the get_pano_dg_hierarchy() function. Contains a dict representing the DG hierarchy depth level (key is the depth level, associated with the list of DG at this level)
+        self._reversed_tree = dict()                            # initialized in the get_pano_dg_hierarchy() function. Each key (device group name) contains the list of names of the child device groups 
+        self._apply_cleaning = kwargs['apply_cleaning']         # boolean, indicating if this is just a dry-run or a real cleaning operation
+        self._tiebreak_tag = kwargs['tiebreak_tag']             # the tiebreak tag name to be applied on tiebreaked objects 
+        self._tiebreak_tag_set = set(self._tiebreak_tag) if self._tiebreak_tag else set() # the tiebreak tag in a set() instance, used later in this form 
+        self._apply_tiebreak_tag = kwargs['apply_tiebreak_tag'] # boolean, indicating if the tiebreak tag needs to be applied to tiebreaked objects or not 
+        self._no_report = kwargs['no_report']                   # boolean, indicating if the generation of a report should be avoided or not 
+        self._split_report = kwargs['split_report']             # boolean, indicating if we need to generate a distinct report for each device-group 
+        self._favorise_tagged_objects = kwargs['favorise_tagged_objects']   # boolean, indicated if tagged objects should be favorised by the tiebreak logic
+        self._same_name_only = kwargs['same_name_only']         # boolean, indicating if we are running in a mode where we only replace objects existing with same name (and value) upward
+        self._nb_thread = kwargs['number_of_threads']           # number of threads to generate when using multithread mode 
+        self._unused_only = kwargs['unused_only']               # list of device-groups on which we want to delete unused only objects. If this argument has been provided at startup without specifying device-groups, it will be an empty list. If not provided at all, will be None 
         if self._nb_thread is not None:
             if self._nb_thread == 0: # No value provided, we take the number of system's CPU
                 try:
@@ -93,34 +71,40 @@ class PaloCleaner:
             elif self._nb_thread < 0:
                 self._console.log(f"Error: number of threads must be positive", style="red")   
                 exit()
-        self._report_folder = report_folder
-        self._panorama = None
-        self._objects = dict()
-        self._addr_namesearch = dict()
-        self._tag_namesearch = dict()
-        self._addr_ipsearch = dict()
-        self._tag_objsearch = dict()
-        self._service_namesearch = dict()
-        self._service_valuesearch = dict()
-        self._used_objects_sets = dict()
-        self._rulebases = dict()
-        self._dg_hierarchy = dict()
-        self._removable_objects = list()
-        self._tag_referenced = set()
-        self._verbosity = int(kwargs['verbosity'])
-        self._max_change_timestamp = int(time.time()) - int(kwargs['max_days_since_change']) * 86400 if kwargs['max_days_since_change'] else 0
-        self._max_hit_timestamp = int(time.time()) - int(kwargs['max_days_since_hit']) * 86400 if kwargs['max_days_since_hit'] else 0
-        self._need_opstate = self._max_change_timestamp or self._max_hit_timestamp
-        self._ignore_opstate_ip = [] if kwargs['ignore_appliances_opstate'] is None else kwargs['ignore_appliances_opstate']
-        self._console = None
-        self._console_context = None
-        self.init_console()
-        self._replacements = dict()
-        self._panorama_devices = dict()
-        self._hitcounts = dict()
-        self._cleaning_counts = dict()
+        self._report_folder = report_folder                     # The path to the folder were the report will eventually be stored (if generated)
+        self._panorama = None                                   # Will hold the panos.Panorama object 
+        self._objects = dict()                                  # Huge dict datastructure which will hold all of the panos.objects instances by device-group and type 
+        self._addr_namesearch = dict()                          # Search datastructure which permits to find a panos.objects.AddressObject or panos.objects.AddressGroup by its name (per device-group) 
+        self._tag_namesearch = dict()                           # Search datastructure which permits to find a panos.objects.Tag by its name (per device-group) 
+        self._addr_ipsearch = dict()                            # Search datastructure which permits to find all panos.objects.AddressObject matching a given IP address (per device-group)
+        self._tag_objsearch = dict()                            # Search datastructure which permits to find all panos.objects.AddressObject and panos.objects.AddressGroup by their associated tags (per device-group)
+        self._service_namesearch = dict()                       # Search datastructure which permits to find all panos.objects.ServiceObject and panos.objects.ServiceGroup by its name (per device-group)
+        self._service_valuesearch = dict()                      # Search datastructure which permits to find all panos.objects.ServiceObject matching a value (generated by PaloCleanerTools.stringify_service) (per device-group)
+        self._used_objects_sets = dict()                        # Huge dict datastructure which contains, for each device-group, a list of tuples (panos.objects, location) of used objects at this level
+        self._rulebases = dict()                                # Dict datastructure which contains the reference to the different panos.policies instances (per device-group) 
+        self._dg_hierarchy = dict()                             # initialized in the get_pano_dg_hierarchy() function. Contains a hierarchy.HierarchyDG object representing the device-groups hierarchy at each level
+        self._tag_referenced = set()                            # Contains a set of tuples (panos.objects, location) listing all tag-referenced objects (used on DAG). Used for replacement of such objects (duplicating tags to the replacement object)
+        self._verbosity = int(kwargs['verbosity'])              # Verbosity level of the rich console logs 
+        self._max_change_timestamp = int(time.time()) - int(kwargs['max_days_since_change']) * 86400 if kwargs['max_days_since_change'] else 0      # Contains the timestamp after which updated rules cannot be cleaned (when specifying it) 
+        self._max_hit_timestamp = int(time.time()) - int(kwargs['max_days_since_hit']) * 86400 if kwargs['max_days_since_hit'] else 0               # Contains the timestamp after which hitted rules cannot be cleaned (when specifying it)
+        self._need_opstate = self._max_change_timestamp or self._max_hit_timestamp                                                                  # Boolean, indicating if opstate information will have to be used (using timestamps ?) 
+        self._ignore_opstate_ip = [] if kwargs['ignore_appliances_opstate'] is None else kwargs['ignore_appliances_opstate']                        # List of IP addresses of appliances for which we explicitly don't want to check opstate information
+        self._console = None                                    # Holds the rich.Console object 
+        self._console_context = None                            # Contains the current console context (init, or location). Used in conjunction with self._split_report 
+        self.init_console() 
+        self._replacements = dict()                             # Huge dict datastructure containing the replacement info (source / replacement) for each type of object (per device-group) 
+        self._panorama_devices = dict()                         # When using opstate inforation, dict whose key is the serial number and the value is a panos.firewall.Firewall object 
+        self._hitcounts = dict()                                # Dict containing the last_hit_timestamp and rule_modification_timestamp for each rule of each type (per device-group) 
+        self._cleaning_counts = dict()                          # Dict tracking the number of deleted / replaced objects of each type (per device-group)
+        self._protect_potential_replacements = kwargs['protect_potential_replacements']     # boolean, indicating wether potential replacement objects need to be kept (when using unused-only argument) 
+        self._bulk_operations = kwargs['bulk_operations']       # boolean, indicating wether we use bulk XML API requests or not 
+
         signal.signal(signal.SIGINT, self.signal_handler)
         self._console.log(f"STARTUP ARGUMENTS : {kwargs}")
+
+    def print_contexts(self):
+        for l in self._objects:
+            self._console.log(f"{l} ({self._objects[l]['context']}) --> {self._objects[l]['context'].children}")
 
     def loglevel_decorator(self, log_func):
         """
@@ -128,6 +112,8 @@ class PaloCleaner:
         (each Console.log call will contain a "level" argument (if not, the log function will be returned), and the
         log function will be returned (and thus executed) only if the "level" of the current call is below or equal to
         the global loglevel asked when starting the script
+
+        Commenting : OK (16062023)
 
         :param log_func: A function (here, will be used only with the rich.Console.log function)
         :return: (func) The called function after checking the loglevel
@@ -179,9 +165,10 @@ class PaloCleaner:
         :return:
         """
 
-        res = input("  Do you really want to interrupt the running operations ? y/n ")
+        res = input("\n\n  Do you really want to interrupt the running operations ? y/n ")
         if res == 'y':
             raise KeyboardInterrupt
+        pass
 
     def start(self):
         """
@@ -196,7 +183,7 @@ class PaloCleaner:
  |  _/ _` | / _ \ | (__| / -_) _` | ' \/ -_) '_|
  |_| \__,_|_\___/  \___|_\___\__,_|_||_\___|_|  
                                                 
-        by Anthony BALITRAND v1.0                                           
+        by Anthony BALITRAND v1.2                                           
 
 """)
         self._console.print(header_text, style="green", justify="left")
@@ -204,7 +191,7 @@ class PaloCleaner:
         try:
             # if the API user password has not been provided within the CLI start command, prompt the user
             while self._panorama_password == "":
-                self._panorama_password = Prompt.ask(f"Please provide the password for API user {self._panorama_user!r} ",
+                self._panorama_password = Prompt.ask(f"Please provide password for API user {self._panorama_user!r}",
                                                      password=True)
 
             self._console.print("\n\n")
@@ -224,7 +211,7 @@ class PaloCleaner:
                 # Panorama downloaded hierarchy. If not, stop.
                 if self._dg_filter:
                     if not set(self._dg_filter).issubset(self._dg_hierarchy):
-                        self._console.log("[ Panorama ] One of the provided device-groups does not exists !", style="red")
+                        self._console.log("[ Panorama ] One of the provided device-groups does not exist !", style="red")
                         return 0
 
                 # get the full device-groups hierarchy and displays is in the console with color code to identify which
@@ -262,6 +249,9 @@ class PaloCleaner:
                     justify="left")
                 download_task = progress.add_task("", total=len(perimeter) + 1)
 
+                # ----------------------------------------------------------------------------------
+                # --           Download of Panorama (shared) / predefined objects                 --
+                # ----------------------------------------------------------------------------------
                 progress.update(download_task, description="[ Panorama ] Downloading shared objects")
                 self.fetch_objects(self._panorama, 'shared')
                 self.fetch_objects(self._panorama, 'predefined')
@@ -281,6 +271,9 @@ class PaloCleaner:
 
                 progress.update(download_task, advance=1)
 
+                # ----------------------------------------------------------------------------------
+                # --             Download of the device-groups objects                            --
+                # ----------------------------------------------------------------------------------
                 for (context_name, dg) in perimeter:
                     progress.update(download_task, description=f"[ {context_name} ] Downloading objects")
                     self.fetch_objects(dg, context_name)
@@ -300,9 +293,11 @@ class PaloCleaner:
                         self._console.log(f"[ {context_name} ] Hitcounts downloaded for all rulebases")
 
                     progress.update(download_task, advance=1)
-
                 progress.remove_task(download_task)
 
+                # ----------------------------------------------------------------------------------
+                # --             Processing used objects set for shared + device-groups           --
+                # ----------------------------------------------------------------------------------
                 self._console.print(
                     Panel("[bold green]Analyzing objects usage",
                           style="green"),
@@ -324,15 +319,18 @@ class PaloCleaner:
                     self._console.log(f"[ {dg.about()['name']} ] Used objects set processed")
                     progress.remove_task(dg_fetch_task)
 
-                # Starting objects usage optimization
-                # From the most "deep" device-group (far from shared), going up to the shared location
+                # ----------------------------------------------------------------------------------
+                # --       Starting objects optimization (from deepest DG to shared)              --
+                # ----------------------------------------------------------------------------------
                 self._console.print(
-                    Panel("[bold green]Optimizing objects duplicates",
+                    Panel("[bold green] Optimizing objects duplicates",
                           style="green"),
                     justify="left")
+                # starting objects optimization from the most "depth" device-groups, up to "shared"
                 for depth, contexts in sorted(self._depthed_tree.items(), key=lambda x: x[0], reverse=True):
                     for context_name in contexts:
                         if context_name in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']:
+                            # initialize the console with a new context name (used when splitting reports)
                             self.init_console(context_name)
                             self._console.print(Panel(f"  [bold magenta]{context_name}  ", style="magenta"),
                                               justify="left")
@@ -341,7 +339,13 @@ class PaloCleaner:
                             # done for each object type at the current location
                             self._replacements[context_name] = {'Address': dict(), 'Service': dict(), 'Tag': dict()}
 
-                            if self._unused_only is None:
+                            if context_name not in ['shared', 'predefined']:
+                                self._panorama.add(self._objects[context_name]['context'])
+
+                            # if unused-only has not been specified (normal use-case), or if it has been used with protect-potential-replacements 
+                            # we need to start an objects optimization for the current context 
+                            # (note that the tiebreak tag will be added to choosen objects at this step)
+                            if self._unused_only is None or self._protect_potential_replacements:
                                 # OBJECTS OPTIMIZATION
                                 dg_optimize_task = progress.add_task(
                                     f"[ {context_name} ] - Optimizing objects",
@@ -351,6 +355,8 @@ class PaloCleaner:
                                 self._console.log(f"[ {context_name} ] Objects optimization done")
                                 progress.remove_task(dg_optimize_task)
 
+                            # if we have not specified an unused-only cleaning operation, we need to replace the non-optimal objects by their processed replacements (in groups, rules, etc)
+                            if self._unused_only is None:
                                 # OBJECTS REPLACEMENT IN GROUPS
                                 dg_replaceingroups_task = progress.add_task(
                                     f"[ {context_name} ] Replacing objects in groups",
@@ -360,19 +366,29 @@ class PaloCleaner:
                                 self._console.log(f"[ {context_name} ] Objects replaced in groups")
                                 progress.remove_task(dg_replaceingroups_task)
 
+                                #input("Press any key to continue...")
+
                                 # OBJECTS REPLACEMENT IN RULEBASES
                                 dg_replaceinrules_task = progress.add_task(
                                     f"[ {context_name} ] Replacing objects in rules",
                                     total=self.count_rules(context_name)
                                 )
+
                                 self.replace_object_in_rulebase(context_name, progress, dg_replaceinrules_task)
                                 self._console.log(f"[ {context_name} ] Objects replaced in rulebases")
                                 progress.remove_task(dg_replaceinrules_task)
+
+                                #input("Press any key to continue...")
 
                             # OBJECTS CLEANING (FOR FULLY INCLUDED DEVICE GROUPS ONLY)
                             if context_name in self._analysis_perimeter['full']:
                                 self.clean_local_object_set(context_name)
                                 self._console.log(f"[ {context_name} ] Objects cleaned (fully included)")
+
+                            if context_name not in ['shared', 'predefined']:
+                                self._panorama.remove(self._objects[context_name]['context'])
+
+                            #input("Press any key to continue...")
 
             self.init_console("report")
             # Display the cleaning operation result (display again the hierarchy tree, but with the _cleaning_counts
@@ -406,13 +422,18 @@ class PaloCleaner:
         self._console.status = self.status_decorator(self._console.status)
         rich.traceback.install(console=self._console)
 
-    def get_devicegroups(self):
+    def get_devicegroups(self) -> [DeviceGroup]:
         """
         Gets list of DeviceGroups from Panorama
         :return: (list) List of DeviceGroup objects
+
+        Commenting : OK (16062023)
         """
 
-        dg_list = DeviceGroup.refreshall(self._panorama, name_only=True)
+        # Gets the DeviceGroup list from Panorama
+        # Does not get full tree (only DeviceGroup name instances)
+        # Retrieved DG are not added to Panorama as childs (add=False)
+        dg_list = DeviceGroup.refreshall(self._panorama, name_only=True, add=False)
         return dg_list
 
     def get_pano_dg_hierarchy(self):
@@ -434,6 +455,11 @@ class PaloCleaner:
                                 self._dg_hierarchy[k].add_parent(self._dg_hierarchy[v])
                             else:
                                 self._dg_hierarchy[k].add_parent(shared_dg)
+                        if v is None:
+                            v = 'shared'
+                        self._reversed_tree[v] = self._reversed_tree[v] + [k] if v in self._reversed_tree.keys() else [k]
+                        if k not in self._reversed_tree.keys():
+                            self._reversed_tree[k] = list()
                 if self._dg_filter:
                     for dg in self._dg_filter:
                         self._dg_hierarchy[dg].set_included(direct=True)
@@ -451,6 +477,7 @@ class PaloCleaner:
         """
         Get the list of managed devices by Panorama
         And stores it in a dict where they key is the firewall SN, and the value is the panos.Firewall object
+        Commenting : OK (15062023)
         :return:
         """
         devices = self._panorama.refresh_devices(expand_vsys=False, include_device_groups=False)
@@ -458,10 +485,10 @@ class PaloCleaner:
             if fw.state.connected:
                 self._panorama_devices[getattr(fw, "serial")] = fw
 
-
     def count_objects(self, location_name):
         """
         Returns the global count of all objects (Address, Tag, Service) for the provided location
+        Commenting : OK (15062023)
 
         :param location_name: (string) Name of the location (shared or device-group name) where to count objects
         :return: (int) Total number of objects for the requested location
@@ -477,6 +504,7 @@ class PaloCleaner:
     def count_rules(self, location_name):
         """
         Returns the global count of all rules for all rulebases for the provided location
+        Commenting : OK (15062023)
 
         :param location_name: (string) Name of the location (shared or device-group) where to count the rules
         :return: (int) Total number of rules for the requested location
@@ -491,13 +519,15 @@ class PaloCleaner:
 
     def fetch_objects(self, context, location_name):
         """
-        Gets the list of objects (AddressObject, AddressGroup, Tag, ServiceObject, ServiceGroup) for the provided location
-        Stores it in the global _objects dict (per location name as a key)
+        Gets the list of objects (AddressObject,AddressGroup,Tag,ServiceObject,ServiceGroup) for the provided location
+        Stores it in the global _objects dict (per location name as a key) and initializes search structures
+        Commenting : OK (15062023)
 
         :param context: (Panorama or DeviceGroup) the panos object to use for polling
         :param location_name: (string) the name of the location
         :return:
         """
+
         # create _objects[location] if not yet existing
         if location_name not in self._objects.keys():
             self._objects[location_name] = dict()
@@ -513,22 +543,42 @@ class PaloCleaner:
             for obj_type in ['Address', 'Tag']:
                 self._objects[location_name][obj_type] = list()
             self._service_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Service']}
+            self._panorama.children.remove(predef)
+
         else:
-            # else download all objects types
+            # for any other location, download all objects instances
+
+            # store the context (Panorama or DeviceGroup) object on the 'context' key
             self._objects[location_name]['context'] = context
-            self._objects[location_name]['Address'] = AddressObject.refreshall(context) + AddressGroup.refreshall(context)
+
+            # download all AddressObjects and AddressGroups for the location, and add it to the 'Address' key
+            self._objects[location_name]['Address'] = AddressObject.refreshall(context, add=False) + \
+                                                      AddressGroup.refreshall(context, add=False)
+
+            # populate the _addr_namesearch structure which permits to find AddressObjects and AddressGroups by name
             self._addr_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Address']}
             self._console.log(f"[ {location_name} ] Objects namesearch structures initialized", level=2)
+
+            # initialize specific search structures
             self._addr_ipsearch[location_name] = dict()
             self._tag_objsearch[location_name] = dict()
+
+            # populate IP and tag search structures for all Address objects (AddressObject and AddressGroup)
             for obj in self._objects[location_name]['Address']:
                 if type(obj) is panos.objects.AddressObject:
-                    addr = self.hostify_address(obj.value)
+                    # call to hostify_address to remove /32 for host addresses (keeps mask for subnets)
+                    addr = PaloCleanerTools.hostify_address(obj.value)
+
+                    # add the object to the _addr_ipsearch structure which permits to find all AddressObjects for a
+                    # given location having the same IP address
                     if addr not in self._addr_ipsearch[location_name].keys():
                         self._addr_ipsearch[location_name][addr] = list()
                     self._addr_ipsearch[location_name][addr].append(obj)
-                    # adding objects tag to the _tag_objsearch structure
+
                 if type(obj) in [panos.objects.AddressObject, panos.objects.AddressGroup]:
+                    # if the object has tags, add it to the _tag_objsearch structure which permits to find all
+                    # AddressObjects and AddressGroups at a given location having a certain tag
+                    # (a given object is added to each self._tag_objsearch[location_name][t] for each tag it uses)
                     if obj.tag:
                         for t in obj.tag:
                             if t not in self._tag_objsearch[location_name]:
@@ -536,16 +586,26 @@ class PaloCleaner:
                             else:
                                 self._tag_objsearch[location_name][t].add(obj)
             self._console.log(f"[ {location_name} ] Objects ipsearch structures initialized", level=2)
-            self._objects[location_name]['Tag'] = Tag.refreshall(context)
+
+            # download all Tag objects for the location, and add it to the 'Tag' key
+            self._objects[location_name]['Tag'] = Tag.refreshall(context, add=False)
+            # populate the _tag_namesearch structure which permits to find Tags by name
             self._tag_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Tag']}
-            self._objects[location_name]['Service'] = ServiceObject.refreshall(context) + ServiceGroup.refreshall(context)
+            self._console.log(f"[ {location_name} ] Tags namesearch structure initialized", level=2)
+
+            # download all ServiceObject and ServiceGroups for the location, and add it to the 'Service' key
+            self._objects[location_name]['Service'] = ServiceObject.refreshall(context, add=False) + \
+                                                      ServiceGroup.refreshall(context, add=False)
+            # populate the _service_namesearch structure which permits to find Services by name
             self._service_namesearch[location_name] = {x.name: x for x in self._objects[location_name]['Service']}
             self._console.log(f"[ {location_name} ] Services namesearch structures initialized", level=2)
 
+        # for all locations (including predefined), populate the _service_valuesearch structure which permits to find
+        # Services by "stringified" value (see PaloCleanerTools.stringify_service())
         self._service_valuesearch[location_name] = dict()
         for obj in self._objects[location_name]['Service']:
             if type(obj) is ServiceObject:
-                serv_string = self.stringify_service(obj)
+                serv_string = PaloCleanerTools.stringify_service(obj)
                 if serv_string not in self._service_valuesearch[location_name].keys():
                     self._service_valuesearch[location_name][serv_string] = list()
                 self._service_valuesearch[location_name][serv_string].append(obj)
@@ -554,6 +614,7 @@ class PaloCleaner:
     def fetch_rulebase(self, context, location_name):
         """
         Downloads rulebase for the requested context
+        Commenting : OK (15062023)
 
         :param context: (Panorama or DeviceGroup) instance to be used for fetch operation
         :param location_name: (string) Name of the location (Panorama or DeviceGroup name)
@@ -564,19 +625,28 @@ class PaloCleaner:
         if location_name not in self._rulebases.keys():
             self._rulebases[location_name] = dict()
 
-        # create a "context" key on the current location dict which will contain the current location's DeviceGroup object
+        # create a "context" key on the current location dict which will contain the current location DeviceGroup object
         self._rulebases[location_name]['context'] = context
 
         for ruletype in repl_map:
-
             rulebases = [PreRulebase(), PostRulebase()]
+
+            # SecurityRule type has a "Default Rule" section, which is not considered PreRulebase() nor PostRulebase()
             if ruletype is SecurityRule:
                 rulebases += [Rulebase()]
 
             for rb in rulebases:
+                # add the current rulebase to the context
                 context.add(rb)
-                self._rulebases[location_name][rb.__class__.__name__+"_"+ruletype.__name__] = \
-                    ruletype.refreshall(rb, add=True)
+
+                # get all rules for the given RuleType / Rulebase tuple
+                self._rulebases[location_name][rb.__class__.__name__+"_"+ruletype.__name__] = ruletype.refreshall(
+                    rb,
+                    add=False)
+
+                # Remove rulebase from DG
+                context.remove(rb)
+        #self._rulebases[location_name]['context'].children=list()
 
     def fetch_hitcounts(self, context, location_name):
         """
@@ -587,11 +657,14 @@ class PaloCleaner:
         If no devices are running PAN-OS 9+ for the concerned device-group, the rule_modification_timestamps
         is get from Panorama
 
+        Commenting : OK (15062023)
+
         :param context: (panos.DeviceGroup) DeviceGroup object
         :param location_name: (string) The location name (= DeviceGroup name)
         :return:
         """
 
+        # get the Firewall() objects instance for the current context
         dg_firewalls = Firewall.refreshall(context)
         rulebases = [x.__name__.replace('Rule', '').lower() for x in repl_map]
         interest_counters = ["last_hit_timestamp", "rule_modification_timestamp"]
@@ -612,10 +685,14 @@ class PaloCleaner:
                             self._hitcounts[location_name][rulebase_name][rule][ic] = max(res[ic], countval)
 
         for fw in dg_firewalls:
+            # get the device information from _panorama_devices using the firewall appliance serial number
             device = self._panorama_devices.get(getattr(fw, "serial"))
             if device:
                 system_settings = device.find("", SystemSettings)
                 fw_ip = system_settings.ip_address
+
+                # if the current firewall instance has not been ignored using the --ignore-appliances-opstate argument
+                # connect to it to get the opstate values
                 if fw_ip not in self._ignore_opstate_ip:
                     fw_vsys = getattr(fw, "vsys")
                     fw_conn = Firewall(fw_ip, self._panorama_user, self._panorama_password, vsys=fw_vsys)
@@ -624,16 +701,25 @@ class PaloCleaner:
                     fw_panos_version = fw_conn.refresh_system_info().version
                     if (current_major_version := int(fw_panos_version.split('.')[0])) > min_member_major_version:
                         min_member_major_version = current_major_version
-                    self._console.log(f"[ {location_name} ] Detected PAN-OS version on {fw_ip} : {fw_panos_version}", level=2)
+                    self._console.log(f"[ {location_name} ] Detected PAN-OS version on {fw_ip} : {fw_panos_version}",
+                                      level=2)
                     rb = Rulebase()
                     fw_conn.add(rb)
+                    # iterat through each rulebase to get opstate information
                     for rulebase in rulebases:
                         ans = rb.opstate.hit_count.refresh(rulebase, all_rules=True)
+                        # call to the populate_hitcounts() function to populate information on the _hitcounts structure
                         populate_hitcounts(rulebase, ans)
+            else:
+                self._console.log(f"[ {location_name} ] Appliance with SN {getattr(fw, 'serial')} has not been found !",
+                                  style="red")
 
         if min_member_major_version < 9:
-            # if we did not found any member firewall with PANOS >= 9, we need to get the rule modification timestamp from Panorama for this context
-            self._console.log(f"[ {location_name} ] Not found any member with PAN-OS version >= 9. Getting rule modification timestamp from Panorama", level=2)
+            # if we did not found any member firewall with PANOS >= 9, we need to get the rule modification timestamp
+            # from Panorama for this context
+            self._console.log(
+                f"[ {location_name} ] Not found any member with PAN-OS version >= 9. Getting rule modification timestamp from Panorama",
+                level=2)
             for rb_type in [PreRulebase(), PostRulebase()]:
                 context.add(rb_type)
                 for rulebase in rulebases:
@@ -644,6 +730,9 @@ class PaloCleaner:
         """
         This function will check that the tiebreak tag exists (on shared context) if it has been requested
         If it does not exists, it will be created and added to the (already fetched) objects set for shared context
+
+        Commenting : OK (15062023)
+
         :return:
         """
 
@@ -655,11 +744,13 @@ class PaloCleaner:
                 self._tag_namesearch['shared'][self._tiebreak_tag[0]] = tiebreak_tag
                 if self._apply_cleaning:
                     self._panorama.add(tiebreak_tag).create()
+                    self._panorama.remove(tiebreak_tag)
 
-    def get_relative_object_location(self, obj_name, reference_location, obj_type="Address"):
+    def get_relative_object_location(self, obj_name, reference_location, obj_type="Address", find_all=False, iterative_call=False):
         """
         Find referenced object by location (permits to get the referenced object on current location if
         existing at this level, or on upper levels of the device-groups hierarchy)
+        Commenting : OK (15062023)
 
         :param obj_name: (string) Name of the object to find
         :param reference_location: (string) Where to start to find the object (device-group name or 'shared')
@@ -667,40 +758,46 @@ class PaloCleaner:
         :return: (AddressObject, string) Found object (or group), and its location name
         """
 
-        # self._console.log(f"Call to get_relative_object_location for {obj_name} (type {obj_type}) on {reference_location}")
-
         # Initialize return variables
+        found_tuples = list()
         found_object = None
-        found_location = None
+
         # For each object at the reference_location level, find any object having the searched name
         if obj_type == "Address":
             found_object = self._addr_namesearch[reference_location].get(obj_name, None)
-            found_location = reference_location
         elif obj_type == "Tag":
             found_object = self._tag_namesearch[reference_location].get(obj_name, None)
-            found_location = reference_location
         elif obj_type == "Service":
             found_object = self._service_namesearch[reference_location].get(obj_name, None)
-            found_location = reference_location
+
+        if found_object:
+            found_tuples.append((found_object, reference_location))
 
         # if no object is found at current reference_location, find the upward device-group on the hierarchy
         # and call the current function recursively with this upward level as reference_location
-        if not found_object and reference_location not in ['shared', 'predefined']:
+        if (not found_tuples or find_all) and reference_location not in ['shared', 'predefined']:
             upward_dg = self._dg_hierarchy[reference_location].parent.name
-            found_object, found_location = self.get_relative_object_location(obj_name, upward_dg, obj_type)
-        elif not found_object and (obj_type == "Service" and reference_location == 'shared'):
+            found_tuples += self.get_relative_object_location(obj_name, upward_dg, obj_type, find_all, iterative_call=True)
+        elif (not found_tuples or find_all) and (obj_type == "Service" and reference_location == 'shared'):
             upward_dg = "predefined"
-            found_object, found_location = self.get_relative_object_location(obj_name, upward_dg, obj_type)
+            found_tuples += self.get_relative_object_location(obj_name, upward_dg, obj_type, find_all, iterative_call=True)
 
         # log an error message if the requested object has not been found at this step
-        if not found_object:
+        if not found_tuples:
             self._console.log(
                 f"[ {reference_location} ] ERROR Unable to find object {obj_name} (type {obj_type}) here and above",
                 level=2,
             )
 
         # finally return the tuple of the found object and its location
-        return (found_object, found_location)
+        if iterative_call:
+            return found_tuples
+        elif find_all:
+            return found_tuples
+        else:
+            if not found_tuples:
+                return (None, None)
+            return found_tuples[0]
 
     def gen_condition_expression(self, condition_string: str, search_location: str):
         """
@@ -754,30 +851,26 @@ class PaloCleaner:
 
         return found_objects
 
-    def fetch_used_obj_set(self, location_name, progress, task):
+    def flatten_object(self, used_object: panos.objects, object_location: str, usage_base: str,
+                           referencer_type: str = None, referencer_name: str = None,
+                       resolved_cache=None):
         """
-        This function generates a "set" of used objects of each type (Address, AddressGroup, Tag, Service, ServiceGroup...)
-        at each requested location.
-        This set is a set of tuples of (panos.Object, location (str))
-        Group objects are explored (recursively) to find all members, which are of course also considered as used.
+        Recursive caller for the inner flatten_object_recurser function.
+        Commenting : OK (15062023)
 
-        :param location_name: (str) The location name where to start used objects exploration
-        :param progress: (rich.Progress) The rich Progress object to update during progression
-        :param task: (rich.Task) The rich Task object to update during progression
+        :param used_object:
+        :param object_location:
+        :param usage_base:
+        :param referencer_type:
+        :param referencer_name:
+        :param resolved_cache:
         :return:
         """
 
-        def shorten_object_type(object_type: str):
-            """
-            (Overkill function) which returns a panos.Object type, after removing the "Group" and "Object" characters
+        if resolved_cache is None:
+            resolved_cache = dict()
 
-            :param object_type: (str) panos.Object.__class__.__name__
-            :return: (str) the panos.Object type name without "Group" nor "Object"
-            """
-
-            return object_type.replace('Group', '').replace('Object', '')
-
-        def flatten_object(used_object: panos.objects, object_location: str, usage_base: str,
+        def flatten_object_recurser(used_object: panos.objects, object_location: str, usage_base: str,
                            referencer_type: str = None, referencer_name: str = None, recursion_level: int = 1,
                            protect_call=False):
             """
@@ -785,6 +878,8 @@ class PaloCleaner:
             (first call is from a loop iterating over the different rules of a rulebase at a given location)
 
             Calls itself recursively for AddressGroups (static or dynamic)
+
+            Commenting : OK (15062023)
 
             :param used_object: (panos.object) The used object (found with get_relative_object_location)
             :param object_location: (string) The location where the used objects has been found by get_relative_object_location
@@ -796,6 +891,7 @@ class PaloCleaner:
                 (is used for log outputs, prepending * recursion_level times at the beginning of each log message)
             :param protect_call: (bool) Whether this call is intended to protect group members at the group level if
                 they have been overridden at a lower location
+
             :return:
             """
 
@@ -808,7 +904,7 @@ class PaloCleaner:
                 self._console.log(
                         f"[ {usage_base} ] {'*' * recursion_level} Marking {used_object.name!r} ({used_object.__class__.__name__}) as resolved on cache",
                         style="green", level=2)
-                resolved_cache[shorten_object_type(used_object.__class__.__name__)].append(
+                resolved_cache[PaloCleanerTools.shorten_object_type(used_object.__class__.__name__)].append(
                     used_object.name)
 
                 # adding the resolved (used_object, object_location) itself to the obj_set list
@@ -819,21 +915,23 @@ class PaloCleaner:
             if type(used_object) in [panos.objects.AddressObject, panos.objects.ServiceObject, panos.objects.Tag]:
                 self._console.log(
                         f"[ {usage_base} ] {'*' * recursion_level} Object {used_object.name!r} ({used_object.__class__.__name__}) (ref by {referencer_type} {referencer_name}) has been found on location {object_location}",
-                        style="green", level=2)
+                        style="green", level=3)
 
             # if the resolved object needs recursive search for members (AddressGroup), let's go
             # here for an AddressGroup
             elif type(used_object) is panos.objects.AddressGroup:
                 # in case of a static group, just call the flatten_object function recursively for each member
-                # (which can be only at the group level or below)
+                # (which can be only at the group level or above)
                 if used_object.static_value:
                     self._console.log(
                             f"[ {usage_base} ] {'*' * recursion_level} Object {used_object.name!r} (static AddressGroup) (ref by {referencer_type} {referencer_name!r}) has been found on location {object_location}",
-                            style="green", level=2)
+                            style="green", level=3)
 
                     # for each static group member, call the current function recursively
                     # (if the member has not already been resolved for the current location, which means that it would
                     # already have been flattened)
+                    # or if it is a protect_call (voluntarily calling the flatten_object_recurser for the group member
+                    # at the same level of the group itself if overridden below, to avoid deletion later)
                     for group_member in used_object.static_value:
                         if group_member not in resolved_cache['Address'] or protect_call:
                             self._console.log(
@@ -848,7 +946,7 @@ class PaloCleaner:
                             # used_object.name = the name of the object where the member has been found (= the group name, actually)
                             # recursion_level = the current recursion_level + 1
 
-                            obj_set += flatten_object(
+                            obj_set += flatten_object_recurser(
                                 *self.get_relative_object_location(group_member,usage_base),
                                 usage_base,
                                 used_object.__class__.__name__,
@@ -860,8 +958,14 @@ class PaloCleaner:
                         self._console.log(
                                 f"[ {usage_base} ] {'*' * recursion_level} AddressGroup {used_object.name!r} location ({object_location}) is different than referencer location ({usage_base}). Protecting group at its location level",
                                 style="red", level=2)
-                        obj_set += flatten_object(used_object, object_location, object_location, referencer_type,
+                        group_protection_flattened = flatten_object_recurser(used_object, object_location, object_location, referencer_type,
                                                   referencer_name, recursion_level, protect_call=True)
+                        obj_set += group_protection_flattened
+
+                        # copying the result at the group object location as it needs to be protected there !!
+                        # (group might not be used at its location but only below, and it could have unexpected results !!)
+                        # TODO : find a solution to make sure that the same replacement object will be choosen there !!!
+                        self._used_objects_sets[object_location].update(set(group_protection_flattened))
 
 
                 # in case of a dynamic group, the group condition is converted to an executable Python statement,
@@ -870,7 +974,7 @@ class PaloCleaner:
                 elif used_object.dynamic_value:
                     self._console.log(
                             f"[ {usage_base} ] {'*' * recursion_level} Object {used_object.name!r} (dynamic AddressGroup) (ref by {referencer_type} {referencer_name!r}) has been found on location {object_location}",
-                            style="green", level=2)
+                            style="green", level=3)
 
                     # for each object matched by the get_relative_object_location_by_tag
                     # (= for each object matched by the DAG)
@@ -902,7 +1006,7 @@ class PaloCleaner:
                             # used_object.name = the name of the object where the member has been found (= the group name, actually)
                             # recursion_level = the current recursion_level + 1
 
-                            obj_set += flatten_object(
+                            obj_set += flatten_object_recurser(
                                 referenced_object,
                                 referenced_object_location,
                                 usage_base,
@@ -914,6 +1018,7 @@ class PaloCleaner:
                             # this dict is used by the replace_object_in_group function, when an object referenced on
                             # a DAG by a tag needs to be replaced. This tag will need to be added to the replacement
                             # object for this new object to be matched by the DAG also
+                            # TODO : add the matching tag information to replicate only the needed tags
                             self._tag_referenced.add((referenced_object, referenced_object_location))
                             self._console.log(
                                     f"[ {usage_base} ] {'*' * recursion_level} Marking {referenced_object.name!r} as tag-referenced",
@@ -921,18 +1026,18 @@ class PaloCleaner:
                         else:
                             self._console.log(
                                     f"[ {usage_base} ] {'*' * recursion_level} Address Object {referenced_object.name!r} already resolved in current context",
-                                    style="yellow", level=2)
+                                    style="yellow", level=3)
 
             # or here for ServiceGroup
             elif type(used_object) is panos.objects.ServiceGroup:
                 if used_object.value:
                     self._console.log(
-                            f"[ {usage_base} ] {'*' * recursion_level} Object {used_object.name!r} (ServiceGroup) has been found on location {object_location}", level=2)
+                            f"[ {usage_base} ] {'*' * recursion_level} Object {used_object.name!r} (ServiceGroup) has been found on location {object_location}", level=3)
                     for group_member in used_object.value:
                         if group_member not in resolved_cache['Service'] or protect_call:
                             self._console.log(
                                     f"[ {usage_base} ] {'*' * recursion_level} Found group member of ServiceGroup {used_object.name} : {group_member}", level=2)
-                            obj_set += flatten_object(
+                            obj_set += flatten_object_recurser(
                                 *self.get_relative_object_location(group_member, usage_base, obj_type="Service"),
                                 usage_base,
                                 used_object.__class__.__name__,
@@ -959,7 +1064,7 @@ class PaloCleaner:
                                 # used_object.name = the name of the object where the member has been found (= the group name, actually)
                                 # recursion_level = the current recursion_level (not incremented)
 
-                                obj_set += flatten_object(
+                                obj_set += flatten_object_recurser(
                                     *self.get_relative_object_location(tag, object_location, obj_type="Tag"),
                                     usage_base,
                                     used_object.__class__.__name__,
@@ -969,7 +1074,27 @@ class PaloCleaner:
             # return the populated obj_set (when fully flattened)
             return obj_set
 
-        # Initialized the location obj set list
+        if not resolved_cache:
+            resolved_cache = dict({'Address': list(), 'Service': list(), 'Tag': list()})
+
+        return flatten_object_recurser(used_object, object_location, usage_base,
+                           referencer_type, referencer_name)
+
+    def fetch_used_obj_set(self, location_name, progress, task):
+        """
+        This function generates a "set" of used objects of each type (Address, AddressGroup, Tag, Service, ServiceGroup...)
+        at each requested location.
+        This set is a set of tuples of (panos.Object, location (str))
+        Group objects are explored (recursively) to find all members, which are of course also considered as used.
+        Commenting : OK (15062023)
+
+        :param location_name: (str) The location name where to start used objects exploration
+        :param progress: (rich.Progress) The rich Progress object to update during progression
+        :param task: (rich.Task) The rich Task object to update during progression
+        :return:
+        """
+
+        # Initialized the location obj set list which will contain all objects used at this location
         location_obj_set = list()
 
         # This dict contains a list of names for each object type, for which the location has been already found
@@ -980,8 +1105,9 @@ class PaloCleaner:
         # Regex statements which permits to identify an AddressObject value to know if it represents an IP/mask or a range
         ip_regex = re.compile(r'^(\d{1,3}\.){3}\d{1,3}(\/\d{1,2})?$')
         range_regex = re.compile(r'^((\d{1,3}\.){3}\d{1,3}-?){2}$')
-        created_addr_object = list()
 
+        # initializing a list which will create "on-the-fly" created objects for direct IP used in rules
+        created_addr_object = list()
         # iterates on all rulebases for the concerned location
         for k, v in self._rulebases[location_name].items():
             if k == "context":
@@ -1000,14 +1126,21 @@ class PaloCleaner:
                 for obj_type, obj_fields in repl_map.get(type(r)).items():
                     # for each rule field using the current object type
                     for field in obj_fields:
-                        # if the rule field is a string value, add the object to the rule_objects dict (on the corresponding
-                        # key matching the object type)
+                        # if the rule field is a string value, add the object to the rule_objects dict (on the
+                        # corresponding key matching the object type)
                         if type(field) is str:
                             if (to_add := getattr(r, field)):
                                 rule_objects[obj_type].append(to_add)
                         # else if the rule field is a list, add this list to the rule_objects dict
                         else:
-                            if (to_add := getattr(r, field[0])):
+                            # if the rule is a PolicyBasedForwarding rule, the object type can vary...
+                            # handling this specific case
+                            if type(r) is PolicyBasedForwarding:
+                                if type(to_add := getattr(r, field[0])) is str:
+                                    rule_objects[obj_type].append(to_add)
+                                elif type(to_add) is list:
+                                    rule_objects[obj_type] += to_add
+                            elif (to_add := getattr(r, field[0])):
                                 rule_objects[obj_type] += to_add
 
                     # for each object (of the current object type) used on the current rule
@@ -1019,13 +1152,15 @@ class PaloCleaner:
                             # location_name = the current location (where the object is used)
                             # r.__class__.__name__ = the rule type
                             # r.name = the rule name
+                            # resolved_cache = the already resolved objects cache which will be updated
 
                             location_obj_set += (
-                                flattened := flatten_object(
+                                flattened := self.flatten_object(
                                     *self.get_relative_object_location(obj, location_name, obj_type),
                                     location_name,
                                     r.__class__.__name__,
-                                    r.name
+                                    r.name,
+                                    resolved_cache
                                 )
                             )
 
@@ -1037,7 +1172,7 @@ class PaloCleaner:
                                     if ip_regex.match(obj) or range_regex.match(obj):
                                         # create a (temporary) new AddressObject (whose name is the same as the value)
                                         # and add it to the location_obj_set
-                                        addr_value = self.hostify_address(obj)
+                                        addr_value = PaloCleanerTools.hostify_address(obj)
                                         # adding the new created object to the _addr_ipsearch datastructure for the
                                         # current location level, else the replacement process will potentially find
                                         # only 1 replacement object (if there's one), while the current one should be
@@ -1046,6 +1181,9 @@ class PaloCleaner:
                                             self._addr_ipsearch[location_name][addr_value] = list()
                                         if not addr_value in created_addr_object:
                                             new_addr_obj = AddressObject(name=obj, value=addr_value)
+                                            # the description "palocleaner_temp_addressobject" is important as it permits
+                                            # later to distiguish this AddressObjects so that it is the least prefered
+                                            # one for the replacement process
                                             new_addr_obj.description = "palocleaner_temp_addressobject"
                                             self._addr_ipsearch[location_name][addr_value].append(new_addr_obj)
                                             location_obj_set += [(new_addr_obj, location_name)]
@@ -1078,36 +1216,12 @@ class PaloCleaner:
                         # (if the object is "any", we don't care)
                         elif obj not in ['any', 'application-default']:
                             self._console.log(f"[ {location_name} ] * {obj_type} Object {obj!r} already resolved in current context",
-                                                  style="yellow", level=2)
+                                                  style="yellow", level=3)
                 # update progress bar for each processed rule
                 progress.update(task, advance=1)
 
         # add the processed object set for the current location to the global _used_objects_set dict
         self._used_objects_sets[location_name] = set(location_obj_set)
-
-    def hostify_address(self, address: str):
-        """
-        Used to remove /32 at the end of an IP address
-        :param address: (string) IP address to be modified
-        :return: (string) Host IP address (instead of network /32)
-        """
-
-        # removing /32 mask for hosts
-        if address[-3:] == '/32':
-            return address[:-3:]
-        return address
-
-    def stringify_service(self, service: panos.objects.ServiceObject):
-        """
-        Returns the "string" version of a service (for search purposes)
-        The format is (str) PROTOCOL/source_port/dest_port
-        IE : TCP/None/22 or UDP/1000/60
-
-        :param service: (panos.Service) A Service object
-        :return: (str) The "string" version of the provided object
-        """
-
-        return service.protocol.lower() + "/" + str(service.source_port) + "/" + str(service.destination_port)
 
     def find_upward_obj_by_addr(self, base_location_name: str, obj: panos.objects.AddressObject):
         """
@@ -1121,7 +1235,7 @@ class PaloCleaner:
         """
 
         # Get the "host" value of the object value (removes the /32 at the end)
-        obj_addr = self.hostify_address(obj.value)
+        obj_addr = PaloCleanerTools.hostify_address(obj.value)
 
         # Initializes the list of found duplicates objects
         found_upward_objects = list()
@@ -1237,7 +1351,7 @@ class PaloCleaner:
         """
 
         # Get the "string" value of the Service object (to be able to search it quicker on the _service_valuesearch dict)
-        obj_service_string = self.stringify_service(obj_service)
+        obj_service_string = PaloCleanerTools.stringify_service(obj_service)
 
         # Initializes the list of found duplicates objects
         found_upward_objects = list()
@@ -1258,28 +1372,6 @@ class PaloCleaner:
             current_location_search = "shared" if not upward_dg else upward_dg.name
 
         return found_upward_objects
-
-    def count_tags_in_obj_tuple(self, obj):
-        """
-        Returns the number of tags assigned to an object. Returns 0 if the tag attribute value is None
-        :param obj: ((AddressObject, location)) Tuple of the object for which to count the number of tags + its location
-        :return: (int) The number of tags assigned to the concerned object
-        """
-        if obj[0].tag is None:
-            return 0
-        else:
-            return len(obj[0].tag)
-
-    def count_tags_in_obj(self, obj):
-        """
-        Returns the number of tags assigned to an object. Returns 0 if the tag attribute value is None
-        :param obj: (AddressObject) The object on which to count the number of tags
-        :return: (int) The number of tags assigned to the concerned object
-        """
-        if obj.tag is None:
-            return 0
-        else:
-            return len(obj.tag)
 
     def find_best_replacement_addr_obj(self, obj_list: list, base_location: str):
         """
@@ -1347,8 +1439,8 @@ class PaloCleaner:
             # if shared and well-named objects are found, return the first one after sorting by name
             if shared_fqdn_obj and not choosen_object:
                 if self._favorise_tagged_objects and len(shared_fqdn_obj) > 1:
-                    shared_fqdn_obj.sort(key=self.count_tags_in_obj_tuple)
-                    if self.count_tags_in_obj_tuple(shared_fqdn_obj[0]) > self.count_tags_in_obj_tuple(shared_fqdn_obj[1]):
+                    shared_fqdn_obj.sort(key=PaloCleanerTools.tag_counter)
+                    if PaloCleanerTools.tag_counter(shared_fqdn_obj[0]) > PaloCleanerTools.tag_counter(shared_fqdn_obj[1]):
                         choosen_object = shared_fqdn_obj[0]
                         self._console.log(
                             f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with FQDN naming, and highest number of tags",
@@ -1371,8 +1463,8 @@ class PaloCleaner:
             # else return the first found shared object after sorting by name
             if shared_obj and not choosen_object:
                 if self._favorise_tagged_objects and len(shared_obj) > 1:
-                    shared_obj.sort(key=self.count_tags_in_obj_tuple)
-                    if self.count_tags_in_obj_tuple(shared_obj[0]) > self.count_tags_in_obj_tuple(shared_obj[1]):
+                    shared_obj.sort(key=PaloCleanerTools.tag_counter)
+                    if PaloCleanerTools.tag_counter(shared_obj[0]) > PaloCleanerTools.tag_counter(shared_obj[1]):
                         choosen_object = shared_obj[0]
                         self._console.log(
                             f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object, and highest number of tags",
@@ -1418,6 +1510,8 @@ class PaloCleaner:
 
         # If an object has not been chosen using the tiebreak tag, but the tiebreak tag adding has been requested,
         # then add the tiebreak tag to the chosen object so that it will remain the preferred one for next executions
+        # avoid objects having description 'palocleaner_temp_addressobject' as those are temporary objects created
+        # 'on-the-fly' by the fetch_used_obj_set() function
         if self._apply_tiebreak_tag and not choosen_by_tiebreak and getattr(choosen_object[0], 'description') != 'palocleaner_temp_addressobject':
             tag_changed = False
             # If the object already has some tags, adding the tiebreak tag to the list
@@ -1429,14 +1523,20 @@ class PaloCleaner:
             else:
                 choosen_object[0].tag = [self._tiebreak_tag[0]]
                 tag_changed = True
-            if tag_changed:
-                self._console.log(f"[ {base_location} ] Adding tiebreak tag {self._tiebreak_tag[0]} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]} ")
+
             # If cleaning application is requested and tag has been changed, apply it to Panorama
-            if self._apply_cleaning and tag_changed:
-                try:
-                    choosen_object[0].apply()
-                except Exception as e:
-                    self._console.log(f"[ {base_location} ] Error when adding tiebreak tag to object {choosen_object[0].about()['name']} : {e}", style="red")
+            if tag_changed:
+                if self._apply_cleaning and not self._bulk_operations:
+                    try:
+                        self._console.log(
+                            f"[ {base_location} ] Adding tiebreak tag {self._tiebreak_tag[0]} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]} ")
+                        choosen_object[0].apply()
+                    except Exception as e:
+                        self._console.log(f"[ {base_location} ] ERROR when adding tiebreak tag to object {choosen_object[0].about()['name']} : {e}", style="red")
+                else:
+                    self._console.log(
+                        f"[ {base_location} ] Tiebreak tag {self._tiebreak_tag[0]} application to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} added to bulk operation pool for context {choosen_object[1]} ")
+                    self._objects[choosen_object[1]]['context'].add(choosen_object[0])
 
         # Returns the chosen object among the provided list
         return choosen_object
@@ -1455,15 +1555,6 @@ class PaloCleaner:
 
         choosen_object = None
         choosen_by_tiebreak = False
-
-        """
-        if len(obj_list) == 1:
-            choosen_object = obj_list[0]
-            if self._superverbose:
-                self._console.log(
-                    f"Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as there's no other existing for value {self.stringify_service(choosen_object[0])}")
-        else:
-        """
 
         # If a tiebreak tag has been specified, this is the decision factor to choose the "best" object
         # Not that if several objects have the tiebreak tag (which is not supposed to happen), the first one of the list
@@ -1536,7 +1627,7 @@ class PaloCleaner:
         # If no best replacement object has been found at this point, display an alert and return the first one in the
         # input list (can lead to random results)
         if not choosen_object:
-            self._console.log(f"ERROR : Unable to choose an object in the following list for service {self.stringify_service(obj_list[0][0])} : {obj_list}. Returning the first one by default", style="red")
+            self._console.log(f"ERROR : Unable to choose an object in the following list for service {PaloCleanerTools.stringify_service(obj_list[0][0])} : {obj_list}. Returning the first one by default", style="red")
             choosen_object = sorted(obj_list, key=lambda x: x[0].about()['name'])[0]
 
         # If an object has not been chosen using the tiebreak tag, but the tiebreak tag adding has been requested,
@@ -1552,15 +1643,19 @@ class PaloCleaner:
             else:
                 choosen_object[0].tag = [self._tiebreak_tag[0]]
                 tag_changed = True
-            if tag_changed:
-                self._console.log(
-                    f"[ {base_location} ] Adding tiebreak tag {self._tiebreak_tag[0]} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]}")
+
             # If cleaning application is requested and tag has been changed, apply it to Panorama
-            if self._apply_cleaning and tag_changed:
-                try:
-                    choosen_object[0].apply()
-                except Exception as e:
-                    self._console.log(f"[ {base_location} ] Error when adding tiebreak tag to object {choosen_object[0].about()['name']} : {e}", style="red")
+            if tag_changed:
+                if self._apply_cleaning and not self._bulk_operations:
+                    try:
+                        self._console.log(
+                            f"[ {base_location} ] Adding tiebreak tag {self._tiebreak_tag[0]} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]}")
+                        choosen_object[0].apply()
+                    except Exception as e:
+                        self._console.log(f"[ {base_location} ] ERROR when adding tiebreak tag to object {choosen_object[0].about()['name']} : {e}", style="red")
+                else:
+                    self._console.log(f"[ {base_location} ] Tiebreak tag {self._tiebreak_tag[0]} application to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} added to bulk operation pool for context {choosen_object[1]} ")
+                    self._objects[choosen_object[1]]['context'].add(choosen_object[0])
 
         # Returns the chosen object among the provided list
         return choosen_object
@@ -1586,7 +1681,11 @@ class PaloCleaner:
         }
 
         # for each object type in the list below
+        # TODO : find best replacement for servicegroup ?
+
         for obj_type in [panos.objects.AddressObject, panos.objects.AddressGroup, panos.objects.ServiceObject]:
+            #self._console.log(f"[ {location_name} ] Child for DeviceGroup {self._objects[location_name]['context']} when optimizing {obj_type} is {self._objects[location_name]['context'].children}")
+
             # for each object of the current type found at the current location
             for (obj, location) in [(o, l) for (o, l) in self._used_objects_sets[location_name] if type(o) is obj_type]:
                 # call the function able to find the best replacement object, for the current object type
@@ -1612,7 +1711,7 @@ class PaloCleaner:
                     # if the chosen replacement object is different than the actual object
                     if replacement_obj != obj:
                         self._console.log(
-                            f"[ {location_name} ] Replacing {obj.about()['name']} ({obj.__class__.__name__}) at location {location} by {replacement_obj.about()['name']} at location {replacement_obj_location}",
+                            f"[ {location_name} ] Replacing {obj.about()['name']!r} ({obj.__class__.__name__}) at location {location} by {replacement_obj.about()['name']!r} at location {replacement_obj_location}",
                             style="green", level=2)
 
                         # Populating the global _replacements dict (for the current location, current object type) with
@@ -1633,7 +1732,29 @@ class PaloCleaner:
                                 'replacement': (replacement_obj, replacement_obj_location),
                                 'blocked': False
                             }
+
                 progress.update(task, advance=1)
+
+            # applying bulk operation update (apply tiebreak tag to objects modified by find_best_replacement_addr_obj()
+            # or find_best_replacement_service_obj()
+            # There should be only objects of type obj_type as children at this point, but filtering on it anyway
+            if self._bulk_operations and (bulk_targets := [x for x in self._objects[location_name]['context'].children if type(x) is obj_type]):
+                self._console.log(f"[ {location_name} ] Applying bulk operation for {obj_type} updates (tiebreak-tag add) ({len(bulk_targets)} objects targeted)")
+                if self._apply_cleaning:
+                    try:
+                        # Using create_similar instead of update_similar
+                        # This method is non-destructive for other objects and combines the modified attributes with the existing objects on the device
+                        bulk_targets[0].create_similar()
+                    except Exception as e:
+                        self._console.log(
+                            f"[ {location_name} ] ERROR when applying bulk operation for {obj_type} updates (tiebreak tag add) : {e}",
+                            style="red")
+
+                # remove all updated objects from the current context children list
+                any(self._objects[location_name]['context'].remove(x) for x in bulk_targets)
+
+        if self._objects[location_name]['context'].children:
+            self._console.log(f"[ {location_name} ] WARNING : {len(self._objects[location_name]['context'].children)} objects still on context children list. Should be empty at this point. PLEASE INVESTIGATE !")
 
     def multithread_wrapper(self, wrapped_func):
         @functools.wraps(wrapped_func)
@@ -1653,15 +1774,16 @@ class PaloCleaner:
                             f"[ ] Error while creating and starting thread {n + 1} for function {wrapped_func.__name__} : {e}",
                             style="red")
             else:
-                wrapped_func(*xargs, **kwargs)
-
-            return wrapped_func(*xargs, **kwargs)
+                return wrapped_func(*xargs, **kwargs)
 
         return wrapper
 
     def replace_object_in_groups(self, location_name: str, progress: rich.progress.Progress, task: rich.progress.TaskID):
         """
         This function replaces the objects for which a better duplicate has been found on the current location groups
+        This cannot be done using bulk requests :
+            update_similar would delete all groups at the current location, except the ones we want to modify
+            create_similar would modify only the concerned groups, but would merge the new members with the existing ones
 
         :param location_name: (str) The name of the location where to replace objects in groups
         :param progress: (rich.progress.Progress) The rich Progress object to update
@@ -1703,13 +1825,15 @@ class PaloCleaner:
                         # for each tag used on the source object instance
                         for tag in source_obj_instance.tag:
                             # if the tag does not exists as a "shared" object
-                            if not [x for x in self._objects['shared']['Tag'] if x.name == tag]:
+                            # TODO : test replaced line
+                            if not tag in self._tag_namesearch['shared']:
                                 # find the original tag (on its actual location)
                                 tag_instance, tag_location = self.get_relative_object_location(tag, location_name,
                                                                                                obj_type="tag")
                                 self._console.log(
                                     f"[ Panorama ] [Thread-{thread_id}] Creating tag {tag!r} (copy from {tag_location}), to be used on ({replacement_obj_instance.about()['name']} at location {replacement_obj_location})")
                                 # if the cleaning application has been requested, create the new tag on Panorama
+                                # (this operation is never done using bulk XML API calls)
                                 if self._apply_cleaning:
                                     try:
                                         self._panorama.add(tag_instance).create()
@@ -1717,25 +1841,41 @@ class PaloCleaner:
                                         self._console.log(f"[ Panorama ] [Thread-{thread_id}] Error while creating tag {tag!r} ! : {e.message}",
                                                           style="red")
                                 # also add the new Tag object at the proper location (shared) on the local cache
+                                # and the various search structures
                                 self._objects['shared']['Tag'].append(tag_instance)
                                 self._used_objects_sets['shared'].add((tag_instance, 'shared'))
+                                self._tag_namesearch['shared'][tag] = tag_instance
 
+                            tag_changed = False
                             # add the new tag to the replacement object
                             if self._nb_thread: lock.acquire()
                             if replacement_obj_instance.tag:
                                 if not tag in replacement_obj_instance.tag:
                                     replacement_obj_instance.tag.append(tag)
-                                    self._console.log(
-                                        f"[ {replacement_obj_location} ] [Thread-{thread_id}] Adding tag {tag} to object {replacement_obj_instance.about()['name']!r} ({replacement_obj_instance.__class__.__name__})",
-                                        style="yellow")
+                                    tag_changed = True
                             else:
                                 replacement_obj_instance.tag = [tag]
+                                tag_changed = True
                                 self._console.log(
                                     f"[ {replacement_obj_location} ] [Thread-{thread_id}] Adding tag {tag} to object {replacement_obj_instance.about()['name']!r} ({replacement_obj_instance.__class__.__name__})",
                                     style="yellow")
-                            # if the cleaning application has been requested, apply the change to the replacement object
-                            if self._apply_cleaning:
-                                replacement_obj_instance.apply()
+
+                            if tag_changed:
+                                if self._apply_cleaning and not self._bulk_operations:
+                                    try:
+                                        self._console.log(
+                                            f"[ {location_name} ] [Thread-{thread_id}] Adding tag {tag} to object {replacement_obj_instance.about()['name']!r} ({replacement_obj_instance.__class__.__name__}) on context {replacement_obj_location}",
+                                            style="yellow")
+                                        replacement_obj_instance.apply()
+                                    except Exception as e:
+                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR when adding tag {tag} to object {replacement_obj_instance.about()['name']!r} ({replacement_obj_instance.__class__.__name__}) on context {replacement_obj_location}", style="red")
+                                else:
+                                    if replacement_obj_instance not in self._objects[replacement_obj_location]['context'].children:
+                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Tag {tag} application to object {replacement_obj_instance.about()['name']!r} ({replacement_obj_instance.__class__.__name__}) added to bulk operation pool for context {replacement_obj_location}")
+                                        self._objects[replacement_obj_location]['context'].add(replacement_obj_instance)
+                                    else:
+                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Tag {tag} application to object {replacement_obj_instance.about()['name']!r} ({replacement_obj_instance.__class__.__name__}) : object already in bulk operation pool for context {replacement_obj_location}")
+
                             if self._nb_thread: lock.release()
 
                     # for each Address type object in the current location objects
@@ -1743,23 +1883,16 @@ class PaloCleaner:
                         # if the type of the current object is a static AddressGroup
                         if type(checked_object) is panos.objects.AddressGroup and checked_object.static_value:
                             changed = False
-                            matched = False
+                            matched = source_obj_instance.about()['name'] in checked_object.static_value
+                            if matched and source_obj_instance.about()['name'] != replacement_obj_instance.about()['name']:
+                                checked_object.static_value.remove(source_obj_instance.about()['name'])
+                                # acquiring lock to avoid multiple threads to try to change a static group members list at the same time 
+                                if self._nb_thread: lock.acquire()
+                                if not replacement_obj_instance.about()['name'] in checked_object.static_value:
+                                    checked_object.static_value.append(replacement_obj_instance.about()['name'])
+                                if self._nb_thread: lock.release()
+                                changed = True
                             try:
-                                # if the name of the replacement object is different than the origin one, then the static
-                                # group members values needs to be updated
-                                if source_obj_instance.about()['name'] != replacement_obj_instance.about()['name']:
-                                    checked_object.static_value.remove(source_obj_instance.about()['name'])
-                                    # adding the replacement object to the group only if it has not been already used to replace
-                                    # another one (case where we have duplicate objects on a static group)
-                                    if not replacement_obj_instance.about()['name'] in checked_object.static_value:
-                                        checked_object.static_value.append(replacement_obj_instance.about()['name'])
-                                    changed = True
-                                    matched = True
-                                # if the name of the replacement object is the same than the original one, the static
-                                # group members values remains the same
-                                elif source_obj_instance.about()['name'] in checked_object.static_value:
-                                    matched = True
-
                                 # If the current object to be replaced has been matched as a member of a static group at the
                                 # current location level, add it to the replacements_done tracking dict
                                 if matched:
@@ -1777,23 +1910,28 @@ class PaloCleaner:
                                                                                    replacement_obj_instance.about()['name'],
                                                                                    replacement_obj_location))
                                     if self._nb_thread: lock.release()
-                            # TODO : check when this error is matched ?? (don't remember, but it probably needs to be here)
-                            except ValueError:
-                                continue
                             except Exception as e:
                                 self._console.log(
                                     f"[ {location_name} ] [Thread-{thread_id}] Unknown error while replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} on {checked_object.about()['name']!r} ({checked_object.__class__.__name__}) : {e}",
                                     style="red")
+
                             # if the cleaning application has been requested, update the modified group on Panorama
-                            if self._apply_cleaning and changed:
-                                checked_object.apply()
+                            # this part cannot be done with bulk operations because of the reason mentioned on the function docstring
+                            if changed:
+                                if self._apply_cleaning:
+                                    try:
+                                        checked_object.apply()
+                                        self._console.log(
+                                            f"[ {location_name} ] [Thread-{thread_id}] Updated group {checked_object.about()['name']} ({checked_object.__class__.__name__}) for replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r}")
+                                    except Exception as e:
+                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR when updating group {checked_object.about()['name']} ({checked_object.__class__.__name__}) for replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} : {e}")
                     self._console.log(
                         f"[ {location_name} ] [Thread-{thread_id}] Finished replacement of {source_obj_instance.about()['name']!r} ({source_obj_location}) by {replacement_obj_instance.about()['name']!r} ({replacement_obj_location}). {jobs_queue.qsize()} replacements remaining on queue"
                     )
 
                 except Exception as e:
                     self._console.log(
-                        f"[ {location_name} ] [Thread-{thread_id}] Unknown error : {e}"
+                        f"[ {location_name} ] [Thread-{thread_id}] Unknown error on replace_in_addr_groups() : {e}"
                     )
                 finally:
                     jobs_queue.task_done()
@@ -1829,27 +1967,15 @@ class PaloCleaner:
                         # if the type of the current object is a ServiceGroup
                         if type(checked_object) is panos.objects.ServiceGroup and checked_object.value:
                             changed = False
-                            matched = False
+                            matched = source_obj_instance.about()['name'] in checked_object.value
+                            if matched and source_obj_instance.about()['name'] != replacement_obj_instance.about()['name']:
+                                checked_object.value.remove(source_obj_instance.about()['name'])
+                                if self._nb_thread: lock.acquire()
+                                if not replacement_obj_instance.about()['name'] in checked_object.value:
+                                    checked_object.value.append(replacement_obj_instance.about()['name'])
+                                if self._nb_thread: lock.release()
+                                changed = True
                             try:
-                                # if the name of the replacement object is different than the origin one, then the static
-                                # group members values needs to be updated
-                                if source_obj_instance.about()['name'] != replacement_obj_instance.about()['name']:
-                                    checked_object.value.remove(source_obj_instance.about()['name'])
-                                    # adding the replacement object to the group only if it has not been already used to replace
-                                    # another one (case where we have duplicate objects on a static group)
-                                    if self._nb_thread: lock.acquire()
-                                    if not replacement_obj_instance.about()['name'] in checked_object.value:
-                                        checked_object.value.append(replacement_obj_instance.about()['name'])
-                                    if self._nb_thread: lock.release()
-                                    changed = True
-                                    matched = True
-                                # if the name of the replacement object is the same than the original one, the static
-                                # group members values remains the same
-                                elif source_obj_instance.about()['name'] in checked_object.value:
-                                    matched = True
-
-                                # If the current object to be replaced has been matched as a member of a static group at the
-                                # current location level, add it to the replacements_done tracking dict
                                 if matched:
                                     self._console.log(
                                         f"[ {location_name} ] [Thread-{thread_id}] Replacing {source_obj_instance.about()['name']!r} ({source_obj_location}) by {replacement_obj_instance.about()['name']!r} ({replacement_obj_location}) on {checked_object.about()['name']!r} ({checked_object.__class__.__name__})",
@@ -1865,22 +1991,32 @@ class PaloCleaner:
                                                                                    replacement_obj_instance.about()['name'],
                                                                                    replacement_obj_location))
                                     if self._nb_thread: lock.release()
-                            # TODO : check when this error is matched ?? (don't remember, but it probably needs to be here)
-                            except ValueError:
-                                continue
                             except Exception as e:
                                 self._console.log(
                                     f"[ {location_name} ] Unknown error while replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} on {checked_object.about()['name']!r} ({checked_object.__class__.__name__}) : {e}",
                                     style="red")
+
                             # if the cleaning application has been requested, update the modified group on Panorama
-                            if self._apply_cleaning and changed:
-                                checked_object.apply()
+                            if changed:
+                                if self._apply_cleaning and not self._bulk_operations:
+                                    try:
+                                        checked_object.apply()
+                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Updated group {checked_object.about()['name']} ({checked_object.__class__.__name__}) for replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r}")
+                                    except Exception as e:
+                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR when updating group {checked_object.about()['name']} ({checked_object.__class__.__name__}) for replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} : {e}")
+                                else:
+                                    if checked_object not in self._objects[location_name]['context'].children:
+                                        self._objects[location_name]['context'].add(checked_object)
+                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Update of group {checked_object.about()['name']} ({checked_object.__class__.__name__}) added to bulk operation pool for context {location_name}")
+                                    else:
+                                        self._console.log(
+                                            f"[ {location_name} ] [Thread-{thread_id}] Update of group {checked_object.about()['name']} ({checked_object.__class__.__name__}) : object already in bulk operation pool for context {location_name}")
                     self._console.log(
                         f"[ {location_name} ] [Thread-{thread_id}] Finished replacement of {source_obj_instance.about()['name']!r} ({source_obj_location}) by {replacement_obj_instance.about()['name']!r} ({replacement_obj_location}). {jobs_queue.qsize()} replacements remaining on queue"
                     )
                 except Exception as e:
                     self._console.log(
-                        f"[ {location_name} ] [Thread-{thread_id}] Unknown error : {e}"
+                        f"[ {location_name} ] [Thread-{thread_id}] Unknown error on replace_in_service_groups() : {e}"
                     )
                 finally:
                     jobs_queue.task_done()
@@ -1902,6 +2038,33 @@ class PaloCleaner:
 
         replace_in_service_groups(jobs_queue, progress, task)
         jobs_queue.join()
+
+        # applying bulk operations in the pool
+        # THIS SHOULD NEVER BE USED AS GROUP UPDATES ARE NOT DONE THROUGH BULK XML CALLS 
+        if self._bulk_operations:
+            # extract objects types in DG childrens
+            child_obj_types = {type(x) for x in self._objects[location_name]['context'].children if "Group" in str(type(x))}
+            for curr_type in child_obj_types:
+                bulk_targets = [x for x in self._objects[location_name]['context'].children if type(x) is curr_type]
+                self._console.log(
+                    f"[ {location_name} ] Applying bulk operation for {bulk_targets[0].__class__.__name__} updates ({len(bulk_targets)} objects targeted). THIS SHOULD NOT BE USED !!!", style="red")
+                if self._apply_cleaning:
+                    try:
+                        bulk_targets[0].apply_similar()
+                    except Exception as e:
+                        self._console.log(f"[ {location_name} ] ERROR when applying bulk operation for {bulk_targets[0].__class__.__name__} updates : {e}", style="red")
+                any(self._objects[location_name]['context'].children.remove(x) for x in bulk_targets)
+            """
+            while self._objects[location_name]['context'].children:
+                bulk_targets = [x for x in self._objects[location_name]['context'].children if type(x) is type(self._objects[location_name]['context'].children[0])]
+                self._console.log(f"[ {location_name} ] Applying bulk operation for {bulk_targets[0].__class__.__name__} updates ({len(bulk_targets)} objects targeted)")
+                if self._apply_cleaning:
+                    try:
+                        bulk_targets[0].apply_similar()
+                    except Exception as e:
+                        self._console.log(f"[ {location_name} ] ERROR when applying bulk operation for {bulk_targets[0].__class__.__name__} updates : {e}", style="red")
+                any(self._objects[location_name]['context'].children.remove(x) for x in bulk_targets)
+            """
 
         # for each group on which a replacement has been done
         for changed_group_name in replacements_done:
@@ -1994,7 +2157,10 @@ class PaloCleaner:
 
                         # Thanks to the field format obtained from the repl_map descriptor, iterate directly over the
                         # not_null_field list (if it is already a list), or convert it to a list to iterate
-                        field_values = not_null_field if field_type is list else [not_null_field]
+
+                        # modified to use directly the obtained field format instead of relying on the repl_map descriptor information
+                        #field_values = not_null_field if field_type is list else [not_null_field]
+                        field_values = not_null_field if type(not_null_field) is list else [not_null_field]
                         for o in field_values:
                             # Using the Walrus operator again to get the replacement information for the current object
                             # (if there's any)
@@ -2051,14 +2217,15 @@ class PaloCleaner:
                     if current_field_replacements_count > max_replace:
                         max_replace = current_field_replacements_count
 
-            if self._apply_cleaning and editable_rule and any_change_done:
-                try:
-                    rule.apply()
-                    self._console.log(f"[ {location_name} ] Cleaning applied to rule {r.name}")
-                except Exception as e:
-                    self._console.log(
-                        f"[ {location_name} ] Error when applying cleaning to rule {r.name} : {e}",
-                        style="red")
+            if editable_rule and any_change_done:
+                if self._apply_cleaning:
+                    try:
+                        rule.apply()
+                        self._console.log(f"[ {location_name} ] Cleaning applied to rule {rule.name!r}")
+                    except Exception as e:
+                        self._console.log(
+                            f"[ {location_name} ] Error when applying cleaning to rule {rule.name!r} : {e}",
+                            style="red")
 
             # Returns the replacements_done dict, the total number of replacements for the current rule (replacements_count),
             # and the max_replace value (highest number of replacements for a given field) for proper display on the output report
@@ -2085,6 +2252,8 @@ class PaloCleaner:
         for rulebase_name, rulebase in self._rulebases[location_name].items():
             # if the current item is a rulebase (and not the context DeviceGroup object), and is not empty
             if rulebase_name != "context" and len(rulebase) > 0:
+                # add the first rule parent (PreRulebase() PostRulebase() or Rulebase()) to the device group
+                self._objects[location_name]['context'].add(rulebase[0].parent)
                 # initialize a variable which will count the number of replacements done for this rulebase
                 total_replacements = c_int32(0)
                 # initialize a variable which will count the number of edited rules for the current rulebase
@@ -2119,7 +2288,7 @@ class PaloCleaner:
                             break
                         try:
                             r = jobs_queue.get()
-                            # this boolean variable will define is the rule timestamps are in the boundaries to allow modifications
+                            # this boolean variable will define if the rule timestamps are in the boundaries to allow modifications
                             # (if opstate check is used for this processing, regarding last_hit_timestamp and last_change_timestamp)
                             editable_rule = False
                             rule_counters = self._hitcounts.get(location_name, dict()).get(hitcount_rb_name, dict()).get(r.name,
@@ -2151,10 +2320,13 @@ class PaloCleaner:
 
                                 # if the rule has changes but is not considered as editable (not in timestamp boundaries
                                 # regarding opstate timestamps), protect the rule objects from deletion
-                                if not editable_rule:
+                                if not editable_rule or "noopstate" in r.name:
                                     for obj_type, fields in repl_map[type(r)].items():
                                         for f in fields:
-                                            if (field_values := getattr(r, f[0]) if type(f) is list else [getattr(r, f)]):
+                                            field_values = getattr(r, f[0])
+                                            field_values = [field_values] if type(field_values) is str else field_values
+                                            #if (field_values := getattr(r, f[0]) if type(f) is list else [getattr(r, f)]):
+                                            if field_values:
                                                 for object_name in field_values:
                                                     if object_name in self._replacements[location_name][obj_type]:
                                                         self._replacements[location_name][obj_type][object_name][
@@ -2207,7 +2379,8 @@ class PaloCleaner:
                                         style="dim" if r.disabled else None,
                                     )
                             self._console.log(
-                                f"[ {location_name} ] [Thread-{thread_id}] Finished replacements on rule {r.name!r}. {jobs_queue.qsize()} rules remaining on queue"
+                                f"[ {location_name} ] [Thread-{thread_id}] Finished replacements on rule {r.name!r}. {jobs_queue.qsize()} rules remaining on queue",
+                                level=2
                             )
                         except Exception as e:
                             self._console.log(
@@ -2230,6 +2403,8 @@ class PaloCleaner:
                     self._console.print(rulebase_table)
                     self._console.log(
                         f"[ {location_name} ] {modified_rules} rules edited for the current rulebase ({rulebase_name})")
+
+                self._objects[location_name]['context'].remove(rulebase[0].parent)
 
     def clean_local_object_set(self, location_name: str):
         """
@@ -2297,6 +2472,14 @@ class PaloCleaner:
             x: {'removed': 0, 'replaced': 0} for x in self._replacements.get(location_name, list())
         }
 
+        # Cache used for flatten objects when using tags protection
+        # TODO : better comments
+        resolved_cache = dict({'Address': list(), 'Service': list(), 'Tag': list()})
+
+        # optimized_only set to True if we are on unused-only mode with a list of device-groups specified, and the current location being cleaned is not in this list
+        # (which means that we don't want to delete anything at this level, but we need to make sure that used objects at this level will be protected upward, if the upward device-group is on the list)
+        optimized_only = True if (self._unused_only is not None and len(self._unused_only) > 0 and location_name not in self._unused_only) else False
+
         # removing replaced objects from used_objects_set for current location_name
         for obj_type in self._replacements.get(location_name, list()):
             for name, infos in self._replacements[location_name][obj_type].items():
@@ -2306,18 +2489,29 @@ class PaloCleaner:
                 if not infos['blocked']:
                     try:
                         # For the current replacement, remove the original object from the _used_objects_set for the
-                        # current location, and replace it with the replacement object
-                        self._used_objects_sets[location_name].remove(infos['source'])
-                        self._used_objects_sets[location_name].add(infos['replacement'])
+                        # current location (if not using the --unused-only argument),
+                        # and replace it with the replacement object
+                        if self._unused_only is None:
+                            self._used_objects_sets[location_name].remove(infos['source'])
+                        if self._unused_only is None or (self._unused_only is not None and self._protect_potential_replacements):
+                            if infos['replacement'] not in self._used_objects_sets[location_name]:
+                                # flattening the replacement object to add also its dependencies (ie : Tags)
+                                # TODO : check if any issue can appear when using multithreading (need to use another lock here ?)
+                                replacements_dependencies_set = self.flatten_object(*infos['replacement'], location_name)
+                                any(self._used_objects_sets[location_name].add(x) for x in replacements_dependencies_set)
+                                self._console.log(f"[ {location_name} ] Added replacement object and dependencies ({replacements_dependencies_set}) to used objects set", level=2)
+                            else:
+                                self._console.log(f"[ {location_name} ] Replacement object ({infos['replacement']}) already processed for local context", level=2)
                         self._console.log(f"[ {location_name} ] Removing unprotected object {name} (location {infos['source'][1]}) from used objects set", level=2)
                         # If the name of the current replacement object is different than the replacement one, count it
                         # as a replacement on the _cleaning_counts tracker
-                        if infos['source'][1] == location_name and infos['source'][0].name != infos['replacement'][0].name:
+                        if not optimized_only and not self._unused_only and infos['source'][1] == location_name and infos['source'][0].name != infos['replacement'][0].name:
                             self._cleaning_counts[location_name][obj_type]['replaced'] += 1
                     # This exception should never be raised but protects the execution
                     except ValueError:
                         self._console.log(f"[ {location_name} ] ValueError when trying to remove {name} from used objects set : object not found on object set")
                 else:
+                    # TODO : flatten protected object for dependencies protection ?
                     self._console.log(f"[ {location_name} ] Not removing {name} (location {infos['source'][1]}) from used objects set, as protected by hitcount", level=2)
 
         # After cleaning the current device-group, adding the current location _used_objects_set values to the
@@ -2326,18 +2520,114 @@ class PaloCleaner:
         # not used on the parents
         upward_dg = self._dg_hierarchy[location_name].parent
         upward_dg_name = "shared" if not upward_dg else upward_dg.name
-        self._used_objects_sets[upward_dg_name] = self._used_objects_sets[upward_dg_name].union(self._used_objects_sets[location_name])
+        self._console.log(f"[ {location_name} ] Found parent DG is {upward_dg_name}", level=3)
 
-        if self._unused_only and location_name not in self._unused_only:
-            return
+        # improvement : try to replicate upward only objects not attached to the current device-group (useless) 
+        #self._used_objects_sets[upward_dg_name] = self._used_objects_sets[upward_dg_name].union(self._used_objects_sets[location_name])
+        self._used_objects_sets[upward_dg_name] = self._used_objects_sets[upward_dg_name].union([x for x in self._used_objects_sets[location_name] if not x[1]==location_name])
+
+        if optimized_only:
+            return None
+
+        @self.multithread_wrapper
+        def delete_local_objects_mthread(jobs_queue: Queue, dg: DeviceGroup, lock=None, thread_id=0):
+            while True:
+                if jobs_queue.empty():
+                    break
+                try:
+                    obj = jobs_queue.get()
+                    shortened_obj_type = PaloCleanerTools.shorten_object_type(obj.__class__.__name__)
+                    self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Checking tag protection of object {obj.name} ({obj.__class__.__name__})", level=2)
+                    try:
+                        if obj.tag:
+                            self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Object has tags : {obj.tag}", level=2)
+                            if set(obj.tag).intersection(self._protect_tags) or obj.name in indirect_protect[shortened_obj_type]:
+                                indirect_protect["Tag"].update(obj.tag)
+
+                                if "Group" in obj.__class__.__name__:
+                                    if obj.static_value:
+                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Object {obj.name} ({obj.__class__.__name__}) has static members. Flattening to protect all linked objects")
+                                        linked_objects = self.flatten_object(obj, location_name, location_name, resolved_cache=resolved_cache)
+                                        for (o, o_location) in linked_objects:
+                                            self._console.log(f"[ {o_location} ] [Thread-{thread_id}] Protecting object {o.name} ({o.__class__.__name__} / {shortened_obj_type})", level=2)
+                                            indirect_protect[shortened_obj_type].add(o.name)
+                                continue
+                    except AttributeError as e:
+                        pass
+                    except Exception as e:
+                        self._console.log(f"[Thread-{thread_id}] UNKNOWN EXCEPTION : {e}", style="red")
+
+                    if obj.name in indirect_protect[shortened_obj_type]:
+                        continue
+
+                    if self._apply_cleaning and not (obj, location_name) in self._used_objects_sets[location_name]:
+                        delete_ok = False
+                        while not delete_ok:
+                            try:
+                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Trying to delete object {obj.name} ({obj.__class__.__name__})")
+                                dg.add(obj)
+                                obj.delete()
+                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Object {obj.name} ({obj.__class__.__name__}) has been successfuly deleted ")
+                                self._cleaning_counts[location_name][shortened_obj_type]['removed'] += 1
+                                delete_ok = True
+                            except panos.errors.PanDeviceXapiError as e:
+                                dependencies, all_matched = parse_PanDeviceXapiError_references(e.message)
+                                if not all_matched:
+                                    self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR : It seems that object {obj.name} ({obj.__class__.__name__}) is used somewhere in the configuration, on device-group {location_name}. It will not be deleted. Please check manually")
+                                    self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR content : {e.message}")
+                                    delete_ok = True
+                                    continue
+                                else:
+                                    # The following should never be matched, as we are not supposed to try to delete
+                                    # an object which is still used on a rule at this time of the process
+                                    # Keeping it for security purposes
+
+                                    # first catching error where Panorama refuses to delete an object while it does not returns any valid dependency
+                                    if sum(len(dep) for dep_type, dep in dependencies.items()) == 0:
+                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR : It seems that object {obj.name} ({obj.__class__.__name__}) has invalid dependencies. Please try to fix it manually !!!")
+                                        delete_ok = True
+
+                                    # then proceed with actions for the different types of dependencies
+                                    for rule_dependency in dependencies["Rules"]:
+                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR : It seems that object {obj.name} ({obj.__class__.__name__}) is still used on the following rule : {rule_dependency['rule_location']} / {rule_dependency['rulename']}. It will not be deleted. Please check manually")
+                                        delete_ok = True
+                                    if delete_ok:
+                                        continue
+
+                                    for group_dependency in dependencies["AddressGroups"]:
+                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Group {obj.name} ({obj.__class__.__name__}) is still used on another AddressGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
+                                        referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'])
+                                        referencer_group.static_value.remove(obj.name)
+                                        referencer_group.apply()
+
+                                    for group_dependency in dependencies["ServiceGroups"]:
+                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Group {obj.name} ({obj.__class__.__name__}) is still used on another ServiceGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
+                                        referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'], obj_type="Service")
+                                        referencer_group.value.remove(obj.name)
+                                        referencer_group.apply()
+                            except Exception as e:
+                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR when trying to delete object {obj.name} ({obj.__class__.__name__}) : {e}")
+
+                    elif not (obj, location_name) in self._used_objects_sets[location_name]:
+                        self._console.log(
+                            f"[ {location_name} ] [Thread-{thread_id}] Object {obj.name} ({obj.__class__.__name__}) can be deleted")
+                        self._cleaning_counts[location_name][shortened_obj_type]['removed'] += 1
+                except Exception as e:
+                    self._console.log(
+                        f"[ {location_name} ] [Thread-{thread_id}] Unknown error on delete_local_objects() : {e}"
+                    )
+                finally:
+                    jobs_queue.task_done()
+                    if self._nb_thread and lock.locked():
+                        lock.release()
+
 
         # Iterating over each object type / object for the current location, and check if each object is member
         # (or still member, as the replaced ones have been suppressed) of the _used_objects_set for the same location
         # If they are not, they can be deleted
         # We start by the groups (removing all members before deleting the group, to avoid inter-dependency between groups)
         # Then we delete AddressObjects and ServiceObjects, then Tags
-        @self.multithread_wrapper
-        def delete_local_objects(jobs_queue, lock=None, thread_id=0):
+        def delete_local_objects_bulk(jobs_queue: Queue, dg: DeviceGroup, lock=None, thread_id=0):
 
             while True:
                 if jobs_queue.empty():
@@ -2346,95 +2636,105 @@ class PaloCleaner:
                     obj_item = jobs_queue.get()
                     obj_type = list(obj_item.keys())[0]
                     obj_instance = obj_item[obj_type]
+
+                    # This is for delete_similar reference
+                    first_to_be_deleted = None
+
                     for o in self._objects[location_name][obj_type]:
-                        #if o.__class__.__name__ is obj_instance.__name__ and not (o, location_name) in self._used_objects_sets[location_name] and not o.name in indirect_protect[obj_type]:
-                        if o.__class__.__name__ is obj_instance.__name__ and not (o, location_name) in self._used_objects_sets[location_name]:
+                        if type(o) is obj_instance:
+                            self._console.log(f"[ {location_name} ] Checking tag protection of object {o.name} ({obj_instance.__name__})", level=2)
                             try:
                                 if o.tag:
+                                    self._console.log(f"[ {location_name} ] Object has tags : {o.tag}", level=2)
                                     if set(o.tag).intersection(self._protect_tags) or o.name in indirect_protect[obj_type]:
                                         # protecting the other tags used on the protected object from being deleted later
+                                        # this is done for all type of objects (Service, Address, ServiceGroup, AddressGroup)
                                         indirect_protect["Tag"].update(o.tag)
-                                        # in case of a protected group, protecting the members from being deleted later
+
+                                        # in case of a protected group, protecting the members from being deleted later (+ all associated objects, like tags)
+                                        # this is done only for static groups, using the flatten_objects method
+                                        # dynamic groups members are not protected (except if they have a --protect-tags matching tag)
                                         if "Group" in obj_instance.__name__:
-                                            indirect_protect[obj_type].update(o.static_value)
+                                            if o.static_value:
+                                                self._console.log(f"[ {location_name} ] Object {o.name} ({obj_instance.__name__}) has static members. Flattening to protect all linked objects")
+                                                linked_objects = self.flatten_object(o, location_name, location_name, resolved_cache=resolved_cache)
+
+                                                for (o, o_location) in linked_objects:
+                                                    shorten_type = PaloCleanerTools.shorten_object_type(o.__class__.__name__)
+                                                    self._console.log(f"[ {o_location} ] Protecting object {o.name} ({o.__class__.__name__} / {shorten_type})", level=2)
+                                                    indirect_protect[shorten_type].add(o.name)
                                         continue
                             except AttributeError as e:
                                 pass
+                            except Exception as e:
+                                self._console.log(f"UNKNOWN EXCEPTION : {e}", style="red")
+
                             if o.name in indirect_protect[obj_type]:
                                 continue
 
-                            if self._apply_cleaning:
-                                delete_ok = False
-                                while not delete_ok:
-                                    try:
-                                        o.delete()
-                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Object {o.name} ({o.__class__.__name__}) has been successfuly deleted ", style="red")
-                                        self._cleaning_counts[location_name][obj_type]['removed'] += 1
-                                        delete_ok = True
-                                    except panos.errors.PanDeviceXapiError as e:
-                                        dependencies, all_matched = parse_PanDeviceXapiError_references(e.message)
-                                        if not all_matched:
-                                            self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR : It seems that object {o.name} ({o.__class__.__name__}) is used somewhere in the configuration, on device-group {location_name}. It will not be deleted. Please check manually")
-                                            self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR content : {e.message}")
-                                            delete_ok = True
-                                            continue
-                                        else:
-                                            # The following should never be matched, as we are not supposed to try to delete
-                                            # an object which is still used on a rule at this time of the process
-                                            # Keeping it for security purposes
-                                            for rule_dependency in dependencies["Rules"]:
-                                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR : It seems that object {o.name} ({o.__class__.__name__}) is still used on the following rule : {rule_dependency['rule_location']} / {rule_dependency['rulename']}. It will not be deleted. Please check manually")
-                                                delete_ok = True
-                                            if delete_ok:
-                                                continue
-
-                                            for group_dependency in dependencies["AddressGroups"]:
-                                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Group {o.name} ({o.__class__.__name__}) is still used on another AddressGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
-                                                referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'])
-                                                referencer_group.static_value.remove(o.name)
-                                                referencer_group.apply()
-
-                                            for group_dependency in dependencies["ServiceGroups"]:
-                                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Group {o.name} ({o.__class__.__name__}) is still used on another ServiceGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
-                                                referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'], obj_type="Service")
-                                                referencer_group.value.remove(o.name)
-                                                referencer_group.apply()
-                            else:
+                            if self._apply_cleaning and not (o, location_name) in self._used_objects_sets[location_name]:
+                                dg.add(o)
+                                if not first_to_be_deleted:
+                                    first_to_be_deleted = o
+                            elif not (o, location_name) in self._used_objects_sets[location_name]:
                                 self._console.log(
-                                    f"[ {location_name} ] [Thread-{thread_id}] Object {o.name} ({o.__class__.__name__}) can be deleted", style="red")
+                                    f"[ {location_name} ] [Thread-{thread_id}] Object {o.name} ({o.__class__.__name__}) can be deleted")
                                 self._cleaning_counts[location_name][obj_type]['removed'] += 1
+
+                    if self._apply_cleaning and first_to_be_deleted:
+                        try:
+                            # if objects to be deleted are static groups, first empty them to avoid deletion issues because of circular references
+                            # this cannot be done as a bulk action as apply_similar would delete all other groups, and create_similar would not to anything (merging members)
+                            if isinstance(first_to_be_deleted, AddressGroup):
+                                #filtering on static groups only
+                                for child_add_group in [g for g in dg.children if g.static_value]:
+                                    self._console.log(f"[ {location_name} ] Preparing bulk action to empty group {child_add_group.name}")
+                                    child_add_group.static_value = list()
+                                    child_add_group.apply()
+                            else:
+                                self._console.log(f"[ {location_name} ] Sending bulk action for deletion of {o.__class__.__name__}")
+                            first_to_be_deleted.delete_similar()
+                        except Exception as e:
+                            self._console.log(f"[ {location_name} ] ERROR with bulk action : {e}", style="red")
                 except Exception as e:
                     self._console.log(
-                        f"[ {location_name} ] [Thread-{thread_id}] Unknown error : {e}"
+                        f"[ {location_name} ] [Thread-{thread_id}] Unknown error on delete_local_objects() : {e}"
                     )
                 finally:
                     jobs_queue.task_done()
-                    if self._nb_thread and lock.locked():
-                        lock.release()
 
+                    self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Cleaning done for object type {obj_instance.__name__}")
+
+        # Queue to which the jobs will be stored, waiting to be executed
+        # It will be used differently, based if we are in single / multithreading mode (each job will consist in deleting a single object)
+        # while if in bulk delete mode, each job will consist in deleting all objects of a given type 
         jobs_queue = Queue()
 
         # dict used to store indirectly protected object (because of protect-tags parameter used at startup)
         indirect_protect = dict()
+        indirect_protect['Tag'] = set()
+        indirect_protect['Tag'].update(self._protect_tags)
+        indirect_protect['Tag'].update(self._tiebreak_tag)
 
-        # for each object item of the current location
-        for obj_item in [v for k, v in sorted(cleaning_order.items())]:
-            jobs_queue.put(obj_item)
-            indirect_protect[list(obj_item.keys())[0]] = set()
+        local_dg = self._objects[location_name]['context']
 
-        indirect_protect["Tag"].update(self._protect_tags)
-        indirect_protect["Tag"].update(self._tiebreak_tag)
+        if self._bulk_operations:
+            for obj_item in [v for k, v in sorted(cleaning_order.items())]:
+                jobs_queue.put(obj_item)
+                if not indirect_protect.get(list(obj_item.keys())[0]):
+                    indirect_protect[list(obj_item.keys())[0]] = set()
+            delete_local_objects_bulk(jobs_queue, local_dg)
+            jobs_queue.join()
+        else:
+            for obj_item in [v for k, v in sorted(cleaning_order.items())]:
+                for obj in self._objects[location_name][list(obj_item.keys())[0]]:
+                    if type(obj) is obj_item[list(obj_item.keys())[0]]:
+                        jobs_queue.put(obj)
+                if not indirect_protect.get(list(obj_item.keys())[0]):
+                    indirect_protect[list(obj_item.keys())[0]] = set()
+                delete_local_objects_mthread(jobs_queue, local_dg)
+                jobs_queue.join()
+                self._console.log(f"[ {location_name} ] Queue joined before moving to next object type", level=2)
 
-        delete_local_objects(jobs_queue) # obj_item is passed to be treated are we are not using threads
-        jobs_queue.join()
-
-        """
-        for type in sorted(self._objects[location_name].items(), reverse=True):
-            if type != "context":
-                for o in self._objects[location_name][type]:
-                    if not (o, location_name) in self._used_objects_sets[location_name]:
-                        self._console.log(f"Object {o.name} ({o.__class__.__name__}) can be deleted at location {location_name}")
-                        self._cleaning_counts[location_name][type]['removed'] += 1
-                        if self._apply_cleaning:
-                            successful_delete = False
-        """
+        #if local_dg != self._panorama:
+        #    self._panorama.remove(local_dg)

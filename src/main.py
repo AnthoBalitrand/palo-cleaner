@@ -112,6 +112,7 @@ def parse_cli_args():
 
     parser.add_argument(
         "--ignore-appliances-opstate",
+        nargs = "+",
         action = "extend",
         type = str,
         help = "List of appliances IP address for which opstate needs to be ignored (will not connect to get hitcounts)"
@@ -122,8 +123,15 @@ def parse_cli_args():
         nargs="*",
         action = "extend",
         type=str,
-        help = "Only deletes unused objects. No replacements are realized",
+        help = "Only deletes unused objects. No replacements are realized. List of device-groups can be provided. Will work only if the provided device-groups are fully included in the analysis",
         default = None
+    )
+
+    parser.add_argument(
+        "--protect-potential-replacements",
+        action = "store_true",
+        help = "Only when using --unused-only. Permits to not delete objects that could be used as replacements, even if they are not used for now",
+        default = False
     )
 
     parser.add_argument(
@@ -132,6 +140,20 @@ def parse_cli_args():
         action="extend",
         type=str,
         help = "List of tags which will protect objects from deletion"
+    )
+
+    parser.add_argument(
+        "--bulk-operations",
+        action = "store_true",
+        help = "API calls using bulk operations",
+        default = False
+    )
+
+    parser.add_argument(
+        "--same-name-only",
+        action = "store_true",
+        help = "Only replaces objects by ones existing at upward levels, and having same values",
+        default = False
     )
 
     return parser.parse_args()
@@ -144,6 +166,14 @@ def main():
     # if the --apply-tiebreak-tag has been used without the --tiebreak-tag argument value, raise en error and exit
     if start_cli_args.apply_tiebreak_tag and not start_cli_args.tiebreak_tag:
         print("\n ERROR - --apply-tiebreak-tag has been called without --tiebreak-tag \n")
+        exit(0)
+
+    if start_cli_args.protect_potential_replacements and start_cli_args.unused_only is None:
+        print("\n ERROR - --protect-potential-replacements has been called without --unused-only \n")
+        exit(0)
+
+    if start_cli_args.bulk_operations and start_cli_args.number_of_threads is not None:
+        print("\n Error - --bulk-operations cannot be used in conjunction with --multithread \n")
         exit(0)
 
     # create the report directory if requested
