@@ -9,7 +9,7 @@ from rich.traceback import install
 import panos.objects
 from panos.panorama import Panorama, DeviceGroup, PanoramaDeviceGroupHierarchy
 from panos.objects import AddressObject, AddressGroup, Tag, ServiceObject, ServiceGroup
-from panos.policies import SecurityRule, PreRulebase, PostRulebase, Rulebase, NatRule, AuthenticationRule, PolicyBasedForwarding
+from panos.policies import SecurityRule, PreRulebase, PostRulebase, Rulebase, NatRule, AuthenticationRule, PolicyBasedForwarding, DecryptionRule, ApplicationOverride
 from panos.predefined import Predefined
 from panos.errors import PanXapiError
 from panos.firewall import Firewall
@@ -2714,7 +2714,7 @@ class PaloCleaner:
         indirect_protect = dict()
         indirect_protect['Tag'] = set()
         indirect_protect['Tag'].update(self._protect_tags)
-        indirect_protect['Tag'].update(self._tiebreak_tag)
+        indirect_protect['Tag'].update(self._tiebreak_tag if self._tiebreak_tag else [])
 
         local_dg = self._objects[location_name]['context']
 

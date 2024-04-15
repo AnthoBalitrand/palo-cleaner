@@ -1,5 +1,5 @@
 from panos.objects import AddressObject, AddressGroup, Tag, ServiceObject, ServiceGroup
-from panos.policies import SecurityRule, NatRule, AuthenticationRule, PolicyBasedForwarding
+from panos.policies import SecurityRule, NatRule, AuthenticationRule, PolicyBasedForwarding, DecryptionRule, ApplicationOverride
 
 # The structure below identifies the attributes and their format used on each type of rules
 # it permits to identify which "referenced object type" can be found on each rule attribute,
