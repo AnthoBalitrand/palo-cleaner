@@ -2407,7 +2407,7 @@ class PaloCleaner:
                 if total_replacements:
                     self._console.print(rulebase_table)
                     self._console.log(
-                        f"[ {location_name} ] {modified_rules} rules edited for the current rulebase ({rulebase_name})")
+                        f"[ {location_name} ] {modified_rules.value} rules edited for the current rulebase ({rulebase_name})")
 
                 self._objects[location_name]['context'].remove(rulebase[0].parent)
 
@@ -2764,7 +2764,7 @@ class PaloCleaner:
 
                         if add_to_queue:
                             jobs_queue.put(obj)
-                            
+
                 delete_local_objects_mthread(jobs_queue, local_dg)
                 jobs_queue.join()
                 self._console.log(f"[ {location_name} ] Queue joined before moving to next object type", level=2)
