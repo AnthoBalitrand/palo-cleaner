@@ -23,7 +23,8 @@ repl_map = {
             "source_translation_static_translated_address",
             "destination_translated_address",
             ["source_translation_fallback_translated_addresses"],
-            "source_translation_fallback_ip_address"
+            "source_translation_fallback_ip_address", 
+            "destination_dynamic_translated_address"
         ],
         "Service": ["service"],
         "Tag": [["tag"]],

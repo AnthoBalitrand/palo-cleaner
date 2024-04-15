@@ -61,6 +61,7 @@ class PaloCleaner:
         self._same_name_only = kwargs['same_name_only']         # boolean, indicating if we are running in a mode where we only replace objects existing with same name (and value) upward
         self._nb_thread = kwargs['number_of_threads']           # number of threads to generate when using multithread mode 
         self._unused_only = kwargs['unused_only']               # list of device-groups on which we want to delete unused only objects. If this argument has been provided at startup without specifying device-groups, it will be an empty list. If not provided at all, will be None 
+        self._remove_unused_dependencies = kwargs["remove_unused_dependencies"]    # boolean, indicating if dependencies of unused objects on lower-level groups (unused too) can be deleted for upper object removal
         if self._nb_thread is not None:
             if self._nb_thread == 0: # No value provided, we take the number of system's CPU
                 try:
@@ -2595,20 +2596,39 @@ class PaloCleaner:
                                     for rule_dependency in dependencies["Rules"]:
                                         self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR : It seems that object {obj.name} ({obj.__class__.__name__}) is still used on the following rule : {rule_dependency['rule_location']} / {rule_dependency['rulename']}. It will not be deleted. Please check manually")
                                         delete_ok = True
+
+                                    if self._remove_unused_dependencies:
+                                        for group_dependency in dependencies["AddressGroups"]:
+                                            try:
+                                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] {obj.name} ({obj.__class__.__name__}) is still used on another AddressGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
+                                                referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'])
+                                                self._panorama.add(self._objects[group_dependency['location']]['context'])
+                                                referencer_group.static_value.remove(obj.name)
+                                                referencer_group.apply()
+                                                self._panorama.remove(self._objects[group_dependency['location']]['context'])
+                                            except Exception as e:
+                                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Error when removing dependency for {obj.name} on AddressGroup {group_dependency['groupname']} at location {group_dependency['location']}")
+                                        for group_dependency in dependencies["ServiceGroups"]:
+                                            try:
+                                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] {obj.name} ({obj.__class__.__name__}) is still used on another ServiceGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
+                                                referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'], obj_type="Service")
+                                                self._panorama.add(self._objects[group_dependency['location']]['context'])
+                                                referencer_group.value.remove(obj.name)
+                                                referencer_group.apply()
+                                                self._panorama.remove(self._objects[group_dependency['location']]['context'])
+                                            except Exception as e:
+                                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Error when removing dependency for {obj.name} on ServiceGroup : {group_dependency['groupname']} at location {group_dependency['location']}")
+                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Object {obj.name} ({obj.__class__.__name__}) has been successfuly deleted ")
+                                        delete_ok = True
+                                    else:
+                                        for group_dependency in dependencies["AddressGroups"]:
+                                            self._console.log(f"[ {location_name} ] [Thread-{thread_id}] {obj.name} ({obj.__class__.__name__}) is still used on another AddressGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Will not be deleted")
+                                        for group_dependency in dependencies["ServiceGroups"]:
+                                            self._console.log(f"[ {location_name} ] [Thread-{thread_id}] {obj.name} ({obj.__class__.__name__}) is still used on another ServiceGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Will not be deleted")
+                                        delete_ok = True
                                     if delete_ok:
                                         continue
 
-                                    for group_dependency in dependencies["AddressGroups"]:
-                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Group {obj.name} ({obj.__class__.__name__}) is still used on another AddressGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
-                                        referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'])
-                                        referencer_group.static_value.remove(obj.name)
-                                        referencer_group.apply()
-
-                                    for group_dependency in dependencies["ServiceGroups"]:
-                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Group {obj.name} ({obj.__class__.__name__}) is still used on another ServiceGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
-                                        referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'], obj_type="Service")
-                                        referencer_group.value.remove(obj.name)
-                                        referencer_group.apply()
                             except Exception as e:
                                 self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR when trying to delete object {obj.name} ({obj.__class__.__name__}) : {e}")
 

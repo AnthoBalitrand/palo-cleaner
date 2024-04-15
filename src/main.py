@@ -128,6 +128,13 @@ def parse_cli_args():
     )
 
     parser.add_argument(
+        "--remove-unused-dependencies", 
+        action = "store_true", 
+        help = "Only when using --unused-only. Permits to remove dependencies for unused objects on lower-level groups",
+        default = False
+    )
+
+    parser.add_argument(
         "--protect-potential-replacements",
         action = "store_true",
         help = "Only when using --unused-only. Permits to not delete objects that could be used as replacements, even if they are not used for now",
