@@ -40,8 +40,17 @@ repl_map = {
         ],
         "Service": [["services"]],
         "Tag": [["tags"]]
+    }, 
+    DecryptionRule: {
+        "Address": [["source_addresses"], ["destination_addresses"]], 
+        "Service": [["services"]], 
+        "Tag": [["tags"]]
+    }, 
+    ApplicationOverride: {
+        "Address": [["source"], ["destination"]], 
+        "Service": [], 
+        "Tag": [["tag"]]
     }
-
 }
 
 # Keep your big fingers away than this unless you really know what you are doing
