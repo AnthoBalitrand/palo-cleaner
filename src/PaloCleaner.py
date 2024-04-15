@@ -2541,26 +2541,6 @@ class PaloCleaner:
                     break
                 try:
                     obj = jobs_queue.get()
-                    shortened_obj_type = PaloCleanerTools.shorten_object_type(obj.__class__.__name__)
-                    self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Checking tag protection of object {obj.name} ({obj.__class__.__name__})", level=2)
-                    try:
-                        if obj.tag:
-                            self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Object has tags : {obj.tag}", level=2)
-                            if set(obj.tag).intersection(self._protect_tags) or obj.name in indirect_protect[shortened_obj_type]:
-                                indirect_protect["Tag"].update(obj.tag)
-
-                                if "Group" in obj.__class__.__name__:
-                                    if obj.static_value:
-                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Object {obj.name} ({obj.__class__.__name__}) has static members. Flattening to protect all linked objects")
-                                        linked_objects = self.flatten_object(obj, location_name, location_name, resolved_cache=resolved_cache)
-                                        for (o, o_location) in linked_objects:
-                                            self._console.log(f"[ {o_location} ] [Thread-{thread_id}] Protecting object {o.name} ({o.__class__.__name__} / {shortened_obj_type})", level=2)
-                                            indirect_protect[shortened_obj_type].add(o.name)
-                                continue
-                    except AttributeError as e:
-                        pass
-                    except Exception as e:
-                        self._console.log(f"[Thread-{thread_id}] UNKNOWN EXCEPTION : {e}", style="red")
 
                     if obj.name in indirect_protect[shortened_obj_type]:
                         continue
@@ -2751,11 +2731,40 @@ class PaloCleaner:
             jobs_queue.join()
         else:
             for obj_item in [v for k, v in sorted(cleaning_order.items())]:
-                for obj in self._objects[location_name][list(obj_item.keys())[0]]:
-                    if type(obj) is obj_item[list(obj_item.keys())[0]]:
-                        jobs_queue.put(obj)
                 if not indirect_protect.get(list(obj_item.keys())[0]):
                     indirect_protect[list(obj_item.keys())[0]] = set()
+
+                for obj in self._objects[location_name][list(obj_item.keys())[0]]:
+                    if type(obj) is obj_item[list(obj_item.keys())[0]]:
+                        shortened_obj_type = PaloCleanerTools.shorten_object_type(obj.__class__.__name__)
+                        add_to_queue = True
+
+                        # Directly flattening groups here to fix #57
+                        try:
+                            self._console.log(f"[ {location_name} ] Checking tag protection of object {obj.name} ({obj.__class__.__name__})", level=2)
+                            if obj.tag:
+                                self._console.log(f"[ {location_name} ] Object has tags : {obj.tag}", level=2)
+                                if set(obj.tag).intersection(self._protect_tags) or obj.name in indirect_protect[shortened_obj_type]:
+                                    # object is protected by tags, protected all other used tags 
+                                    indirect_protect["Tag"].update(obj.tag)
+
+                                    if "Group" in obj.__class__.__name__:
+                                        if obj.static_value:
+                                            self._console.log(f"[ {location_name} ] Object {obj.name} ({obj.__class__.__name__}) has static members. Flattening to protect all linked objects")
+                                            linked_objects = self.flatten_object(obj, location_name, location_name, resolved_cache=resolved_cache)
+                                            for (o, o_location) in linked_objects:
+                                                self._console.log(f"[ {o_location} ] Protecting object {o.name} ({o.__class__.__name__} / {shortened_obj_type})", level=2)
+                                                indirect_protect[shortened_obj_type].add(o.name)
+                                    add_to_queue = False
+                        except AttributeError as e:
+                            # matched only for Tag objects (which does not have "tag" attribute)
+                            pass
+                        except Exception as e:
+                            self._console.log(f"ERROR - UNKNOWN EXCEPTION : {e}", style="red")
+
+                        if add_to_queue:
+                            jobs_queue.put(obj)
+                            
                 delete_local_objects_mthread(jobs_queue, local_dg)
                 jobs_queue.join()
                 self._console.log(f"[ {location_name} ] Queue joined before moving to next object type", level=2)
