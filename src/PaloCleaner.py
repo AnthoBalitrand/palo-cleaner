@@ -189,6 +189,10 @@ class PaloCleaner:
         self._console.print(header_text, style="green", justify="left")
 
         try:
+            if self._unused_only and not self._dg_filter and not "shared" in self._unused_only:
+                self._console.log("/!\ No device-group filter provided while using unused-only list used, replicating unused-only list into the device-group filter")
+                self._dg_filter = self._unused_only
+
             # if the API user password has not been provided within the CLI start command, prompt the user
             while self._panorama_password == "":
                 self._panorama_password = Prompt.ask(f"Please provide password for API user {self._panorama_user!r}",
