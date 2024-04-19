@@ -37,7 +37,8 @@ repl_map = {
     PolicyBasedForwarding: {
         "Address": [
             ["source_addresses"],
-            ["destination_addresses"]
+            ["destination_addresses"],
+            "forward_next_hop_value"
         ],
         "Service": [["services"]],
         "Tag": [["tags"]]
