@@ -9,7 +9,7 @@ from rich.traceback import install
 import panos.objects
 from panos.panorama import Panorama, DeviceGroup, PanoramaDeviceGroupHierarchy
 from panos.objects import AddressObject, AddressGroup, Tag, ServiceObject, ServiceGroup
-from panos.policies import SecurityRule, PreRulebase, PostRulebase, Rulebase, NatRule, AuthenticationRule, PolicyBasedForwarding
+from panos.policies import SecurityRule, PreRulebase, PostRulebase, Rulebase, NatRule, AuthenticationRule, PolicyBasedForwarding, DecryptionRule, ApplicationOverride
 from panos.predefined import Predefined
 from panos.errors import PanXapiError
 from panos.firewall import Firewall
@@ -61,6 +61,7 @@ class PaloCleaner:
         self._same_name_only = kwargs['same_name_only']         # boolean, indicating if we are running in a mode where we only replace objects existing with same name (and value) upward
         self._nb_thread = kwargs['number_of_threads']           # number of threads to generate when using multithread mode 
         self._unused_only = kwargs['unused_only']               # list of device-groups on which we want to delete unused only objects. If this argument has been provided at startup without specifying device-groups, it will be an empty list. If not provided at all, will be None 
+        self._remove_unused_dependencies = kwargs["remove_unused_dependencies"]    # boolean, indicating if dependencies of unused objects on lower-level groups (unused too) can be deleted for upper object removal
         if self._nb_thread is not None:
             if self._nb_thread == 0: # No value provided, we take the number of system's CPU
                 try:
@@ -189,6 +190,10 @@ class PaloCleaner:
         self._console.print(header_text, style="green", justify="left")
 
         try:
+            if self._unused_only and not self._dg_filter and not "shared" in self._unused_only:
+                self._console.log("/!\ No device-group filter provided while using unused-only list used, replicating unused-only list into the device-group filter")
+                self._dg_filter = self._unused_only
+
             # if the API user password has not been provided within the CLI start command, prompt the user
             while self._panorama_password == "":
                 self._panorama_password = Prompt.ask(f"Please provide password for API user {self._panorama_user!r}",
@@ -2402,7 +2407,7 @@ class PaloCleaner:
                 if total_replacements:
                     self._console.print(rulebase_table)
                     self._console.log(
-                        f"[ {location_name} ] {modified_rules} rules edited for the current rulebase ({rulebase_name})")
+                        f"[ {location_name} ] {modified_rules.value} rules edited for the current rulebase ({rulebase_name})")
 
                 self._objects[location_name]['context'].remove(rulebase[0].parent)
 
@@ -2536,26 +2541,6 @@ class PaloCleaner:
                     break
                 try:
                     obj = jobs_queue.get()
-                    shortened_obj_type = PaloCleanerTools.shorten_object_type(obj.__class__.__name__)
-                    self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Checking tag protection of object {obj.name} ({obj.__class__.__name__})", level=2)
-                    try:
-                        if obj.tag:
-                            self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Object has tags : {obj.tag}", level=2)
-                            if set(obj.tag).intersection(self._protect_tags) or obj.name in indirect_protect[shortened_obj_type]:
-                                indirect_protect["Tag"].update(obj.tag)
-
-                                if "Group" in obj.__class__.__name__:
-                                    if obj.static_value:
-                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Object {obj.name} ({obj.__class__.__name__}) has static members. Flattening to protect all linked objects")
-                                        linked_objects = self.flatten_object(obj, location_name, location_name, resolved_cache=resolved_cache)
-                                        for (o, o_location) in linked_objects:
-                                            self._console.log(f"[ {o_location} ] [Thread-{thread_id}] Protecting object {o.name} ({o.__class__.__name__} / {shortened_obj_type})", level=2)
-                                            indirect_protect[shortened_obj_type].add(o.name)
-                                continue
-                    except AttributeError as e:
-                        pass
-                    except Exception as e:
-                        self._console.log(f"[Thread-{thread_id}] UNKNOWN EXCEPTION : {e}", style="red")
 
                     if obj.name in indirect_protect[shortened_obj_type]:
                         continue
@@ -2591,20 +2576,39 @@ class PaloCleaner:
                                     for rule_dependency in dependencies["Rules"]:
                                         self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR : It seems that object {obj.name} ({obj.__class__.__name__}) is still used on the following rule : {rule_dependency['rule_location']} / {rule_dependency['rulename']}. It will not be deleted. Please check manually")
                                         delete_ok = True
+
+                                    if self._remove_unused_dependencies:
+                                        for group_dependency in dependencies["AddressGroups"]:
+                                            try:
+                                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] {obj.name} ({obj.__class__.__name__}) is still used on another AddressGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
+                                                referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'])
+                                                self._panorama.add(self._objects[group_dependency['location']]['context'])
+                                                referencer_group.static_value.remove(obj.name)
+                                                referencer_group.apply()
+                                                self._panorama.remove(self._objects[group_dependency['location']]['context'])
+                                            except Exception as e:
+                                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Error when removing dependency for {obj.name} on AddressGroup {group_dependency['groupname']} at location {group_dependency['location']}")
+                                        for group_dependency in dependencies["ServiceGroups"]:
+                                            try:
+                                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] {obj.name} ({obj.__class__.__name__}) is still used on another ServiceGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
+                                                referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'], obj_type="Service")
+                                                self._panorama.add(self._objects[group_dependency['location']]['context'])
+                                                referencer_group.value.remove(obj.name)
+                                                referencer_group.apply()
+                                                self._panorama.remove(self._objects[group_dependency['location']]['context'])
+                                            except Exception as e:
+                                                self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Error when removing dependency for {obj.name} on ServiceGroup : {group_dependency['groupname']} at location {group_dependency['location']}")
+                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Object {obj.name} ({obj.__class__.__name__}) has been successfuly deleted ")
+                                        delete_ok = True
+                                    else:
+                                        for group_dependency in dependencies["AddressGroups"]:
+                                            self._console.log(f"[ {location_name} ] [Thread-{thread_id}] {obj.name} ({obj.__class__.__name__}) is still used on another AddressGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Will not be deleted")
+                                        for group_dependency in dependencies["ServiceGroups"]:
+                                            self._console.log(f"[ {location_name} ] [Thread-{thread_id}] {obj.name} ({obj.__class__.__name__}) is still used on another ServiceGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Will not be deleted")
+                                        delete_ok = True
                                     if delete_ok:
                                         continue
 
-                                    for group_dependency in dependencies["AddressGroups"]:
-                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Group {obj.name} ({obj.__class__.__name__}) is still used on another AddressGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
-                                        referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'])
-                                        referencer_group.static_value.remove(obj.name)
-                                        referencer_group.apply()
-
-                                    for group_dependency in dependencies["ServiceGroups"]:
-                                        self._console.log(f"[ {location_name} ] [Thread-{thread_id}] Group {obj.name} ({obj.__class__.__name__}) is still used on another ServiceGroup : {group_dependency['groupname']} at location {group_dependency['location']}. Removing this dependency for cleaning.")
-                                        referencer_group, referencer_group_location = self.get_relative_object_location(group_dependency['groupname'], group_dependency['location'], obj_type="Service")
-                                        referencer_group.value.remove(obj.name)
-                                        referencer_group.apply()
                             except Exception as e:
                                 self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR when trying to delete object {obj.name} ({obj.__class__.__name__}) : {e}")
 
@@ -2714,7 +2718,7 @@ class PaloCleaner:
         indirect_protect = dict()
         indirect_protect['Tag'] = set()
         indirect_protect['Tag'].update(self._protect_tags)
-        indirect_protect['Tag'].update(self._tiebreak_tag)
+        indirect_protect['Tag'].update(self._tiebreak_tag if self._tiebreak_tag else [])
 
         local_dg = self._objects[location_name]['context']
 
@@ -2727,11 +2731,40 @@ class PaloCleaner:
             jobs_queue.join()
         else:
             for obj_item in [v for k, v in sorted(cleaning_order.items())]:
-                for obj in self._objects[location_name][list(obj_item.keys())[0]]:
-                    if type(obj) is obj_item[list(obj_item.keys())[0]]:
-                        jobs_queue.put(obj)
                 if not indirect_protect.get(list(obj_item.keys())[0]):
                     indirect_protect[list(obj_item.keys())[0]] = set()
+
+                for obj in self._objects[location_name][list(obj_item.keys())[0]]:
+                    if type(obj) is obj_item[list(obj_item.keys())[0]]:
+                        shortened_obj_type = PaloCleanerTools.shorten_object_type(obj.__class__.__name__)
+                        add_to_queue = True
+
+                        # Directly flattening groups here to fix #57
+                        try:
+                            self._console.log(f"[ {location_name} ] Checking tag protection of object {obj.name} ({obj.__class__.__name__})", level=2)
+                            if obj.tag:
+                                self._console.log(f"[ {location_name} ] Object has tags : {obj.tag}", level=2)
+                                if set(obj.tag).intersection(self._protect_tags) or obj.name in indirect_protect[shortened_obj_type]:
+                                    # object is protected by tags, protected all other used tags 
+                                    indirect_protect["Tag"].update(obj.tag)
+
+                                    if "Group" in obj.__class__.__name__:
+                                        if obj.static_value:
+                                            self._console.log(f"[ {location_name} ] Object {obj.name} ({obj.__class__.__name__}) has static members. Flattening to protect all linked objects")
+                                            linked_objects = self.flatten_object(obj, location_name, location_name, resolved_cache=resolved_cache)
+                                            for (o, o_location) in linked_objects:
+                                                self._console.log(f"[ {o_location} ] Protecting object {o.name} ({o.__class__.__name__} / {shortened_obj_type})", level=2)
+                                                indirect_protect[shortened_obj_type].add(o.name)
+                                    add_to_queue = False
+                        except AttributeError as e:
+                            # matched only for Tag objects (which does not have "tag" attribute)
+                            pass
+                        except Exception as e:
+                            self._console.log(f"ERROR - UNKNOWN EXCEPTION : {e}", style="red")
+
+                        if add_to_queue:
+                            jobs_queue.put(obj)
+
                 delete_local_objects_mthread(jobs_queue, local_dg)
                 jobs_queue.join()
                 self._console.log(f"[ {location_name} ] Queue joined before moving to next object type", level=2)

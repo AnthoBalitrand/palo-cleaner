@@ -1,5 +1,5 @@
 from panos.objects import AddressObject, AddressGroup, Tag, ServiceObject, ServiceGroup
-from panos.policies import SecurityRule, NatRule, AuthenticationRule, PolicyBasedForwarding
+from panos.policies import SecurityRule, NatRule, AuthenticationRule, PolicyBasedForwarding, DecryptionRule, ApplicationOverride
 
 # The structure below identifies the attributes and their format used on each type of rules
 # it permits to identify which "referenced object type" can be found on each rule attribute,
@@ -23,7 +23,8 @@ repl_map = {
             "source_translation_static_translated_address",
             "destination_translated_address",
             ["source_translation_fallback_translated_addresses"],
-            "source_translation_fallback_ip_address"
+            "source_translation_fallback_ip_address", 
+            "destination_dynamic_translated_address"
         ],
         "Service": ["service"],
         "Tag": [["tag"]],
@@ -36,12 +37,22 @@ repl_map = {
     PolicyBasedForwarding: {
         "Address": [
             ["source_addresses"],
-            ["destination_addresses"]
+            ["destination_addresses"],
+            "forward_next_hop_value"
         ],
         "Service": [["services"]],
         "Tag": [["tags"]]
+    }, 
+    DecryptionRule: {
+        "Address": [["source_addresses"], ["destination_addresses"]], 
+        "Service": [["services"]], 
+        "Tag": [["tags"]]
+    }, 
+    ApplicationOverride: {
+        "Address": [["source"], ["destination"]], 
+        "Service": [], 
+        "Tag": [["tag"]]
     }
-
 }
 
 # Keep your big fingers away than this unless you really know what you are doing
