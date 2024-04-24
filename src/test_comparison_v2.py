@@ -91,7 +91,7 @@ class AddressGroup:
 	def calc_group_size(self):
 		size = 0
 		for g in self.ip_tuples:
-			size += g[1] - g[0]
+			size += g[1] - g[0] + 1
 		return size
 
 
@@ -105,8 +105,10 @@ def compare_groups(g1, g2):
 	print(f"G1 min is {g1.min_ip}")
 	print(f"G2 min is {g2.min_ip}")
 
-	while last_comparison_step < max(g1.max_ip, g2.max_ip):
+	while last_comparison_step <= max(g1.max_ip, g2.max_ip):
 		print(f"Last comparison step is {ipaddress.ip_address(last_comparison_step)}, i = {i}, j = {j}")
+		print(f"Left tuple is {g1.ip_tuples[i]}")
+		print(f"Right tuple is {g2.ip_tuples[j]}")
 		left_active = i < len(g1.ip_tuples) and last_comparison_step >= g1.ip_tuples[i][0] and last_comparison_step <= g1.ip_tuples[i][1]
 		right_active = j < len(g2.ip_tuples) and last_comparison_step >= g2.ip_tuples[j][0] and last_comparison_step <= g2.ip_tuples[j][1]
 		print(f"Left active : {left_active} / Right active : {right_active}")
@@ -119,10 +121,10 @@ def compare_groups(g1, g2):
 			print(f"End of intersection is {ipaddress.ip_address(last_comparison_step - 1)}, jumping to {ipaddress.ip_address(last_comparison_step)}")
 			if last_comparison_step > g1.ip_tuples[i][1]:
 				i += 1
-				#print("Incremented i")
+				print("Incremented i")
 			if last_comparison_step > g2.ip_tuples[j][1]:
 				j += 1
-				#print("Incremented j")
+				print("Incremented j")
 		elif left_active:
 			# adding to left diff
 			if j < len(g2.ip_tuples):
@@ -134,7 +136,7 @@ def compare_groups(g1, g2):
 			print(f"End of left is {ipaddress.ip_address(last_comparison_step - 1)}, jumping to {ipaddress.ip_address(last_comparison_step)}")
 			if last_comparison_step > g1.ip_tuples[i][1]:
 				i += 1
-				#print("Incremented i")
+				print("Incremented i")
 		elif right_active:
 			# adding to right diff
 			if i < len(g1.ip_tuples):
@@ -146,20 +148,20 @@ def compare_groups(g1, g2):
 			print(f"End of right is {ipaddress.ip_address(last_comparison_step - 1)}, jumping to {ipaddress.ip_address(last_comparison_step)}")
 			if last_comparison_step > g2.ip_tuples[j][1]:
 				j += 1
-				#print("Incremented j")
+				print("Incremented j")
 		else:
 			if i < len(g1.ip_tuples) and j < len(g2.ip_tuples):
 				last_comparison_step = min(g1.ip_tuples[i][0], g2.ip_tuples[j][0])
-				#print(f"No group active, jumping to next min for i and j : {last_comparison_step}")
+				print(f"No group active, jumping to next min for i and j : {last_comparison_step}")
 			elif i < len(g1.ip_tuples):
 				last_comparison_step = g1.ip_tuples[i][0]
-				#print(f"j is over, jumping to next start value for i : {last_comparison_step}")
+				print(f"j is over, jumping to next start value for i : {last_comparison_step}")
 			else: 
 				last_comparison_step = g2.ip_tuples[j][0]
-				#print(f"i is over, jumping to next start value for j : {last_comparison_step}")
+				print(f"i is over, jumping to next start value for j : {last_comparison_step}")
 
-		#input("Press enter to continue")
-		#print("\n\n")
+		input("Press enter to continue")
+		print("\n\n")
 
 	print(f"G1 ip count : {g1.ip_count} / G2 ip count : {g2.ip_count}")
 
@@ -171,39 +173,43 @@ def compare_groups(g1, g2):
 g1 = AddressGroup("g1")
 g2 = AddressGroup("g2")
 
-g1.add_range("192.168.0.0/23")
-g1.add_range("205.151.80.144/28")
-g1.add_range("42.172.176.0/25")
-g2.add_range("106.109.194.0/25")
-g2.add_range("145.181.30.0/25")
-g2.add_range("137.169.128.0/19")
-g2.add_range("143.189.26.0/23")
-g2.add_range("45.24.0.0/15")
-g2.add_range("128.0.0.0/2")
-g2.add_range("85.140.163.0/25")
-g2.add_range("14.181.197.128/26")
-g2.add_range("172.128.0.0/9")
-g2.add_range("240.0.0.0/4")
-g2.add_range("194.224.0.0/11")
-g2.add_range("129.100.64.0/19")
-g2.add_range("160.0.0.0/4")
-g2.add_range("73.56.252.192/28")
-g2.add_range("39.111.7.116/30")
-g2.add_range("128.0.0.0/1")
-g2.add_range("205.151.80.144/28")
-g2.add_range("128.0.0.0/2")
-g2.add_range("97.0.0.0/12")
-g2.add_range("0.0.0.0/1")
-g2.add_range("72.112.0.0/14")
-g2.add_range("32.0.0.0/6")
-g2.add_range("80.196.92.240/30")
-g2.add_range("0.0.0.0/2")
-g2.add_range("188.159.112.0/20")
-g2.add_range("69.192.0.0/10")
-g2.add_range("42.172.176.0/25")
-g2.add_range("230.64.0.0/10")
-g2.add_range("122.253.0.0/17")
-g2.add_range("0.0.0.0/4")
+#g1.add_range("192.168.0.0/23")
+#g1.add_range("205.151.80.144/28")
+#g1.add_range("42.172.176.0/25")
+#g2.add_range("106.109.194.0/25")
+#g2.add_range("145.181.30.0/25")
+#g2.add_range("137.169.128.0/19")
+#g2.add_range("143.189.26.0/23")
+#g2.add_range("45.24.0.0/15")
+#g2.add_range("128.0.0.0/2")
+#g2.add_range("85.140.163.0/25")
+#g2.add_range("14.181.197.128/26")
+#g2.add_range("172.128.0.0/9")
+#g2.add_range("240.0.0.0/4")
+#g2.add_range("194.224.0.0/11")
+#g2.add_range("129.100.64.0/19")
+#g2.add_range("160.0.0.0/4")
+#g2.add_range("73.56.252.192/28")
+#g2.add_range("39.111.7.116/30")
+#g2.add_range("128.0.0.0/1")
+#g2.add_range("205.151.80.144/28")
+#g2.add_range("128.0.0.0/2")
+#g2.add_range("97.0.0.0/12")
+#g2.add_range("0.0.0.0/1")
+#g2.add_range("72.112.0.0/14")
+#g2.add_range("32.0.0.0/6")
+#g2.add_range("80.196.92.240/30")
+#g2.add_range("0.0.0.0/2")
+#g2.add_range("188.159.112.0/20")
+#g2.add_range("69.192.0.0/10")
+#g2.add_range("42.172.176.0/25")
+#g2.add_range("230.64.0.0/10")
+#g2.add_range("122.253.0.0/17")
+#g2.add_range("0.0.0.0/4")
+g1.add_range("4.5.8.9")
+g1.add_range("9.8.5.4/32")
+g2.add_range("9.8.5.4")
+g2.add_range("4.5.8.9/32")
 g1.merge_ip_tuples()
 g2.merge_ip_tuples()
 

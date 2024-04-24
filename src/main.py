@@ -163,6 +163,27 @@ def parse_cli_args():
         default = False
     )
 
+    parser.add_argument(
+        "--compare-groups", 
+        action = "store_true", 
+        help = "Compare groups to replace with higher duplicates in the hierarchy. To be used with groups-comparison-percent-match", 
+        default = False
+    )
+
+    parser.add_argument(
+        "--groups-comparison-percent-match", 
+        action = "store", 
+        help = "Match percentage between groups to be compared. Replacement groups needs to contain at least this percentage of matching IPs to be used", 
+        default = 100
+    )
+
+    parser.add_argument(
+        "--partial-group-match", 
+        action = "store_true",
+        help = "Allow for partial match on the replacement group", 
+        default = False
+    )
+
     return parser.parse_args()
 
 
