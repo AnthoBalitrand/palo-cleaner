@@ -60,6 +60,23 @@ def shorten_object_type(object_type: str) -> str:
 
     return object_type.replace('Group', '').replace('Object', '')
 
+def surcharge_addressobjects():
+    """
+    Adds the following functions to the panos.objects.AddressObject to be used by the groups comparison feature
+    """
+    panos.objects.AddressObject.init_object_group_membership = init_object_group_membership
+    panos.objects.AddressObject.add_membership = add_membership
+
+def init_object_group_membership(self):
+    if not hasattr(self, "group_membership"):
+        self.group_membership = dict()
+
+def add_membership(self, location, group):
+    if not location in self.group_membership:
+        self.group_membership[location] = set()
+    self.group_membership[location].add(group)
+    #print(f"{self} : added membership to {group} at location {location}")
+
 def surcharge_addressgroups():
     """
     Adds the following functions to the panos.objects.AddressGroup to be used by the groups comparison feature

@@ -107,6 +107,7 @@ class PaloCleaner:
 
         if self._compare_groups:
             PaloCleanerTools.surcharge_addressgroups()
+            PaloCleanerTools.surcharge_addressobjects()
 
         signal.signal(signal.SIGINT, self.signal_handler)
         self._console.log(f"STARTUP ARGUMENTS : {kwargs}")
@@ -1274,6 +1275,8 @@ class PaloCleaner:
             for obj, loc in flat_addr_group:
                 if type(obj) is panos.objects.AddressObject:
                     addr_group.add_range(PaloCleanerTools.hostify_address(obj.value))
+                    obj.init_object_group_membership()
+                    obj.add_membership(location_name, addr_group)
                 # TODO : handle static addresses in Address Groups (not referencing AddressObjects)
 
             addr_group.merge_ip_tuples()
@@ -1409,7 +1412,7 @@ class PaloCleaner:
             # If the result of the upward device-group name is "None", it means that the upward device-group is "shared"
             current_location_search = "shared" if not upward_dg else upward_dg.name
 
-        self._console.log(f"[ {base_location_name} ] {ref_obj_group} could be replaced by one of {found_upward_objects}")
+        #self._console.log(f"[ {base_location_name} ] {ref_obj_group} could be replaced by one of {found_upward_objects}")
         return found_upward_objects
 
     def find_upward_obj_service_group(self, base_location_name: str, obj_group: panos.objects.ServiceGroup):
@@ -2684,6 +2687,8 @@ class PaloCleaner:
 
         # removing replaced objects from used_objects_set for current location_name
         for obj_type in self._replacements.get(location_name, list()):
+            blocked_groups = set([y['source'] for x, y in self._replacements[location_name][obj_type].items() if y['blocked'] == True])
+
             for name, infos in self._replacements[location_name][obj_type].items():
                 # Remind that objects marked as "blocked" on the _replacements tracker should not be removed :
                 # They have not been replaced as expected, because used on rules where the opstate values
@@ -2694,7 +2699,12 @@ class PaloCleaner:
                         # current location (if not using the --unused-only argument),
                         # and replace it with the replacement object
                         if self._unused_only is None:
-                            self._used_objects_sets[location_name].remove(infos['source'])
+                            if not self._compare_groups:
+                                self._used_objects_sets[location_name].remove(infos['source'])
+                            elif not (blocked_membership := infos['source'].group_membership.get('location_name',set()).intersection(blocked_groups)):
+                                self._used_objects_sets[location_name].remove(infos['source'])
+                            else:
+                                self._console.log(f"[ {location_name} ] Object {infos['source']} cannot be deleted because of membership of groups {blocked_membership} which are protected", level=2)
                         if self._unused_only is None or (self._unused_only is not None and self._protect_potential_replacements):
                             if infos['replacement'] not in self._used_objects_sets[location_name]:
                                 # flattening the replacement object to add also its dependencies (ie : Tags)
