@@ -336,26 +336,27 @@ class PaloCleaner:
                 # --           If using groups-comparison, analyzing all existing groups          --
                 # ----------------------------------------------------------------------------------
 
-                self._console.print(
-                    Panel("[bold green]Analyzing all groups for replacements", 
-                        style="green"),
-                    justify="left")
-                # Processing AddressGroups at location "shared"
-                shared_groups_task = progress.add_task("[Panorama] Processing AddressGroups", 
-                    total=len([g for g in self._objects["shared"]["Address"] if type(g) is panos.objects.AddressGroup]))
-                self.addr_groups_processing("shared", progress, shared_groups_task)
-                self._console.log("[ Panorama ] AddressGroups processed")
-                progress.remove_task(shared_groups_task)
+                if self._compare_groups:
+                    self._console.print(
+                        Panel("[bold green]Analyzing all groups for replacements", 
+                            style="green"),
+                        justify="left")
+                    # Processing AddressGroups at location "shared"
+                    shared_groups_task = progress.add_task("[Panorama] Processing AddressGroups", 
+                        total=len([g for g in self._objects["shared"]["Address"] if type(g) is panos.objects.AddressGroup]))
+                    self.addr_groups_processing("shared", progress, shared_groups_task)
+                    self._console.log("[ Panorama ] AddressGroups processed")
+                    progress.remove_task(shared_groups_task)
 
-                # Processing AddressHroups for each location included in the analysis perimeter
-                for (context_name, dg) in perimeter:
-                    addr_groups_task = progress.add_task(
-                        f"[{dg.about()['name']}] Processing AddressGroups", 
-                        total=len([g for g in self._objects[dg.about()['name']]["Address"] if type(g) is panos.objects.AddressGroup])
-                    )
-                    self.addr_groups_processing(dg.about()['name'], progress, addr_groups_task)
-                    self._console.log(f"[ {dg.about()['name']} ] AddressGroups processed")
-                    progress.remove_task(addr_groups_task)
+                    # Processing AddressHroups for each location included in the analysis perimeter
+                    for (context_name, dg) in perimeter:
+                        addr_groups_task = progress.add_task(
+                            f"[{dg.about()['name']}] Processing AddressGroups", 
+                            total=len([g for g in self._objects[dg.about()['name']]["Address"] if type(g) is panos.objects.AddressGroup])
+                        )
+                        self.addr_groups_processing(dg.about()['name'], progress, addr_groups_task)
+                        self._console.log(f"[ {dg.about()['name']} ] AddressGroups processed")
+                        progress.remove_task(addr_groups_task)
 
                 # ----------------------------------------------------------------------------------
                 # --       Starting objects optimization (from deepest DG to shared)              --
@@ -404,8 +405,6 @@ class PaloCleaner:
                                 self._console.log(f"[ {context_name} ] Objects replaced in groups")
                                 progress.remove_task(dg_replaceingroups_task)
 
-                                #input("Press any key to continue...")
-
                                 # OBJECTS REPLACEMENT IN RULEBASES
                                 dg_replaceinrules_task = progress.add_task(
                                     f"[ {context_name} ] Replacing objects in rules",
@@ -416,8 +415,6 @@ class PaloCleaner:
                                 self._console.log(f"[ {context_name} ] Objects replaced in rulebases")
                                 progress.remove_task(dg_replaceinrules_task)
 
-                                #input("Press any key to continue...")
-
                             # OBJECTS CLEANING (FOR FULLY INCLUDED DEVICE GROUPS ONLY)
                             if context_name in self._analysis_perimeter['full']:
                                 self.clean_local_object_set(context_name)
@@ -426,7 +423,6 @@ class PaloCleaner:
                             if context_name not in ['shared', 'predefined']:
                                 self._panorama.remove(self._objects[context_name]['context'])
 
-                            #input("Press any key to continue...")
 
             self.init_console("report")
             # Display the cleaning operation result (display again the hierarchy tree, but with the _cleaning_counts
@@ -889,9 +885,7 @@ class PaloCleaner:
 
         return found_objects
 
-    def flatten_object(self, used_object: panos.objects, object_location: str, usage_base: str,
-                           referencer_type: str = None, referencer_name: str = None,
-                       resolved_cache=None):
+    def flatten_object(self, used_object: panos.objects, object_location: str, usage_base: str, referencer_type: str = None, referencer_name: str = None, resolved_cache=None):
         """
         Recursive caller for the inner flatten_object_recurser function.
         Commenting : OK (15062023)
@@ -1280,6 +1274,7 @@ class PaloCleaner:
             for obj, loc in flat_addr_group:
                 if type(obj) is panos.objects.AddressObject:
                     addr_group.add_range(PaloCleanerTools.hostify_address(obj.value))
+                # TODO : handle static addresses in Address Groups (not referencing AddressObjects)
 
             addr_group.merge_ip_tuples()
 
@@ -1896,7 +1891,7 @@ class PaloCleaner:
                         replacement_right_diff = repl_info['right_diff']
                     else:
                         # if raised here, first object is choosen (can be the case for AddressGroups when not enabling the compare-groups mode)
-                        replacement_obj, replacement_obj_location = upward_objects[0]
+                        replacement_obj, replacement_obj_location = upward_objects[0]['replacement']
                         replacement_type = "exact_match"
 
                     # if the chosen replacement object is different than the actual object
@@ -1915,11 +1910,20 @@ class PaloCleaner:
                         # "blocked" is False at this time. It is used later to block a replacement for objects used on
                         # rules having blocking opstates values (last hit timestamp / last change timestamp)
 
-                        if type(obj) in [AddressObject, AddressGroup]:
+                        if type(obj) is AddressObject:
                             self._replacements[location_name]['Address'][obj.about()['name']] = {
                                 'source': (obj, location),
                                 'replacement': (replacement_obj, replacement_obj_location),
                                 'blocked': False
+                            }
+                        elif type(obj) is AddressGroup:
+                            self._replacements[location_name]['Address'][obj.about()['name']] = {
+                                'source': (obj, location), 
+                                'replacement': (replacement_obj, replacement_obj_location),
+                                'blocked': False,
+                                'replacement_type': replacement_type,
+                                'replacement_match': replacement_match_percent, 
+                                'left_right_diff': (replacement_left_diff, replacement_right_diff)
                             }
                         elif type(obj) in [ServiceObject, ServiceGroup]:
                             self._replacements[location_name]['Service'][obj.about()['name']] = {
@@ -2375,7 +2379,11 @@ class PaloCleaner:
                                     # blocking cases where duplicates objects are used on a field of the rule and would
                                     # be replaced by the same target object
                                     if repl_name not in field_values + items_to_add:
-                                        replacements_done[obj_type][field_name].append((f"{repl_name} ({replacement_obj_location})", 3))
+                                        if type(replacement_obj_instance) is AddressGroup:
+                                            repl_string = f"{repl_name} ({replacement_obj_location}) (M:{replacement['replacement_match']}% L/R:{replacement['left_right_diff']})"
+                                        else:
+                                            repl_string = f"{repl_name} ({replacement_obj_location})"
+                                        replacements_done[obj_type][field_name].append((repl_string, 3))
                                         current_field_replacements_count += 1
                                         items_to_add.append(repl_name)
                                     any_change_done = True
@@ -2495,7 +2503,6 @@ class PaloCleaner:
                             # or if the hitcounts for a rule cannot be found (ie : new rule not yet pushed on device)
                             # then just consider that the rule can be modified (editable_rule = True)
                             # Note that the rule hitcount information is stored on the rule_counters dict
-                            # TODO : validate if disabled rules are considered editable or not (issue #19)
                             if r.disabled or not self._need_opstate or not rule_counters:
                                 editable_rule = True
                             elif rule_modification_timestamp > self._max_change_timestamp and last_hit_timestamp > self._max_hit_timestamp:
