@@ -1905,7 +1905,7 @@ class PaloCleaner:
                                 style="green", level=2)
                         else:
                             self._console.log(
-                                f"[ {location_name} ] Replacing {obj.about()['name']!r} ({obj.__class__.__name__}) at location {location} by {replacement_obj.about()['name']!r} at loccation {replacement_obj_location}. Match is {replacement_match_percent} %. L/R diff is {replacement_left_diff}/{replacement_right_diff}")
+                                f"[ {location_name} ] Replacing {obj.about()['name']!r} ({obj.__class__.__name__}) at location {location} by {replacement_obj.about()['name']!r} at location {replacement_obj_location}. Match is {replacement_match_percent} %. L/R diff is {replacement_left_diff}/{replacement_right_diff}")
 
                         # Populating the global _replacements dict (for the current location, current object type) with
                         # the details about the current object name, current object instance and location, and replacement
@@ -2511,6 +2511,9 @@ class PaloCleaner:
                             elif rule_modification_timestamp > self._max_change_timestamp and last_hit_timestamp > self._max_hit_timestamp:
                                 editable_rule = True
 
+                            if "block-opstate" in r.name:
+                                editable_rule = False
+
                             # call the replace_in_rule function for the current rule, which will reply with :
                             # replacements_in_rule : dict with the details of replacements for the current rule
                             # replacements_count : total number of replacements for the rule
@@ -2687,7 +2690,7 @@ class PaloCleaner:
 
         # removing replaced objects from used_objects_set for current location_name
         for obj_type in self._replacements.get(location_name, list()):
-            blocked_groups = set([y['source'] for x, y in self._replacements[location_name][obj_type].items() if y['blocked'] == True])
+            blocked_groups = set([y['source'] for x, y in self._replacements[location_name][obj_type].items() if y['blocked'] == True] and type(y['source'][0]) is panos.objects.AddressGroup)
 
             for name, infos in self._replacements[location_name][obj_type].items():
                 # Remind that objects marked as "blocked" on the _replacements tracker should not be removed :
@@ -2699,10 +2702,13 @@ class PaloCleaner:
                         # current location (if not using the --unused-only argument),
                         # and replace it with the replacement object
                         if self._unused_only is None:
-                            if not self._compare_groups:
+                            if not self._compare_groups or not type(infos['source'][0]) is panos.objects.AddressObject or not hasattr(infos['source'][0], "group_membership"):
+                                # This is matched if compare-group is not enabled, if the current object is not an AddressObject, or if this is an AddressObject which is not member of any group
                                 self._used_objects_sets[location_name].remove(infos['source'])
-                            elif not (blocked_membership := infos['source'].group_membership.get('location_name',set()).intersection(blocked_groups)):
+                                self._console.log(f"[ {location_name} ] Object {infos['source']} removed from used objects")
+                            elif not (blocked_membership := infos['source'][0].group_membership.get('location_name',set()).intersection(blocked_groups)):
                                 self._used_objects_sets[location_name].remove(infos['source'])
+                                self._console.log(f"[ {location_name} ] Object {infos['source']} removed from used objects : not used in any group nor rule", level=2)
                             else:
                                 self._console.log(f"[ {location_name} ] Object {infos['source']} cannot be deleted because of membership of groups {blocked_membership} which are protected", level=2)
                         if self._unused_only is None or (self._unused_only is not None and self._protect_potential_replacements):
