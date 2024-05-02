@@ -70,6 +70,7 @@ def surcharge_addressobjects():
 def init_object_group_membership(self):
     if not hasattr(self, "group_membership"):
         self.group_membership = dict()
+        self.group_member_only = True
 
 def add_membership(self, location, group):
     if not location in self.group_membership:
@@ -99,7 +100,11 @@ def init_group_comparison(self):
 def add_range(self, range_in):
     r = range_in
     if type(range_in) is not ipaddress.IPv4Network:
-        r = ipaddress.ip_network(range_in, False)
+        try:
+            r = ipaddress.ip_network(range_in, False)
+        except ValueError:
+            print(f"{range_in!r} is not a valid IPv4 or IPv6 address. Not added to group members list")
+            return False
     self.members.append(r)
 
     self.ip_tuples.append((int(r.network_address), int(r.broadcast_address)))
@@ -111,6 +116,8 @@ def add_range(self, range_in):
         self.min_ip = int(r.network_address)
     elif self.min_ip > int(r.network_address):
         self.min_ip = int(r.network_address)
+
+    return True
 
 def merge_ip_tuples(self):
     # this function merges contiguous IP ranges on the AddressGroup

@@ -310,30 +310,6 @@ class PaloCleaner:
                 progress.remove_task(download_task)
 
                 # ----------------------------------------------------------------------------------
-                # --             Processing used objects set for shared + device-groups           --
-                # ----------------------------------------------------------------------------------
-                self._console.print(
-                    Panel("[bold green]Analyzing objects usage",
-                          style="green"),
-                    justify="left")
-                # Processing used objects set at location "shared"
-                shared_fetch_task = progress.add_task("[Panorama] Processing used objects location",
-                                                      total=self.count_rules('shared'))
-                self.fetch_used_obj_set("shared", progress, shared_fetch_task)
-                self._console.log("[ Panorama ] Used objects set processed")
-                progress.remove_task(shared_fetch_task)
-
-                # Processing used objects set for each location included in the analysis perimeter
-                for (context_name, dg) in perimeter:
-                    dg_fetch_task = progress.add_task(
-                        f"[{dg.about()['name']}] Processing used objects location",
-                        total=self.count_rules(dg.about()['name'])
-                    )
-                    self.fetch_used_obj_set(dg.about()['name'], progress, dg_fetch_task)
-                    self._console.log(f"[ {dg.about()['name']} ] Used objects set processed")
-                    progress.remove_task(dg_fetch_task)
-
-                # ----------------------------------------------------------------------------------
                 # --           If using groups-comparison, analyzing all existing groups          --
                 # ----------------------------------------------------------------------------------
 
@@ -358,6 +334,30 @@ class PaloCleaner:
                         self.addr_groups_processing(dg.about()['name'], progress, addr_groups_task)
                         self._console.log(f"[ {dg.about()['name']} ] AddressGroups processed")
                         progress.remove_task(addr_groups_task)
+
+                # ----------------------------------------------------------------------------------
+                # --             Processing used objects set for shared + device-groups           --
+                # ----------------------------------------------------------------------------------
+                self._console.print(
+                    Panel("[bold green]Analyzing objects usage",
+                          style="green"),
+                    justify="left")
+                # Processing used objects set at location "shared"
+                shared_fetch_task = progress.add_task("[Panorama] Processing used objects location",
+                                                      total=self.count_rules('shared'))
+                self.fetch_used_obj_set("shared", progress, shared_fetch_task)
+                self._console.log("[ Panorama ] Used objects set processed")
+                progress.remove_task(shared_fetch_task)
+
+                # Processing used objects set for each location included in the analysis perimeter
+                for (context_name, dg) in perimeter:
+                    dg_fetch_task = progress.add_task(
+                        f"[{dg.about()['name']}] Processing used objects location",
+                        total=self.count_rules(dg.about()['name'])
+                    )
+                    self.fetch_used_obj_set(dg.about()['name'], progress, dg_fetch_task)
+                    self._console.log(f"[ {dg.about()['name']} ] Used objects set processed")
+                    progress.remove_task(dg_fetch_task)
 
                 # ----------------------------------------------------------------------------------
                 # --       Starting objects optimization (from deepest DG to shared)              --
@@ -937,8 +937,7 @@ class PaloCleaner:
                 self._console.log(
                         f"[ {usage_base} ] {'*' * recursion_level} Marking {used_object.name!r} ({used_object.__class__.__name__}) as resolved on cache",
                         style="green", level=2)
-                resolved_cache[PaloCleanerTools.shorten_object_type(used_object.__class__.__name__)].append(
-                    used_object.name)
+                resolved_cache[PaloCleanerTools.shorten_object_type(used_object.__class__.__name__)][used_object.name] = used_object
 
                 # adding the resolved (used_object, object_location) itself to the obj_set list
                 obj_set.append((used_object, object_location))
@@ -982,19 +981,20 @@ class PaloCleaner:
                             obj_set += flatten_object_recurser(
                                 *self.get_relative_object_location(group_member,usage_base),
                                 usage_base,
-                                used_object.__class__.__name__,
-                                used_object.name,
+                                used_object.__class__.__name__ if referencer_type != "AGprocessor" else referencer_type,
+                                used_object.name if referencer_name != "AGprocessor" else referencer_name,
                                 recursion_level + 1)
 
                     # the condition below permits to "protect" the group members (at group level) if they are overriden at a lower location
-                    if object_location != usage_base:
+                    # if the current referencer_type is 'AGprocessor', we are in the groups processing run 
+                    # then we do not protect any object for now, as the self._used_objects_set lists do not exist for now 
+                    if object_location != usage_base and referencer_type != 'AGprocessor':
                         self._console.log(
                                 f"[ {usage_base} ] {'*' * recursion_level} AddressGroup {used_object.name!r} location ({object_location}) is different than referencer location ({usage_base}). Protecting group at its location level",
                                 style="red", level=2)
                         group_protection_flattened = flatten_object_recurser(used_object, object_location, object_location, referencer_type,
                                                   referencer_name, recursion_level, protect_call=True)
                         obj_set += group_protection_flattened
-
                         # copying the result at the group object location as it needs to be protected there !!
                         # (group might not be used at its location but only below, and it could have unexpected results !!)
                         # TODO : find a solution to make sure that the same replacement object will be choosen there !!!
@@ -1108,7 +1108,7 @@ class PaloCleaner:
             return obj_set
 
         if not resolved_cache:
-            resolved_cache = dict({'Address': list(), 'Service': list(), 'Tag': list()})
+            resolved_cache = dict({'Address': dict(), 'Service': dict(), 'Tag': dict()})
 
         return flatten_object_recurser(used_object, object_location, usage_base,
                            referencer_type, referencer_name)
@@ -1133,7 +1133,7 @@ class PaloCleaner:
         # This dict contains a list of names for each object type, for which the location has been already found
         # This considerably improves processing time, avoiding to search again an object which has been already found
         # among the upward locations
-        resolved_cache = dict({'Address': list(), 'Service': list(), 'Tag': list()})
+        resolved_cache = dict({'Address': dict(), 'Service': dict(), 'Tag': dict()})
 
         # Regex statements which permits to identify an AddressObject value to know if it represents an IP/mask or a range
         ip_regex = re.compile(r'^(\d{1,3}\.){3}\d{1,3}(\/\d{1,2})?$')
@@ -1197,6 +1197,13 @@ class PaloCleaner:
                                 )
                             )
 
+                            # if we are using the group-compare feature and the current object is an AddressObject used directly on a rule, remove its flag
+                            # to indicate it is not only a group member
+                            if self._compare_groups and len(flattened) == 1 and type(flattened[0][0]) is panos.objects.AddressObject:
+                                print(flattened)
+                                self._console.log(f"[ {location_name} ] Marking object {flattened[0]} as not only a group member (used directly on rule {r.name!r})", level=2)
+                                flattened[0][0].group_member_only = False
+
                             # the following will be executed if the object used has not been found by the
                             # get_relative_object_location call (flatten object will not return anything in such a case)
                             if not flattened:
@@ -1250,6 +1257,12 @@ class PaloCleaner:
                         elif obj not in ['any', 'application-default']:
                             self._console.log(f"[ {location_name} ] * {obj_type} Object {obj!r} already resolved in current context",
                                                   style="yellow", level=3)
+                            if self._compare_groups and type(resolved_cache[obj_type][obj]) is panos.objects.AddressObject:
+                                try:
+                                    resolved_cache[obj_type][obj].group_member_only = False
+                                    self._console.log(f"[ {location_name} ] Marking object {obj!r} (already resolved in cache) as not only a group member (used directly on rule {r.name!r})", level=2)
+                                except Exception as e:
+                                    self._console.log(f"[ {location_name} ] ERROR when marking object {obj!r} (already resolved in cache) as not only a group member (used directly on rule {r.name!r}) : {e}", style="red", level=2)
                 # update progress bar for each processed rule
                 progress.update(task, advance=1)
 
@@ -1274,9 +1287,11 @@ class PaloCleaner:
 
             for obj, loc in flat_addr_group:
                 if type(obj) is panos.objects.AddressObject:
-                    addr_group.add_range(PaloCleanerTools.hostify_address(obj.value))
-                    obj.init_object_group_membership()
-                    obj.add_membership(location_name, addr_group)
+                    if addr_group.add_range(PaloCleanerTools.hostify_address(obj.value)):
+                        # if the obj.value cannot be added to the group members, not adding the group membership to the object itself
+                        # it can be because of the value not being an IPv4 / IPv6 address, but an FQDN (not yet supported)
+                        obj.init_object_group_membership()
+                        obj.add_membership(location_name, addr_group)
                 # TODO : handle static addresses in Address Groups (not referencing AddressObjects)
 
             addr_group.merge_ip_tuples()
@@ -1396,9 +1411,9 @@ class PaloCleaner:
                     if candidate_group == ref_obj_group:
                         continue
                     intersection, left_diff, right_diff, percent_match = PaloCleanerTools.compare_groups(ref_obj_group, candidate_group)
-                    self._console.log(f"[ {base_location_name} ] AddressGroup {ref_obj_group.name} comparison with {candidate_group} at {current_location_search} : Intersection is {intersection}, L/R diff is {left_diff}/{right_diff}, percent match is {percent_match} %")
+                    self._console.log(f"[ {base_location_name} ] AddressGroup {ref_obj_group.name} comparison with {candidate_group} at {current_location_search} : Intersection is {intersection}, L/R diff is {left_diff}/{right_diff}, percent match is {percent_match} %", level=2)
                     if percent_match >= self._groups_percent_match:
-                        self._console.log(f"[ {base_location_name} ] AddressGroup {ref_obj_group.name} matches at {percent_match} % with {candidate_group} at {current_location_search}. Adding to potential replacements list for further selection", level=2)
+                        self._console.log(f"[ {base_location_name} ] AddressGroup {ref_obj_group.name} matches at {percent_match} % with {candidate_group} at {current_location_search}. Adding to potential replacements list for further selection")
                         found_upward_objects.append(
                             {
                                 "replacement": (candidate_group, current_location_search), 
@@ -1789,8 +1804,46 @@ class PaloCleaner:
 
         choosen_object = None
         choosen_by_tiebreak = False
-        # TODO : need to find highest level of exact match replacement 
+        # TODO : add preference for saga alias groups
         # TODO : when replacing exact_match with group_diff, need to replace all the static_matches
+
+        exact_match_replacement = [x for x in obj_list if x["replacement_type"] == "exact_match"]
+        last_exact_dg_level = 999
+        last_tag_intersection_set_length = 0
+        choosen_by_tag = False
+        for o in exact_match_replacement:
+            if self._tiebreak_tag_set and o["replacement"][0].tag is not None:
+                # the following section chooses the highest DG object, with the highest tag intersection length at this level
+                if (tag_intersect := self._tiebreak_tag_set.intersection(o["replacement"][0].tag)):
+                    ti_len = len(tag_intersect)
+                    if (ll := self._dg_hierarchy[o["replacement"][1]].level) < last_exact_dg_level:
+                        last_tag_intersection_set_length = ti_len
+                        last_exact_dg_level = ll
+                        choosen_object = o
+                    elif (ti_len) > last_tag_intersection_set_length:
+                        last_tag_intersection_set_length = ti_len
+                        choosen_object = o
+                    choosen_by_tag = True
+            elif not choosen_object:
+                # the following section chooses the highest DG object, regardless of the tag intersection length, if no object has been choosen
+                # it means that a tag-intersection matched object at lower level will win 
+                if (ll := self._dg_hierarchy[o["replacement"][1]].level) < last_exact_dg_level:
+                    last_exact_dg_level = ll
+                    choosen_object = o
+
+        group_diff_replacement = [x for x in obj_list if x["replacement_type"] == "group_diff"]
+        last_match_percent = 0
+        last_diff_dg_level = 999
+        choosen_by_diff = False
+        for o in sorted(group_diff_replacement, key=lambda x: x["match_percent"], reverse=True):
+            if o['match_percent'] < last_match_percent:
+                break
+            last_match_percent = o['match_percent']
+            if (ll := self._dg_hierarchy[o['replacement'][1]].level) < last_diff_dg_level and ll < last_exact_dg_level:
+                choosen_object = o
+                last_diff_dg_level = ll
+                choosen_by_diff = True
+        """
 
         exact_match_replacement = [x for x in obj_list if x["replacement_type"] == "exact_match"]
         highest_exact_match_replacement_level = 999
@@ -1798,7 +1851,7 @@ class PaloCleaner:
         # TODO : after creating the _reverse_depthed_tree : choose the higher-level object 
         if exact_match_replacement:
             for o in sorted(exact_match_replacement, key=lambda x: x["replacement"][0].about()['name']):
-                if not choosen_object and self._tiebreak_tag_set:
+                if not choosen_object and self._tiebreak_tag_set and o["replacement"][0].tag is not None:
                     try:
                         if (tag_intersect := self._tiebreak_tag_set.intersection(o["replacement"][0].tag)):
                             choosen_object = o
@@ -1807,9 +1860,10 @@ class PaloCleaner:
                                 highest_exact_match_replacement_level = ll
                             self._console.log(
                                 f"[ {base_location} ] AddressGroup {choosen_object['replacement'][0].about()['name']} (context {choosen_object['replacement'][1]}) choosen by tiebreak tag (Exact static match). Intersection set : {tag_intersect}", level=2)
-                    except:
+                    except Exception:
                         pass
                 elif not self._tiebreak_tag_set:
+                    # to be reviewed
                     choosen_object = o
                     if (ll := self._dg_hierarchy[o['replacement'][1]].level < highest_exact_match_replacement_level):
                         highest_exact_match_replacement_level = ll
@@ -1832,7 +1886,16 @@ class PaloCleaner:
                     if (ll := self._dg_hierarchy[o['replacement'][1]].level) < last_dg_level and ll < highest_exact_match_replacement_level:
                         choosen_object = o
                         last_dg_level = ll
+            print("Choosen object : ")
+            print(choosen_object)
             self._console.log(f"[ {base_location} ] AddressGroup {choosen_object['replacement'][0].about()['name']} (context {choosen_object['replacement'][1]}) choosen by matching percentage : {last_match_percent} % and DG level : {last_dg_level}", level=2)
+        """
+        if choosen_by_diff:
+            self._console.log(f"[ {base_location} ] AddressGroup {choosen_object['replacement'][0].about()['name']} (context {choosen_object['replacement'][1]}) choosen by matching percentage : {last_match_percent} % and DG level : {last_diff_dg_level}", level=2)
+        elif choosen_by_tag:
+            self._console.log(f"[ {base_location} ] AddressGroup {choosen_object['replacement'][0].about()['name']} (context {choosen_object['replacement'][1]}) choosen by tag intersection : {tag_intersect} and DG level : {last_exact_dg_level}", level=2)
+        else:
+            self._console.log(f"[ {base_location} ] AddressGroup {choosen_object['replacement'][0].about()['name']} (context {choosen_object['replacement'][1]}) choosen by DG level : {last_exact_dg_level}", level=2)
 
         # Returns the best matching AddressGroup among the provided list
         # This function returns the select dict in the input list of dicts (different format than other object selection functions)
@@ -1886,6 +1949,9 @@ class PaloCleaner:
                         replacement_type = "exact_match"
                     # Else if the type is AddressGroup and the group-comparison mode is enabled, find the best replacement using the find_best_replacement_addr_group_obj function
                     elif type(obj) is AddressGroup and self._compare_groups:
+                        print(f"for {obj}")
+                        print(upward_objects)
+                        print(location_name)
                         repl_info = self.find_best_replacement_addr_group_obj(upward_objects, location_name)
                         replacement_obj, replacement_obj_location = repl_info['replacement']
                         replacement_type = repl_info['replacement_type']
@@ -2682,7 +2748,7 @@ class PaloCleaner:
 
         # Cache used for flatten objects when using tags protection
         # TODO : better comments
-        resolved_cache = dict({'Address': list(), 'Service': list(), 'Tag': list()})
+        resolved_cache = dict({'Address': dict(), 'Service': dict(), 'Tag': dict()})
 
         # optimized_only set to True if we are on unused-only mode with a list of device-groups specified, and the current location being cleaned is not in this list
         # (which means that we don't want to delete anything at this level, but we need to make sure that used objects at this level will be protected upward, if the upward device-group is on the list)
@@ -2690,7 +2756,8 @@ class PaloCleaner:
 
         # removing replaced objects from used_objects_set for current location_name
         for obj_type in self._replacements.get(location_name, list()):
-            blocked_groups = set([y['source'] for x, y in self._replacements[location_name][obj_type].items() if y['blocked'] == True] and type(y['source'][0]) is panos.objects.AddressGroup)
+            # TODO : This line can be moved above, to be checked
+            blocked_groups = set([y['source'] for x, y in self._replacements[location_name][obj_type].items() if y['blocked'] == True and type(y['source'][0]) is panos.objects.AddressGroup])
 
             for name, infos in self._replacements[location_name][obj_type].items():
                 # Remind that objects marked as "blocked" on the _replacements tracker should not be removed :
@@ -2706,7 +2773,7 @@ class PaloCleaner:
                                 # This is matched if compare-group is not enabled, if the current object is not an AddressObject, or if this is an AddressObject which is not member of any group
                                 self._used_objects_sets[location_name].remove(infos['source'])
                                 self._console.log(f"[ {location_name} ] Object {infos['source']} removed from used objects")
-                            elif not (blocked_membership := infos['source'][0].group_membership.get('location_name',set()).intersection(blocked_groups)):
+                            elif not (blocked_membership := infos['source'][0].group_membership.get('location_name', set()).intersection(blocked_groups)):
                                 self._used_objects_sets[location_name].remove(infos['source'])
                                 self._console.log(f"[ {location_name} ] Object {infos['source']} removed from used objects : not used in any group nor rule", level=2)
                             else:
@@ -2716,7 +2783,17 @@ class PaloCleaner:
                                 # flattening the replacement object to add also its dependencies (ie : Tags)
                                 # TODO : check if any issue can appear when using multithreading (need to use another lock here ?)
                                 replacements_dependencies_set = self.flatten_object(*infos['replacement'], location_name)
-                                any(self._used_objects_sets[location_name].add(x) for x in replacements_dependencies_set)
+                                # if we are using the compare-groups feature, if the added objects (for dependency protection), we need to make sure that all new objects added here will not be deleted right after by the section below 
+                                # (looping on all objects on the current object set), if they are only used on this new group. 
+                                # for this purpose, we need to make sure that all those new AddressObjects do not have the "group_member_only" attribute set to True (even if it's True)
+                                # as it will avoid them being matched by the logic below
+                                if self._compare_groups:
+                                    for x in replacements_dependencies_set:
+                                        if type(x[0]) is panos.objects.AddressObject and hasattr(x[0], "group_member_only"):
+                                            x[0].group_member_only = False
+                                        self._used_objects_sets[location_name].add(x)
+                                else:
+                                    any(self._used_objects_sets[location_name].add(x) for x in replacements_dependencies_set)
                                 self._console.log(f"[ {location_name} ] Added replacement object and dependencies ({replacements_dependencies_set}) to used objects set", level=2)
                             else:
                                 self._console.log(f"[ {location_name} ] Replacement object ({infos['replacement']}) already processed for local context", level=2)
@@ -2731,6 +2808,23 @@ class PaloCleaner:
                 else:
                     # TODO : flatten protected object for dependencies protection ?
                     self._console.log(f"[ {location_name} ] Not removing {name} (location {infos['source'][1]}) from used objects set, as protected by hitcount", level=2)
+
+        if self._compare_groups:
+            to_remove_from_obj_set = list()
+            # Checking all remaining address objects in the current _used_objects_set that are flagged as _group_member_only and which are not explicitly part of the _replacement dict
+            # It can be the case for objects used only on groups, which groups are being replaced. Those objects need to be removed from the _used_object_set for deletion
+            blocked_groups_2 = set([y['source'][0] for x, y in self._replacements[location_name]["Address"].items() if y['blocked'] == True and type(y['source'][0]) is panos.objects.AddressGroup])
+
+            for used_obj_tuple in self._used_objects_sets[location_name]:
+                if type(used_obj_tuple[0]) is panos.objects.AddressObject and hasattr(used_obj_tuple[0], "group_member_only") and used_obj_tuple[0].group_member_only == True:
+                    if not (used_obj_intersect := used_obj_tuple[0].group_membership.get(location_name, set()).intersection(blocked_groups_2)):
+                        to_remove_from_obj_set.append(used_obj_tuple)
+                        self._console.log(f"[ {location_name} ] Object {used_obj_tuple} removed from used_object_set at location {location_name}", level=2)
+                    else:
+                        self._console.log(f"[ {location_name} ] Object {used_obj_tuple} not removed from used_object_set at location {location_name} because of membership on groups {used_obj_intersect}")
+
+            for tup in to_remove_from_obj_set:
+                self._used_objects_sets[location_name].remove(tup)
 
         # After cleaning the current device-group, adding the current location _used_objects_set values to the
         # _used_objects_set of the parent.
