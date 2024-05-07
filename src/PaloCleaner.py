@@ -903,9 +903,7 @@ class PaloCleaner:
         if resolved_cache is None:
             resolved_cache = dict()
 
-        def flatten_object_recurser(used_object: panos.objects, object_location: str, usage_base: str,
-                           referencer_type: str = None, referencer_name: str = None, recursion_level: int = 1,
-                           protect_call=False):
+        def flatten_object_recurser(used_object: panos.objects, object_location: str, usage_base: str, referencer_type: str = None, referencer_name: str = None, recursion_level: int = 1, protect_call=False):
             """
             Recursively called function, charged of returning the obj_set (list of (panos.objects, location)) for a given rule
             (first call is from a loop iterating over the different rules of a rulebase at a given location)
@@ -1200,7 +1198,6 @@ class PaloCleaner:
                             # if we are using the group-compare feature and the current object is an AddressObject used directly on a rule, remove its flag
                             # to indicate it is not only a group member
                             if self._compare_groups and len(flattened) == 1 and type(flattened[0][0]) is panos.objects.AddressObject:
-                                print(flattened)
                                 self._console.log(f"[ {location_name} ] Marking object {flattened[0]} as not only a group member (used directly on rule {r.name!r})", level=2)
                                 flattened[0][0].group_member_only = False
 
@@ -1843,53 +1840,7 @@ class PaloCleaner:
                 choosen_object = o
                 last_diff_dg_level = ll
                 choosen_by_diff = True
-        """
 
-        exact_match_replacement = [x for x in obj_list if x["replacement_type"] == "exact_match"]
-        highest_exact_match_replacement_level = 999
-        # would need to get the highest-level object for best replacement 
-        # TODO : after creating the _reverse_depthed_tree : choose the higher-level object 
-        if exact_match_replacement:
-            for o in sorted(exact_match_replacement, key=lambda x: x["replacement"][0].about()['name']):
-                if not choosen_object and self._tiebreak_tag_set and o["replacement"][0].tag is not None:
-                    try:
-                        if (tag_intersect := self._tiebreak_tag_set.intersection(o["replacement"][0].tag)):
-                            choosen_object = o
-                            choosen_by_tiebreak = True
-                            if (ll := self._dg_hierarchy[o['replacement'][1]].level < highest_exact_match_replacement_level):
-                                highest_exact_match_replacement_level = ll
-                            self._console.log(
-                                f"[ {base_location} ] AddressGroup {choosen_object['replacement'][0].about()['name']} (context {choosen_object['replacement'][1]}) choosen by tiebreak tag (Exact static match). Intersection set : {tag_intersect}", level=2)
-                    except Exception:
-                        pass
-                elif not self._tiebreak_tag_set:
-                    # to be reviewed
-                    choosen_object = o
-                    if (ll := self._dg_hierarchy[o['replacement'][1]].level < highest_exact_match_replacement_level):
-                        highest_exact_match_replacement_level = ll
-                    self._console.log(
-                        f"[ {base_location} ] AddressGroup {choosen_object['replacement'][0].about()['name']} (context {choosen_object['replacement'][1]}) choosen by first position", level=2)
-                elif choosen_object:
-                    break
-
-        group_diff_replacement = [x for x in obj_list if x["replacement_type"] == "group_diff"]
-        if not choosen_object or group_diff_replacement:
-            # TODO : check / warning if there's a lowerl-level object having the same name than the higher-level selected one, potentially matching different members 
-            last_match_percent = 0
-            last_dg_level = 999
-            for o in sorted(group_diff_replacement, key=lambda x: x["match_percent"], reverse=True):
-                if o not in exact_match_replacement:
-                    if o['match_percent'] < last_match_percent:
-                        break
-
-                    last_match_percent = o['match_percent']
-                    if (ll := self._dg_hierarchy[o['replacement'][1]].level) < last_dg_level and ll < highest_exact_match_replacement_level:
-                        choosen_object = o
-                        last_dg_level = ll
-            print("Choosen object : ")
-            print(choosen_object)
-            self._console.log(f"[ {base_location} ] AddressGroup {choosen_object['replacement'][0].about()['name']} (context {choosen_object['replacement'][1]}) choosen by matching percentage : {last_match_percent} % and DG level : {last_dg_level}", level=2)
-        """
         if choosen_by_diff:
             self._console.log(f"[ {base_location} ] AddressGroup {choosen_object['replacement'][0].about()['name']} (context {choosen_object['replacement'][1]}) choosen by matching percentage : {last_match_percent} % and DG level : {last_diff_dg_level}", level=2)
         elif choosen_by_tag:
@@ -1949,9 +1900,6 @@ class PaloCleaner:
                         replacement_type = "exact_match"
                     # Else if the type is AddressGroup and the group-comparison mode is enabled, find the best replacement using the find_best_replacement_addr_group_obj function
                     elif type(obj) is AddressGroup and self._compare_groups:
-                        print(f"for {obj}")
-                        print(upward_objects)
-                        print(location_name)
                         repl_info = self.find_best_replacement_addr_group_obj(upward_objects, location_name)
                         replacement_obj, replacement_obj_location = repl_info['replacement']
                         replacement_type = repl_info['replacement_type']
@@ -1978,18 +1926,23 @@ class PaloCleaner:
                         # object instance and location
                         # "blocked" is False at this time. It is used later to block a replacement for objects used on
                         # rules having blocking opstates values (last hit timestamp / last change timestamp)
+                        # Having "blocked"=True on a given replacement will permit to know that the source object cannot be deleted (still used on at least one rule which cannot be updated)
+                        # "globally_blocked" is used to identify replacements which cannot be at all proceeded at the concerned location : all rules concerned are blocked 
+                        # which in this case means that the replacement object does not need to be considered as used as this location (used for cleaning of the used objects set)
 
                         if type(obj) is AddressObject:
                             self._replacements[location_name]['Address'][obj.about()['name']] = {
                                 'source': (obj, location),
                                 'replacement': (replacement_obj, replacement_obj_location),
-                                'blocked': False
+                                'blocked': False, 
+                                'globally_blocked': None
                             }
                         elif type(obj) is AddressGroup:
                             self._replacements[location_name]['Address'][obj.about()['name']] = {
                                 'source': (obj, location), 
                                 'replacement': (replacement_obj, replacement_obj_location),
                                 'blocked': False,
+                                'globally_blocked': None,
                                 'replacement_type': replacement_type,
                                 'replacement_match': replacement_match_percent, 
                                 'left_right_diff': (replacement_left_diff, replacement_right_diff)
@@ -1998,7 +1951,8 @@ class PaloCleaner:
                             self._replacements[location_name]['Service'][obj.about()['name']] = {
                                 'source': (obj, location),
                                 'replacement': (replacement_obj, replacement_obj_location),
-                                'blocked': False
+                                'blocked': False, 
+                                'globally_blocked': None
                             }
 
                 progress.update(task, advance=1)
@@ -2594,6 +2548,7 @@ class PaloCleaner:
 
                                 # if the rule has changes but is not considered as editable (not in timestamp boundaries
                                 # regarding opstate timestamps), protect the rule objects from deletion
+                                """
                                 if not editable_rule or "noopstate" in r.name:
                                     for obj_type, fields in repl_map[type(r)].items():
                                         for f in fields:
@@ -2605,8 +2560,26 @@ class PaloCleaner:
                                                     if object_name in self._replacements[location_name][obj_type]:
                                                         self._replacements[location_name][obj_type][object_name][
                                                             "blocked"] = True
+                                                        if self._replacements[location_name][obj_type][object_name]["globally_blocked"] is None:
+                                                            self._replacements[location_name][obj_type][object_name]["globally_blocked"] = True
                                 else:
                                     modified_rules.value += 1
+                                """
+                                for obj_type, fields in repl_map[type(r)].items():
+                                    for f in fields:
+                                        field_values = getattr(r, f[0])
+                                        field_values = [field_values] if type(field_values) is str else field_values
+                                        #if (field_values := getattr(r, f[0]) if type(f) is list else [getattr(r, f)]):
+                                        if field_values:
+                                            for object_name in field_values:
+                                                if object_name in self._replacements[location_name][obj_type]:
+                                                    if not editable_rule or "noopstate" in r.name:
+                                                        self._replacements[location_name][obj_type][object_name]["blocked"] = True
+                                                        if self._replacements[location_name][obj_type][object_name]["globally_blocked"] is None:
+                                                            self._replacements[location_name][obj_type][object_name]["globally_blocked"] = True
+                                                    else:
+                                                        if self._replacements[location_name][obj_type][object_name]["globally_blocked"] is True:
+                                                            self._replacements[location_name][obj_type][object_name]["globally_blocked"] = False
 
                                 # Iterate up to the value of the max_replace variable (which is the highest number of
                                 # replacements for a given field of the current rule
@@ -2759,6 +2732,8 @@ class PaloCleaner:
             # TODO : This line can be moved above, to be checked
             blocked_groups = set([y['source'] for x, y in self._replacements[location_name][obj_type].items() if y['blocked'] == True and type(y['source'][0]) is panos.objects.AddressGroup])
 
+            """
+
             for name, infos in self._replacements[location_name][obj_type].items():
                 # Remind that objects marked as "blocked" on the _replacements tracker should not be removed :
                 # They have not been replaced as expected, because used on rules where the opstate values
@@ -2787,7 +2762,8 @@ class PaloCleaner:
                                 # (looping on all objects on the current object set), if they are only used on this new group. 
                                 # for this purpose, we need to make sure that all those new AddressObjects do not have the "group_member_only" attribute set to True (even if it's True)
                                 # as it will avoid them being matched by the logic below
-                                if self._compare_groups:
+                                if self._compare_groups and type(infos['replacement'][0]) is panos.objects.AddressGroup:
+                                    print(f"Protecting members of replacement group {infos['replacement']} ({replacements_dependencies_set})")
                                     for x in replacements_dependencies_set:
                                         if type(x[0]) is panos.objects.AddressObject and hasattr(x[0], "group_member_only"):
                                             x[0].group_member_only = False
@@ -2808,23 +2784,108 @@ class PaloCleaner:
                 else:
                     # TODO : flatten protected object for dependencies protection ?
                     self._console.log(f"[ {location_name} ] Not removing {name} (location {infos['source'][1]}) from used objects set, as protected by hitcount", level=2)
+            """
+
+            for name, infos in self._replacements[location_name][obj_type].items():
+                try:
+                    # For the current replacement, remove the original object from the _used_objects_set for the 
+                    # current location (if not using the --unused-only argument),
+                    # and replace it with the replacement object 
+                    if self._unused_only is None: 
+                        if not self._compare_groups or not type(infos['source'][0]) is panos.objects.AddressObject or not hasattr(infos['source'][0], "group_membership"):
+                            # This is matched if compare-groups is not enabled, if the current object is not an AddressObject, or if this is an AddressObject which is not member of any group
+                            if not infos['blocked']:
+                                self._used_objects_sets[location_name].remove(infos['source'])
+                                self._console.log(f"[ {location_name} ] Object {infos['source']} removed from used objects")
+                        elif self._compare_groups and not (blocked_membership := infos['source'][0].group_membership.get('location_name', set()).intersection(blocked_groups)):
+                            # This is matched when compare-groups is enabled, to make sure that we do not delete objects members of groups that we want to protect 
+                            # (groups marked as "blocked" by opstate checks)
+                            self._used_objects_sets[location_name].remove(infos['source'])
+                            self._console.log(f"[ {location_name} ] Object {infos['source']} removed from used objects : not used in any group nor rule", level=2)
+                        elif type(infos['source'][0]) is panos.objects.AddressObject:
+                            # TODO : warning here also for groups members of groups ? <<<<<<<<<<<<<--------------- /!\
+                            self._console.log(f"[ {location_name} ] Object {infos['source']} cannot be deleted because of membership of groups {blocked_membership} which are protected", level=2)
+                        else:
+                            if not infos['blocked']:
+                                self._console.log(f"[ {location_name} ] Object {infos['source']} removed from used objects : not used in any group nor rule 2222", level=2)
+                            else:
+                                self._console.log(f"[ {location_name} ] Not removing {name} (location {infos['source'][1]}) from used objects set, as protected by hitcount", level=2)
+
+                    # For the current replacement, make sure to protect the replacement object, and its members if it is a group 
+                    # This is used only if we don't use the "unused-only" argument, or if we use it together with the "protect-potential-replacements" argument
+                    if self._unused_only is None or self._protect_potential_replacements:
+                        if infos['replacement'] not in self._used_objects_sets[location_name]:
+                            # flattening the replacement object to add also its dependencies (ie : Tags, or AddressGroup members)
+                            # TODO : check if any issue can appear when using multithreading (need to use another lock here ?)
+                            replacements_dependencies_set = self.flatten_object(*infos['replacement'], location_name)
+                            # if we are using the "compare-groups" argument, we need to make sure that all new objects added here will not be deleted right after by the section below 
+                            # (looping on all objects on the current object set), if they are only used on this new group. 
+                            # For this purpose, we need to make sure that all those new AddressObjects do not have the "group_member_only" attribute set to True (even if it's True)
+                            # as it will avoid them being matched by the logic below 
+                            #if self._compare_groups and type(infos['replacement'][0]) is panos.objects.AddressGroup:
+                            for x in replacements_dependencies_set:
+                                # TODO : what for groups members of groups ? <------- /!\ 
+                                # (removing the group_member_only only for AddressObjects here)
+                                if self._compare_groups and type(infos['replacement'][0]) is panos.objects.AddressGroup and type(x[0]) is panos.objects.AddressObject and hasattr(x[0], "group_member_only"):
+                                    x[0].group_member_only = False
+                                if not infos['globally_blocked'] or self._protect_potential_replacements:
+                                    # if the replacement is not globally_blocked (has been effectively replaced on at least one unprotected rule), 
+                                    # or if it is globally_blocked but we still want to protect potential replacements, 
+                                    # adding the replacement object to the local used objects set 
+                                    self._used_objects_sets[location_name].add(x)
+                            self._console.log(f"[ {location_name} ] Added replacement object and dependencies ({replacements_dependencies_set}) to used objects set", level=2)
+                        else:
+                            self._console.log(f"[ {location_name} ] Replacement object ({infos['replacement']}) already processed for local context", level=2)
+
+                    # If the name of the current replacement object is different than the replacement one, count it
+                    # as a replacement on the _cleaning_counts tracker
+                    if not optimized_only and not self._unused_only and infos['source'][1] == location_name and infos['source'][0].name != infos['replacement'][0].name:
+                        self._cleaning_counts[location_name][obj_type]['replaced'] += 1
+                except ValueError:
+                    # TODO : exception below is too generic and could not represent the exact issue 
+                    self._console.log(f"[ {location_name} ] ValueError when trying to remove {name} from used objects set : object not found on object set")
+
 
         if self._compare_groups:
             to_remove_from_obj_set = list()
             # Checking all remaining address objects in the current _used_objects_set that are flagged as _group_member_only and which are not explicitly part of the _replacement dict
             # It can be the case for objects used only on groups, which groups are being replaced. Those objects need to be removed from the _used_object_set for deletion
             blocked_groups_2 = set([y['source'][0] for x, y in self._replacements[location_name]["Address"].items() if y['blocked'] == True and type(y['source'][0]) is panos.objects.AddressGroup])
+            still_used_groups = set([x[0] for x in self._used_objects_sets[location_name] if type(x[0]) is panos.objects.AddressGroup])
+
+            print("blocked_groups_2 is :")
+            print(blocked_groups_2)
+            print("used objects set is :")
+            print(self._used_objects_sets[location_name])
+            print("Still used groups at location is : ")
+            print(still_used_groups)
 
             for used_obj_tuple in self._used_objects_sets[location_name]:
                 if type(used_obj_tuple[0]) is panos.objects.AddressObject and hasattr(used_obj_tuple[0], "group_member_only") and used_obj_tuple[0].group_member_only == True:
-                    if not (used_obj_intersect := used_obj_tuple[0].group_membership.get(location_name, set()).intersection(blocked_groups_2)):
-                        to_remove_from_obj_set.append(used_obj_tuple)
-                        self._console.log(f"[ {location_name} ] Object {used_obj_tuple} removed from used_object_set at location {location_name}", level=2)
+                    print(f"{used_obj_tuple} group membership is : {used_obj_tuple[0].group_membership}")
+                    if blocked_groups_2:
+                        if not (used_obj_intersect := used_obj_tuple[0].group_membership.get(location_name, set()).intersection(blocked_groups_2)):
+                            to_remove_from_obj_set.append(used_obj_tuple)
+                            self._console.log(f"[ {location_name} ] Object {used_obj_tuple} removed from used_object_set at location {location_name} (group member only, not member of any protected group)", level=2)
+                        else:
+                            self._console.log(f"[ {location_name} ] Object {used_obj_tuple} not removed from used_object_set at location {location_name} because of membership on groups {used_obj_intersect}")
+                            # TEST : for those objects too, mark them as not being group_member_only, to protect them for upward DG used_object_set analysis (would match the current code section, 
+                            # and would be deleted if member of a lower-level device-group not replicated to the upward device-group)
+                            used_obj_tuple[0].group_member_only = False
                     else:
-                        self._console.log(f"[ {location_name} ] Object {used_obj_tuple} not removed from used_object_set at location {location_name} because of membership on groups {used_obj_intersect}")
+                        if not (still_used_obj_intersect := used_obj_tuple[0].group_membership.get(location_name, set()).intersection(still_used_groups)):
+                            to_remove_from_obj_set.append(used_obj_tuple)
+                            self._console.log(f"[ {location_name} ] Object {used_obj_tuple} removed from used_object_set at location {location_name} (group member only, not member of any still used group)", level=2)
+                        else:
+                            self._console.log(f"[ {location_name} ] Object {used_obj_tuple} not removed from used_object_set at location {location_name} (group member only, still member of used group {still_used_obj_intersect})", level=2)
+                            used_obj_tuple[0].group_member_only = False
+                        
 
             for tup in to_remove_from_obj_set:
                 self._used_objects_sets[location_name].remove(tup)
+
+        print("After compare groups compute, used objects set is : ")
+        print(self._used_objects_sets[location_name])
 
         # After cleaning the current device-group, adding the current location _used_objects_set values to the
         # _used_objects_set of the parent.

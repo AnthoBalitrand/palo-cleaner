@@ -101,7 +101,17 @@ def add_range(self, range_in):
     r = range_in
     if type(range_in) is not ipaddress.IPv4Network:
         try:
-            r = ipaddress.ip_network(range_in, False)
+            if '-' in range_in:
+                # if the range_in value is range (ie : 192.168.1.1-192.168.1.3), split it
+                # and create a "temporary" IPv4Network object to which we spoof the network_address
+                # and broadcast_address values with the ranges values 
+                min_add, max_add = range_in.split('-')
+                print(f"IP address range detected : {range_in}")
+                r = ipaddress.IPv4Network("0.0.0.0/0")
+                r.network_address = ipaddress.IPv4Address(min_add)
+                r.broadcast_address = ipaddress.IPv4Address(max_add)
+            else:
+                r = ipaddress.ip_network(range_in, False)
         except ValueError:
             print(f"{range_in!r} is not a valid IPv4 or IPv6 address. Not added to group members list")
             return False
