@@ -106,7 +106,7 @@ def add_range(self, range_in):
                 # and create a "temporary" IPv4Network object to which we spoof the network_address
                 # and broadcast_address values with the ranges values 
                 min_add, max_add = range_in.split('-')
-                print(f"IP address range detected : {range_in}")
+                #print(f"IP address range detected : {range_in}")
                 r = ipaddress.IPv4Network("0.0.0.0/0")
                 r.network_address = ipaddress.IPv4Address(min_add)
                 r.broadcast_address = ipaddress.IPv4Address(max_add)

@@ -96,7 +96,7 @@ def parse_cli_args():
     parser.add_argument(
         "--favorise-tagged-objects",
         action = "store_true",
-        help = "Favorise objects referenced on DAG or having DAGs when eliminating duplicates (works only for shared objects)",
+        help = "Favorise objects referenced on DAG or having tags when eliminating duplicates (works only for shared objects)",
         default = False,
     )
 
@@ -159,7 +159,7 @@ def parse_cli_args():
     parser.add_argument(
         "--same-name-only",
         action = "store_true",
-        help = "Only replaces objects by ones existing at upward levels, and having same values",
+        help = "Only replaces objects by ones existing at upward levels, and having same values (does not updates rules)",
         default = False
     )
 

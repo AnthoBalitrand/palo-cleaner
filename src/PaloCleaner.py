@@ -104,6 +104,7 @@ class PaloCleaner:
         self._compare_groups = kwargs['compare_groups']         # boolean, indicating if groups comparison / replacement has to be performed or not
         self._groups_percent_match = int(kwargs["groups_comparison_percent_match"])         # integer, minimum level of match (in percentage) between groups to compare 
         self._partial_group_match = kwargs['partial_group_match']                          # boolean, indicating if it is allowed to replace groups with a partial match in the target one (not all IP included)
+        self._indirect_protect = dict()
 
         if self._compare_groups:
             PaloCleanerTools.surcharge_addressgroups()
@@ -786,6 +787,7 @@ class PaloCleaner:
         Find referenced object by location (permits to get the referenced object on current location if
         existing at this level, or on upper levels of the device-groups hierarchy)
         Commenting : OK (15062023)
+        TODO : comment iterative_call parameter
 
         :param obj_name: (string) Name of the object to find
         :param reference_location: (string) Where to start to find the object (device-group name or 'shared')
@@ -927,6 +929,7 @@ class PaloCleaner:
             """
 
             # Initializes an empty list which will contain tuples of (panos.Object, location_name) of the flattened group content
+            # TODO : change it as as set 
             obj_set = list()
 
             # If used_object has been resolved at the time of calling the flatten_object function, mark it as resolved
@@ -1259,7 +1262,7 @@ class PaloCleaner:
                                     resolved_cache[obj_type][obj].group_member_only = False
                                     self._console.log(f"[ {location_name} ] Marking object {obj!r} (already resolved in cache) as not only a group member (used directly on rule {r.name!r})", level=2)
                                 except Exception as e:
-                                    self._console.log(f"[ {location_name} ] ERROR when marking object {obj!r} (already resolved in cache) as not only a group member (used directly on rule {r.name!r}) : {e}", style="red", level=2)
+                                    self._console.log(f"[ {location_name} ] ERROR when marking object {obj!r} (already resolved in cache) as not only a group member (used directly on rule {r.name!r}) : {e}", style="red")
                 # update progress bar for each processed rule
                 progress.update(task, advance=1)
 
@@ -1353,6 +1356,11 @@ class PaloCleaner:
         # Initializes the list of found duplicates objects
         found_upward_objects = list()
         current_location_search = base_location_name
+        if ref_obj_group.static_value and self._compare_groups:
+            percent_diff = ref_obj_group.ip_count * (self._groups_percent_match / 100)
+            min_compare_size = math.floor(ref_obj_group.ip_count - percent_diff)
+            max_compare_size = math.ceil(ref_obj_group.ip_count + percent_diff)
+            self._console.log(f"[ {base_location_name} ] AddressGroup {ref_obj_group.name} size is {ref_obj_group.ip_count}. It could be replaced by groups between {min_compare_size} and {max_compare_size} (± {self._groups_percent_match} %)", level=2)
 
         # This boolean is used to stop the search loop when the "shared" location has been reached
         reached_max = False
@@ -1395,10 +1403,6 @@ class PaloCleaner:
 
             # searching for potential replacement groups by size, using the self._group_sizesearch structure 
             if ref_obj_group.static_value and self._compare_groups:
-                percent_diff = ref_obj_group.ip_count * (self._groups_percent_match / 100)
-                min_compare_size = math.floor(ref_obj_group.ip_count - percent_diff)
-                max_compare_size = math.ceil(ref_obj_group.ip_count + percent_diff)
-                self._console.log(f"[ {base_location_name} ] AddressGroup {ref_obj_group.name} size is {ref_obj_group.ip_count}. It could be replaced by groups between {min_compare_size} and {max_compare_size} (± {self._groups_percent_match} %)", level=2)
 
                 candidate_list = list()
                 any([candidate_list.extend(y) for x, y in self._group_sizesearch[current_location_search].items() if x > min_compare_size and x <= max_compare_size])
@@ -1651,17 +1655,21 @@ class PaloCleaner:
 
             # If cleaning application is requested and tag has been changed, apply it to Panorama
             if tag_changed:
-                if self._apply_cleaning and not self._bulk_operations:
-                    try:
+                if self._apply_cleaning:
+                    if not self._bulk_operations:
+                        try:
+                            self._console.log(
+                                f"[ {base_location} ] Adding tiebreak tag {self._tiebreak_tag[0]} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]} ")
+                            choosen_object[0].apply()
+                        except Exception as e:
+                            self._console.log(f"[ {base_location} ] ERROR when adding tiebreak tag to object {choosen_object[0].about()['name']} : {e}", style="red")
+                    else:
                         self._console.log(
-                            f"[ {base_location} ] Adding tiebreak tag {self._tiebreak_tag[0]} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]} ")
-                        choosen_object[0].apply()
-                    except Exception as e:
-                        self._console.log(f"[ {base_location} ] ERROR when adding tiebreak tag to object {choosen_object[0].about()['name']} : {e}", style="red")
+                            f"[ {base_location} ] Tiebreak tag {self._tiebreak_tag[0]} application to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} added to bulk operation pool for context {choosen_object[1]} ")
+                        self._objects[choosen_object[1]]['context'].add(choosen_object[0])
                 else:
-                    self._console.log(
-                        f"[ {base_location} ] Tiebreak tag {self._tiebreak_tag[0]} application to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} added to bulk operation pool for context {choosen_object[1]} ")
-                    self._objects[choosen_object[1]]['context'].add(choosen_object[0])
+                     self._console.log(
+                            f"[ {base_location} ] Tiebreak tag {self._tiebreak_tag[0]} would be applied to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} for context {choosen_object[1]} ")
 
         # Returns the chosen object among the provided list
         return choosen_object
@@ -1771,21 +1779,24 @@ class PaloCleaner:
 
             # If cleaning application is requested and tag has been changed, apply it to Panorama
             if tag_changed:
-                if self._apply_cleaning and not self._bulk_operations:
-                    try:
-                        self._console.log(
-                            f"[ {base_location} ] Adding tiebreak tag {self._tiebreak_tag[0]} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]}")
-                        choosen_object[0].apply()
-                    except Exception as e:
-                        self._console.log(f"[ {base_location} ] ERROR when adding tiebreak tag to object {choosen_object[0].about()['name']} : {e}", style="red")
+                if self._apply_cleaning :
+                    if not self._bulk_operations:
+                        try:
+                            self._console.log(
+                                f"[ {base_location} ] Adding tiebreak tag {self._tiebreak_tag[0]} to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} on context {choosen_object[1]}")
+                            choosen_object[0].apply()
+                        except Exception as e:
+                            self._console.log(f"[ {base_location} ] ERROR when adding tiebreak tag to object {choosen_object[0].about()['name']} : {e}", style="red")
+                    else:
+                        self._console.log(f"[ {base_location} ] Tiebreak tag {self._tiebreak_tag[0]} application to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} added to bulk operation pool for context {choosen_object[1]} ")
+                        self._objects[choosen_object[1]]['context'].add(choosen_object[0])
                 else:
-                    self._console.log(f"[ {base_location} ] Tiebreak tag {self._tiebreak_tag[0]} application to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} added to bulk operation pool for context {choosen_object[1]} ")
-                    self._objects[choosen_object[1]]['context'].add(choosen_object[0])
+                    self._console.log(f"[ {base_location} ] Tiebreak tag {self._tiebreak_tag[0]} would be applied to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} for context {choosen_object[1]} ")
 
         # Returns the chosen object among the provided list
         return choosen_object
 
-    def find_best_replacement_addr_group_obj(self, obj_list: list, base_location: str):
+    def find_best_replacement_addr_group_obj(self, obj_list: list, base_location: str, base_obj_tuple: (panos.objects, str)):
         """
         Get a list of dicts representing potential AddressGroup objects replacements
         (see format in the find_upward_obj_group function docstring), and returns the best to be used based on replacement type / diff match
@@ -1801,7 +1812,6 @@ class PaloCleaner:
 
         choosen_object = None
         choosen_by_tiebreak = False
-        # TODO : add preference for saga alias groups
         # TODO : when replacing exact_match with group_diff, need to replace all the static_matches
 
         exact_match_replacement = [x for x in obj_list if x["replacement_type"] == "exact_match"]
@@ -1809,39 +1819,59 @@ class PaloCleaner:
         last_tag_intersection_set_length = 0
         choosen_by_tag = False
         for o in exact_match_replacement:
-            if self._tiebreak_tag_set and o["replacement"][0].tag is not None:
-                # the following section chooses the highest DG object, with the highest tag intersection length at this level
-                if (tag_intersect := self._tiebreak_tag_set.intersection(o["replacement"][0].tag)):
-                    ti_len = len(tag_intersect)
+            if not o["replacement"][0].name in self._replacements[base_location]["Address"]:
+                if self._tiebreak_tag_set and o["replacement"][0].tag is not None:
+                    # the following section chooses the highest DG object, with the highest tag intersection length at this level
+                    if (tag_intersect := self._tiebreak_tag_set.intersection(o["replacement"][0].tag)):
+                        ti_len = len(tag_intersect)
+                        if (ll := self._dg_hierarchy[o["replacement"][1]].level) < last_exact_dg_level:
+                            last_tag_intersection_set_length = ti_len
+                            last_exact_dg_level = ll
+                            choosen_object = o
+                        elif (ti_len) > last_tag_intersection_set_length:
+                            last_tag_intersection_set_length = ti_len
+                            choosen_object = o
+                        choosen_by_tag = True
+                elif not choosen_object:
+                    # the following section chooses the highest DG object, regardless of the tag intersection length, if no object has been choosen
+                    # it means that a tag-intersection matched object at lower level will win 
                     if (ll := self._dg_hierarchy[o["replacement"][1]].level) < last_exact_dg_level:
-                        last_tag_intersection_set_length = ti_len
                         last_exact_dg_level = ll
                         choosen_object = o
-                    elif (ti_len) > last_tag_intersection_set_length:
-                        last_tag_intersection_set_length = ti_len
-                        choosen_object = o
-                    choosen_by_tag = True
-            elif not choosen_object:
-                # the following section chooses the highest DG object, regardless of the tag intersection length, if no object has been choosen
-                # it means that a tag-intersection matched object at lower level will win 
-                if (ll := self._dg_hierarchy[o["replacement"][1]].level) < last_exact_dg_level:
-                    last_exact_dg_level = ll
-                    choosen_object = o
+            else:
+                replaced_by = self._replacements[base_location]["Address"][o["replacement"][0].name]
+                self._console.log(f"[ {base_location} ] ERROR !!!!!! Not using {o} as replacement, because already identified as replaced by {replaced_by} <-------- ")
 
         group_diff_replacement = [x for x in obj_list if x["replacement_type"] == "group_diff"]
         last_match_percent = 0
         last_diff_dg_level = 999
         choosen_by_diff = False
+        choosen_by_alias = False
         for o in sorted(group_diff_replacement, key=lambda x: x["match_percent"], reverse=True):
-            if o['match_percent'] < last_match_percent:
-                break
-            last_match_percent = o['match_percent']
-            if (ll := self._dg_hierarchy[o['replacement'][1]].level) < last_diff_dg_level and ll < last_exact_dg_level:
-                choosen_object = o
-                last_diff_dg_level = ll
-                choosen_by_diff = True
+            if not o["replacement"][0].name in self._replacements[base_location]["Address"]:
+                o_hierarchy_level = self._dg_hierarchy[o['replacement'][1]].level
 
-        if choosen_by_diff:
+                if o_hierarchy_level == 0 and "alias" in o['replacement'][0].name and type(o['replacement'][0].static_value) is list and len(o['replacement'][0].static_value) == 1 and base_obj_tuple[0].name in o['replacement'][0].static_value:
+                    choosen_object = o
+                    choosen_by_alias = True
+                    o["replacement_type"] = "alias"
+                    break
+
+                if o['match_percent'] < last_match_percent:
+                    continue
+
+                last_match_percent = o['match_percent']
+                if (o_hierarchy_level) < last_diff_dg_level and o_hierarchy_level < last_exact_dg_level:
+                    choosen_object = o
+                    last_diff_dg_level = o_hierarchy_level
+                    choosen_by_diff = True
+            else:
+                replaced_by = self._replacements[base_location]["Address"][o["replacement"][0].name]["replacement"]
+                self._console.log(f"[ {base_location} ] ERROR !!!!!! Not using {o} as replacement, because already identified as replaced by {replaced_by} <-------- 2222")
+
+        if choosen_by_alias and choosen_by_diff:
+            self._console.log(f"[ {base_location} ] AddressGroup {choosen_object['replacement'][0].about()['name']} (context {choosen_object['replacement'][1]}) choosen by alias and matching percentage : {last_match_percent} % and DG level : {last_diff_dg_level}", level=2)
+        elif choosen_by_diff:
             self._console.log(f"[ {base_location} ] AddressGroup {choosen_object['replacement'][0].about()['name']} (context {choosen_object['replacement'][1]}) choosen by matching percentage : {last_match_percent} % and DG level : {last_diff_dg_level}", level=2)
         elif choosen_by_tag:
             self._console.log(f"[ {base_location} ] AddressGroup {choosen_object['replacement'][0].about()['name']} (context {choosen_object['replacement'][1]}) choosen by tag intersection : {tag_intersect} and DG level : {last_exact_dg_level}", level=2)
@@ -1900,7 +1930,7 @@ class PaloCleaner:
                         replacement_type = "exact_match"
                     # Else if the type is AddressGroup and the group-comparison mode is enabled, find the best replacement using the find_best_replacement_addr_group_obj function
                     elif type(obj) is AddressGroup and self._compare_groups:
-                        repl_info = self.find_best_replacement_addr_group_obj(upward_objects, location_name)
+                        repl_info = self.find_best_replacement_addr_group_obj(upward_objects, location_name, (obj, location))
                         replacement_obj, replacement_obj_location = repl_info['replacement']
                         replacement_type = repl_info['replacement_type']
                         replacement_match_percent = repl_info['match_percent']
@@ -2062,6 +2092,8 @@ class PaloCleaner:
                                     except Exception as e:
                                         self._console.log(f"[ Panorama ] [Thread-{thread_id}] Error while creating tag {tag!r} ! : {e.message}",
                                                           style="red")
+                                    finally:
+                                        self._panorama.remove(tag_instance)
                                 # also add the new Tag object at the proper location (shared) on the local cache
                                 # and the various search structures
                                 self._objects['shared']['Tag'].append(tag_instance)
@@ -2105,7 +2137,9 @@ class PaloCleaner:
                         # if the type of the current object is a static AddressGroup
                         if type(checked_object) is panos.objects.AddressGroup and checked_object.static_value:
                             changed = False
-                            matched = source_obj_instance.about()['name'] in checked_object.static_value
+                            # on the line below, we are checking if the replacement object exists in the list of static members of the found AddressGroups at the current location
+                            # and we are also avoiding replacement of a group by itself in the case of a single-member group (alias group)
+                            matched = source_obj_instance.about()['name'] in checked_object.static_value and not (len(checked_object.static_value) == 1 and type(source_obj_instance) is panos.objects.AddressGroup)
                             if matched and source_obj_instance.about()['name'] != replacement_obj_instance.about()['name']:
                                 checked_object.static_value.remove(source_obj_instance.about()['name'])
                                 # acquiring lock to avoid multiple threads to try to change a static group members list at the same time 
@@ -2653,6 +2687,26 @@ class PaloCleaner:
 
                 self._objects[location_name]['context'].remove(rulebase[0].parent)
 
+    def add_indirect_protect(self, location_name: str, obj_type: str, obj_name: str):
+        """
+        TODO : comment
+
+        :param location_name: (str) The name of the location at which the object to be indirectly protected exists 
+        :param obj_type: (str) The object type (Address / Service / Tag)
+        :param obj_name: (str) The name of the object to be indirectly protected at the provided location, with the provided type 
+        """
+
+        if not location_name in self._indirect_protect:
+            self._indirect_protect[location_name] = dict()
+
+        if not obj_type in self._indirect_protect[location_name]:
+            self._indirect_protect[location_name][obj_type] = set()
+
+        if type(obj_name) is str:
+            self._indirect_protect[location_name][obj_type].add(obj_name)
+        else:
+            self._indirect_protect[location_name][obj_type].update(obj_name)
+
     def clean_local_object_set(self, location_name: str):
         """
         In charge of removing the unused objects at a given location (if this location is fully included in the analysis,
@@ -2727,65 +2781,10 @@ class PaloCleaner:
         # (which means that we don't want to delete anything at this level, but we need to make sure that used objects at this level will be protected upward, if the upward device-group is on the list)
         optimized_only = True if (self._unused_only is not None and len(self._unused_only) > 0 and location_name not in self._unused_only) else False
 
+        blocked_groups = set([y['source'][0] for x, y in self._replacements.get(location_name, dict()).get("Address", dict()).items() if y.get('blocked') == True and type( y.get('source', (None, None)) [0]) is panos.objects.AddressGroup])
+
         # removing replaced objects from used_objects_set for current location_name
         for obj_type in self._replacements.get(location_name, list()):
-            # TODO : This line can be moved above, to be checked
-            blocked_groups = set([y['source'] for x, y in self._replacements[location_name][obj_type].items() if y['blocked'] == True and type(y['source'][0]) is panos.objects.AddressGroup])
-
-            """
-
-            for name, infos in self._replacements[location_name][obj_type].items():
-                # Remind that objects marked as "blocked" on the _replacements tracker should not be removed :
-                # They have not been replaced as expected, because used on rules where the opstate values
-                # (last_hit_timestamp and last_change_timestamp) are not in the allowed boundaries
-                if not infos['blocked']:
-                    try:
-                        # For the current replacement, remove the original object from the _used_objects_set for the
-                        # current location (if not using the --unused-only argument),
-                        # and replace it with the replacement object
-                        if self._unused_only is None:
-                            if not self._compare_groups or not type(infos['source'][0]) is panos.objects.AddressObject or not hasattr(infos['source'][0], "group_membership"):
-                                # This is matched if compare-group is not enabled, if the current object is not an AddressObject, or if this is an AddressObject which is not member of any group
-                                self._used_objects_sets[location_name].remove(infos['source'])
-                                self._console.log(f"[ {location_name} ] Object {infos['source']} removed from used objects")
-                            elif not (blocked_membership := infos['source'][0].group_membership.get('location_name', set()).intersection(blocked_groups)):
-                                self._used_objects_sets[location_name].remove(infos['source'])
-                                self._console.log(f"[ {location_name} ] Object {infos['source']} removed from used objects : not used in any group nor rule", level=2)
-                            else:
-                                self._console.log(f"[ {location_name} ] Object {infos['source']} cannot be deleted because of membership of groups {blocked_membership} which are protected", level=2)
-                        if self._unused_only is None or (self._unused_only is not None and self._protect_potential_replacements):
-                            if infos['replacement'] not in self._used_objects_sets[location_name]:
-                                # flattening the replacement object to add also its dependencies (ie : Tags)
-                                # TODO : check if any issue can appear when using multithreading (need to use another lock here ?)
-                                replacements_dependencies_set = self.flatten_object(*infos['replacement'], location_name)
-                                # if we are using the compare-groups feature, if the added objects (for dependency protection), we need to make sure that all new objects added here will not be deleted right after by the section below 
-                                # (looping on all objects on the current object set), if they are only used on this new group. 
-                                # for this purpose, we need to make sure that all those new AddressObjects do not have the "group_member_only" attribute set to True (even if it's True)
-                                # as it will avoid them being matched by the logic below
-                                if self._compare_groups and type(infos['replacement'][0]) is panos.objects.AddressGroup:
-                                    print(f"Protecting members of replacement group {infos['replacement']} ({replacements_dependencies_set})")
-                                    for x in replacements_dependencies_set:
-                                        if type(x[0]) is panos.objects.AddressObject and hasattr(x[0], "group_member_only"):
-                                            x[0].group_member_only = False
-                                        self._used_objects_sets[location_name].add(x)
-                                else:
-                                    any(self._used_objects_sets[location_name].add(x) for x in replacements_dependencies_set)
-                                self._console.log(f"[ {location_name} ] Added replacement object and dependencies ({replacements_dependencies_set}) to used objects set", level=2)
-                            else:
-                                self._console.log(f"[ {location_name} ] Replacement object ({infos['replacement']}) already processed for local context", level=2)
-                        self._console.log(f"[ {location_name} ] Removing unprotected object {name} (location {infos['source'][1]}) from used objects set", level=2)
-                        # If the name of the current replacement object is different than the replacement one, count it
-                        # as a replacement on the _cleaning_counts tracker
-                        if not optimized_only and not self._unused_only and infos['source'][1] == location_name and infos['source'][0].name != infos['replacement'][0].name:
-                            self._cleaning_counts[location_name][obj_type]['replaced'] += 1
-                    # This exception should never be raised but protects the execution
-                    except ValueError:
-                        self._console.log(f"[ {location_name} ] ValueError when trying to remove {name} from used objects set : object not found on object set")
-                else:
-                    # TODO : flatten protected object for dependencies protection ?
-                    self._console.log(f"[ {location_name} ] Not removing {name} (location {infos['source'][1]}) from used objects set, as protected by hitcount", level=2)
-            """
-
             for name, infos in self._replacements[location_name][obj_type].items():
                 try:
                     # For the current replacement, remove the original object from the _used_objects_set for the 
@@ -2794,9 +2793,13 @@ class PaloCleaner:
                     if self._unused_only is None: 
                         if not self._compare_groups or not type(infos['source'][0]) is panos.objects.AddressObject or not hasattr(infos['source'][0], "group_membership"):
                             # This is matched if compare-groups is not enabled, if the current object is not an AddressObject, or if this is an AddressObject which is not member of any group
-                            if not infos['blocked']:
+                            if not infos['blocked'] and not infos.get('replacement_type', '') == 'alias':
                                 self._used_objects_sets[location_name].remove(infos['source'])
                                 self._console.log(f"[ {location_name} ] Object {infos['source']} removed from used objects")
+                                print(infos)
+                            else:
+                                self._console.log(f"[ {location_name} ] Object {infos['source']} is kept on used objects set. See infos below")
+                                print(infos)
                         elif self._compare_groups and not (blocked_membership := infos['source'][0].group_membership.get('location_name', set()).intersection(blocked_groups)):
                             # This is matched when compare-groups is enabled, to make sure that we do not delete objects members of groups that we want to protect 
                             # (groups marked as "blocked" by opstate checks)
@@ -2845,26 +2848,25 @@ class PaloCleaner:
                     # TODO : exception below is too generic and could not represent the exact issue 
                     self._console.log(f"[ {location_name} ] ValueError when trying to remove {name} from used objects set : object not found on object set")
 
-
         if self._compare_groups:
             to_remove_from_obj_set = list()
-            # Checking all remaining address objects in the current _used_objects_set that are flagged as _group_member_only and which are not explicitly part of the _replacement dict
+            # Checking all remaining address objects in the current _used_objects_set that are flagged as group_member_only and which are not explicitly part of the _replacement dict
             # It can be the case for objects used only on groups, which groups are being replaced. Those objects need to be removed from the _used_object_set for deletion
-            blocked_groups_2 = set([y['source'][0] for x, y in self._replacements[location_name]["Address"].items() if y['blocked'] == True and type(y['source'][0]) is panos.objects.AddressGroup])
             still_used_groups = set([x[0] for x in self._used_objects_sets[location_name] if type(x[0]) is panos.objects.AddressGroup])
 
-            print("blocked_groups_2 is :")
-            print(blocked_groups_2)
-            print("used objects set is :")
-            print(self._used_objects_sets[location_name])
-            print("Still used groups at location is : ")
-            print(still_used_groups)
+            #print("blocked_groups is :")
+            #print(blocked_groups)
+            #print("used objects set is :")
+            #print(self._used_objects_sets[location_name])
+            #print("Still used groups at location is : ")
+            #print(still_used_groups)
 
             for used_obj_tuple in self._used_objects_sets[location_name]:
                 if type(used_obj_tuple[0]) is panos.objects.AddressObject and hasattr(used_obj_tuple[0], "group_member_only") and used_obj_tuple[0].group_member_only == True:
+                    # TODO : what happens if there are "blocked groups", but a given object is part of still used groups ? (else statement below)
                     print(f"{used_obj_tuple} group membership is : {used_obj_tuple[0].group_membership}")
-                    if blocked_groups_2:
-                        if not (used_obj_intersect := used_obj_tuple[0].group_membership.get(location_name, set()).intersection(blocked_groups_2)):
+                    if blocked_groups:
+                        if not (used_obj_intersect := used_obj_tuple[0].group_membership.get(location_name, set()).intersection(blocked_groups)):
                             to_remove_from_obj_set.append(used_obj_tuple)
                             self._console.log(f"[ {location_name} ] Object {used_obj_tuple} removed from used_object_set at location {location_name} (group member only, not member of any protected group)", level=2)
                         else:
@@ -2875,7 +2877,7 @@ class PaloCleaner:
                     else:
                         if not (still_used_obj_intersect := used_obj_tuple[0].group_membership.get(location_name, set()).intersection(still_used_groups)):
                             to_remove_from_obj_set.append(used_obj_tuple)
-                            self._console.log(f"[ {location_name} ] Object {used_obj_tuple} removed from used_object_set at location {location_name} (group member only, not member of any still used group)", level=2)
+                            self._console.log(f"[ {location_name} ] Object {used_obj_tuple} removed from used_object_set at location {location_name} (group member only, not member of any still used group 2222)", level=2)
                         else:
                             self._console.log(f"[ {location_name} ] Object {used_obj_tuple} not removed from used_object_set at location {location_name} (group member only, still member of used group {still_used_obj_intersect})", level=2)
                             used_obj_tuple[0].group_member_only = False
@@ -2884,9 +2886,6 @@ class PaloCleaner:
             for tup in to_remove_from_obj_set:
                 self._used_objects_sets[location_name].remove(tup)
 
-        print("After compare groups compute, used objects set is : ")
-        print(self._used_objects_sets[location_name])
-
         # After cleaning the current device-group, adding the current location _used_objects_set values to the
         # _used_objects_set of the parent.
         # This will permit to protect used objects on the childs of the hierarchy to be deleted when they exist but are
@@ -2894,9 +2893,6 @@ class PaloCleaner:
         upward_dg = self._dg_hierarchy[location_name].parent
         upward_dg_name = "shared" if not upward_dg else upward_dg.name
         self._console.log(f"[ {location_name} ] Found parent DG is {upward_dg_name}", level=3)
-
-        # improvement : try to replicate upward only objects not attached to the current device-group (useless) 
-        #self._used_objects_sets[upward_dg_name] = self._used_objects_sets[upward_dg_name].union(self._used_objects_sets[location_name])
         self._used_objects_sets[upward_dg_name] = self._used_objects_sets[upward_dg_name].union([x for x in self._used_objects_sets[location_name] if not x[1]==location_name])
 
         if optimized_only:
@@ -2910,7 +2906,8 @@ class PaloCleaner:
                 try:
                     obj = jobs_queue.get()
 
-                    if obj.name in indirect_protect[shortened_obj_type]:
+                    #if obj.name in indirect_protect[shortened_obj_type]:
+                    if obj.name in self._indirect_protect.get(location_name, dict()).get(shortened_obj_type, list()):
                         continue
 
                     if self._apply_cleaning and not (obj, location_name) in self._used_objects_sets[location_name]:
@@ -3018,10 +3015,14 @@ class PaloCleaner:
                             try:
                                 if o.tag:
                                     self._console.log(f"[ {location_name} ] Object has tags : {o.tag}", level=2)
-                                    if set(o.tag).intersection(self._protect_tags) or o.name in indirect_protect[obj_type]:
+                                    #if set(o.tag).intersection(self._protect_tags) or o.name in indirect_protect[obj_type]:
+                                    if set(o.tag).intersection(self._protect_tags) or o.name in self._indirect_protect[location_name][obj_type]:
                                         # protecting the other tags used on the protected object from being deleted later
                                         # this is done for all type of objects (Service, Address, ServiceGroup, AddressGroup)
-                                        indirect_protect["Tag"].update(o.tag)
+                                        #indirect_protect["Tag"].update(o.tag)
+                                        for current_tag in o.tag:
+                                            tag_obj, tag_location = self.get_relative_object_location(current_tag, location_name, obj_type="Tag")
+                                            self.add_indirect_protect(tag_location, "Tag", o.tag)
 
                                         # in case of a protected group, protecting the members from being deleted later (+ all associated objects, like tags)
                                         # this is done only for static groups, using the flatten_objects method
@@ -3034,14 +3035,16 @@ class PaloCleaner:
                                                 for (o, o_location) in linked_objects:
                                                     shorten_type = PaloCleanerTools.shorten_object_type(o.__class__.__name__)
                                                     self._console.log(f"[ {o_location} ] Protecting object {o.name} ({o.__class__.__name__} / {shorten_type})", level=2)
-                                                    indirect_protect[shorten_type].add(o.name)
+                                                    #indirect_protect[shorten_type].add(o.name)
+                                                    self.add_indirect_protect(o_location, shorten_type, o.name)
                                         continue
                             except AttributeError as e:
                                 pass
                             except Exception as e:
                                 self._console.log(f"UNKNOWN EXCEPTION : {e}", style="red")
 
-                            if o.name in indirect_protect[obj_type]:
+                            #if o.name in indirect_protect[obj_type]:
+                            if o.name in self._indirect_protect[location_name][obj_type]:
                                 continue
 
                             if self._apply_cleaning and not (o, location_name) in self._used_objects_sets[location_name]:
@@ -3083,26 +3086,27 @@ class PaloCleaner:
         jobs_queue = Queue()
 
         # dict used to store indirectly protected object (because of protect-tags parameter used at startup)
-        indirect_protect = dict()
-        indirect_protect['Tag'] = set()
-        indirect_protect['Tag'].update(self._protect_tags)
-        indirect_protect['Tag'].update(self._tiebreak_tag if self._tiebreak_tag else [])
+        self.add_indirect_protect(location_name, "Tag", self._protect_tags)
+        self.add_indirect_protect(location_name, "Tag", self._tiebreak_tag_set)
 
         local_dg = self._objects[location_name]['context']
 
         if self._bulk_operations:
+            # create a list containing the elements of the cleaning_order direct in ascending priority order 
+            # ie : [{"Address": AddressGroup}, {"Service": ServiceGroup}, ...]
             for obj_item in [v for k, v in sorted(cleaning_order.items())]:
+                # populate the jobs_queue with those items in the right cleaning order 
                 jobs_queue.put(obj_item)
-                if not indirect_protect.get(list(obj_item.keys())[0]):
-                    indirect_protect[list(obj_item.keys())[0]] = set()
+            # start the bulk deletion of objects 
             delete_local_objects_bulk(jobs_queue, local_dg)
+            # wait for all jobs to be done 
             jobs_queue.join()
         else:
+            # for each object type in the list [{"Address": AddressGroup}, {"Service": ServiceGroup}, ...]
             for obj_item in [v for k, v in sorted(cleaning_order.items())]:
-                if not indirect_protect.get(list(obj_item.keys())[0]):
-                    indirect_protect[list(obj_item.keys())[0]] = set()
-
+                # for each object having the "Address", "Service" or "Tag" object type
                 for obj in self._objects[location_name][list(obj_item.keys())[0]]:
+                    # if the current object type is the one being actually cleaned (AddressObject, AddressGroup...) 
                     if type(obj) is obj_item[list(obj_item.keys())[0]]:
                         shortened_obj_type = PaloCleanerTools.shorten_object_type(obj.__class__.__name__)
                         add_to_queue = True
@@ -3112,9 +3116,13 @@ class PaloCleaner:
                             self._console.log(f"[ {location_name} ] Checking tag protection of object {obj.name} ({obj.__class__.__name__})", level=2)
                             if obj.tag:
                                 self._console.log(f"[ {location_name} ] Object has tags : {obj.tag}", level=2)
-                                if set(obj.tag).intersection(self._protect_tags) or obj.name in indirect_protect[shortened_obj_type]:
-                                    # object is protected by tags, protected all other used tags 
-                                    indirect_protect["Tag"].update(obj.tag)
+                                #if set(obj.tag).intersection(self._protect_tags) or obj.name in indirect_protect[shortened_obj_type]:
+                                if set(obj.tag).intersection(self._protect_tags) or obj.name in self._indirect_protect.get(location_name, dict()).get(shortened_obj_type, list()):
+                                    # object is protected by tags, protect all other used tags at their location
+                                    #indirect_protect["Tag"].update(obj.tag)
+                                    for current_tag in obj.tag:
+                                        tag_obj, tag_location = self.get_relative_object_location(current_tag, location_name, obj_type="Tag")
+                                        self.add_indirect_protect(tag_location, "Tag", current_tag)
 
                                     if "Group" in obj.__class__.__name__:
                                         if obj.static_value:
@@ -3122,7 +3130,8 @@ class PaloCleaner:
                                             linked_objects = self.flatten_object(obj, location_name, location_name, resolved_cache=resolved_cache)
                                             for (o, o_location) in linked_objects:
                                                 self._console.log(f"[ {o_location} ] Protecting object {o.name} ({o.__class__.__name__} / {shortened_obj_type})", level=2)
-                                                indirect_protect[shortened_obj_type].add(o.name)
+                                                #indirect_protect[shortened_obj_type].add(o.name)
+                                                self.add_indirect_protect(o_location, shortened_obj_type, o.name)
                                     add_to_queue = False
                         except AttributeError as e:
                             # matched only for Tag objects (which does not have "tag" attribute)
@@ -3130,7 +3139,7 @@ class PaloCleaner:
                         except Exception as e:
                             self._console.log(f"ERROR - UNKNOWN EXCEPTION : {e}", style="red")
 
-                        if add_to_queue:
+                        if add_to_queue and type(obj) is panos.objects.Tag:
                             jobs_queue.put(obj)
 
                 delete_local_objects_mthread(jobs_queue, local_dg)
