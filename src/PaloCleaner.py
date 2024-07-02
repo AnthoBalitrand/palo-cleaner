@@ -1502,7 +1502,7 @@ class PaloCleaner:
 
         return found_upward_objects
 
-    def find_best_replacement_addr_obj(self, obj_list: list, base_location: str):
+    def find_best_replacement_addr_obj(self, obj_list: list, base_location: str, base_obj_tuple: (panos.objects, str)):
         """
         Get a list of tuples (object, location) and returns the best to be used based on location and naming criterias
         TODO : WARNING, can have unpredictable results with nested intermediate device-groups
@@ -1529,13 +1529,13 @@ class PaloCleaner:
                         if ti_len >= last_tag_intersection_set_length and "SAGA" in o[0].tag:
                             last_tag_intersection_set_length = ti_len
                             choosen_object = o
-                except TypeError as e:
+                except TypeError:
                     # This exception is matched when checking if the tiebreak tag is on the list of tags of an
                     # object which has no tags
-                    # self._console.log(f"[ {base_location} ] TypeError : {e} checking tags on object {o} --> {o[0].tag}")
                     pass
-            if choosen_object:
-                self._console.log(f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen by tiebreak. Intersection set : {last_tag_intersection_set_length}", level=2)
+
+        if choosen_object:
+            self._console.log(f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen by tiebreak. Intersection set : {last_tag_intersection_set_length}", level=2)  
 
         # If the tiebreak tag was not used to find the "best" object
         # if some replacements objects are tag-referenced (used on DAG) and if we decided to favorise those ones, they'll be chosen first
@@ -1576,16 +1576,6 @@ class PaloCleaner:
                     self._console.log(
                         f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with FQDN naming",
                         level=2)
-                """
-                for o in sorted(shared_fqdn_obj, key=lambda x: x[0].about()['name']):
-                    # line below modified to fix issue signaled by Laetitia. Impact has to be evaluated
-                    # even if intermediate object has the same name than the shared replacement one, it needs to be the
-                    # one used (until deletion of the intermediate one to match the shared one)
-                    #if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_fqdn_obj] and not choosen_object:
-                    choosen_object = o
-                    self._console.log(f"[ {base_location} ] Object {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with FQDN naming", level=2)
-                    break
-                """
             # else return the first found shared object after sorting by name
             if shared_obj and not choosen_object:
                 if self._favorise_tagged_objects and len(shared_obj) > 1:
@@ -1632,6 +1622,12 @@ class PaloCleaner:
             self._console.log(f"[ {base_location} ] ERROR : Unable to choose an object in the following list for address {obj_list[0][0].value} : {obj_list}. Returning the first one by default", style="red")
             choosen_object = sorted(obj_list, key=lambda x: x[0].about()['name'])[0]
 
+        already_replaced_by = [v for k, v in self._replacements[base_location]["Address"].items() if v["source"] == choosen_object]
+        if already_replaced_by:
+            self._console.log(f"[ {base_location} ] ERROR !!!!!! Not using {choosen_object} as exact match replacement for {base_obj_tuple}, because already identified as replaced by {already_replaced_by[0]} . Using this one instead, end of exact match selection process <-------- ")
+            choosen_object = already_replaced_by[0]
+            choosen_by_tiebreak = False
+
         # If an object has not been chosen using the tiebreak tag, but the tiebreak tag adding has been requested,
         # then add the tiebreak tag to the chosen object so that it will remain the preferred one for next executions
         # avoid objects having description 'palocleaner_temp_addressobject' as those are temporary objects created
@@ -1665,6 +1661,21 @@ class PaloCleaner:
                 else:
                      self._console.log(
                             f"[ {base_location} ] Tiebreak tag {self._tiebreak_tag[0]} would be applied to {choosen_object[0].__class__.__name__} {choosen_object[0].about()['name']} for context {choosen_object[1]} ")
+
+        # Remove tiebreak tags to not choosen objects 
+        for obj_tuple in obj_list:
+            try:
+                if obj_tuple != choosen_object and self._tiebreak_tag[0] in obj_tuple[0].tag:
+                    self._console.log(f"[ {base_location} ] Tiebreak tag {self._tiebreak_tag[0]} need to be removed from {obj_tuple} (not the best object anymore to replace {base_obj_tuple}, using {choosen_object} instead)")
+                    obj_tuple[0].tag.remove(self._tiebreak_tag[0])
+                    if self._apply_cleaning:
+                        obj_tuple[0].apply()
+            except TypeError:
+                # matched if the current obj_tuple[0] object has no tags
+                pass
+            except Exception as e:
+                self._console.log(f"[ {base_location} ] ERROR when removing tag {self._tiebreak_tag[0]} from object {obj_tuple} : {e}")
+
 
         # Returns the chosen object among the provided list
         return choosen_object
@@ -1843,7 +1854,7 @@ class PaloCleaner:
                         choosen_object = o
             else:
                 self._console.log(f"[ {base_location} ] ERROR !!!!!! Not using {o} as exact match replacement for {base_obj_tuple}, because already identified as replaced by {already_replaced_by} . Using this one instead, end of exact match selection process <-------- ")
-                choosen_object = already_replaced_by
+                choosen_object = already_replaced_by[0]
                 last_exact_dg_level = self._dg_hierarchy[choosen_object["replacement"][1]].level
                 break
 
@@ -1927,7 +1938,7 @@ class PaloCleaner:
                     # If the object type is AddressObject, find the best replacement using the find_best_replacement_addr_obj function
                     if type(obj) is AddressObject:
                         replacement_obj, replacement_obj_location = self.find_best_replacement_addr_obj(upward_objects,
-                                                                                                        location_name)
+                                                                                                        location_name, (obj, location))
                         replacement_type = "exact_match"
                     # Else if the type is ServiceObject, find the best replacement using the find_best_replacement_service_obj function
                     elif type(obj) is ServiceObject:
@@ -2606,8 +2617,8 @@ class PaloCleaner:
                                     modified_rules.value += 1
                                 """
                                 for obj_type, fields in repl_map[type(r)].items():
-                                    for f in fields:
-                                        field_values = getattr(r, f[0])
+                                    for f in [x[0] if type(x) is list else x for x in fields]:
+                                        field_values = getattr(r, f)
                                         field_values = [field_values] if type(field_values) is str else field_values
                                         #if (field_values := getattr(r, f[0]) if type(f) is list else [getattr(r, f)]):
                                         if field_values:
