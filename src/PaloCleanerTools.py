@@ -1,7 +1,8 @@
 import panos.objects
 import ipaddress
+import dns.exception
 
-def hostify_address(address: str) -> str:
+def hostify_address(address: str, dns_resolver: str = None) -> str:
     """
     Used to remove /32 at the end of an IP address
 
@@ -12,9 +13,33 @@ def hostify_address(address: str) -> str:
     """
 
     # removing /32 mask for hosts
-    if address[-3:] == '/32':
-        return address[:-3:]
-    return address
+    try:
+        ip = ipaddress.ip_address(address.split('/')[0])
+        if address[-3:] == '/32':
+            return address[:-3:], None
+        return address, None
+    except ValueError:
+        test_range = address.split('-')
+        if len(test_range) == 2:
+            try:
+                _ = ipaddress.ip_address(test_range[0])
+                _ = ipaddress.ip_address(test_range[1])
+                return address, None
+            except Exception as e:
+                pass
+        if dns_resolver:
+            try:
+                answer = dns_resolver.resolve(address, 'A')
+                if len(answer) == 1:
+                    print(f"Resolved {address} to {answer[0].to_text()}")
+                    return address, answer[0].to_text()
+                else:
+                    print(f"{address} resolves with {len(answer)} records. Not taking resolution into account")
+                    return address, None
+            except Exception as e:
+                print(f"Unable to resolve {address}")
+                return address, None
+    return address, None
 
 
 def stringify_service(service: panos.objects.ServiceObject) -> str:
@@ -97,7 +122,7 @@ def init_group_comparison(self):
     self.max_ip = 0
     self.min_ip = None
 
-def add_range(self, range_in):
+def add_range(self, range_in, dns_res=None):
     r = range_in
     if type(range_in) is not ipaddress.IPv4Network:
         try:
@@ -113,8 +138,12 @@ def add_range(self, range_in):
             else:
                 r = ipaddress.ip_network(range_in, False)
         except ValueError:
-            print(f"{range_in!r} is not a valid IPv4 or IPv6 address. Not added to group members list")
-            return False
+            if dns_res:
+                r = dns_res
+                print(f"{range_in!r} added to group member list for {self} with DNS-resolved IP {dns_res}")
+            else:
+                print(f"{range_in!r} is not a valid IPv4 or IPv6 address. Not added to group members list for {self}")
+                return False
     self.members.append(r)
 
     self.ip_tuples.append((int(r.network_address), int(r.broadcast_address)))

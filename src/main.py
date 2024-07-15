@@ -184,6 +184,12 @@ def parse_cli_args():
         default = False
     )
 
+    parser.add_argument(
+        "--dns-resolver", 
+        action = "store",
+        help = "Enable DNS resolution of FQDN objects (mainly for group processing), using the provided DNS resolver IP",
+    )
+
     return parser.parse_args()
 
 

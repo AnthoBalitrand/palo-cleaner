@@ -26,6 +26,7 @@ from threading import Thread, Lock
 from queue import Queue
 from ctypes import c_int32
 import math
+import dns.resolver
 
 # TODO : when using bulk-actions, make sure that tag-protected objects are not deleted (can be added to device-group for deletion before this check !)
 # TODO : block bulk operations depending of Panorama / PAN-OS version !!!
@@ -105,6 +106,11 @@ class PaloCleaner:
         self._groups_percent_match = int(kwargs["groups_comparison_percent_match"])         # integer, minimum level of match (in percentage) between groups to compare 
         self._partial_group_match = kwargs['partial_group_match']                          # boolean, indicating if it is allowed to replace groups with a partial match in the target one (not all IP included)
         self._indirect_protect = dict()
+        self._dns_resolver = None
+        self._dns_resolutions = dict()
+        if kwargs['dns_resolver']:
+            self._dns_resolver = dns.resolver.Resolver()
+            self._dns_resolver.nameservers = [kwargs['dns_resolver']]
 
         if self._compare_groups:
             PaloCleanerTools.surcharge_addressgroups()
@@ -603,10 +609,17 @@ class PaloCleaner:
             for obj in self._objects[location_name]['Address']:
                 if type(obj) is panos.objects.AddressObject:
                     # call to hostify_address to remove /32 for host addresses (keeps mask for subnets)
-                    addr = PaloCleanerTools.hostify_address(obj.value)
+                    addr, dns_res = PaloCleanerTools.hostify_address(obj.value, self._dns_resolver)
 
                     # add the object to the _addr_ipsearch structure which permits to find all AddressObjects for a
-                    # given location having the same IP address
+                    # given location having the same IP address (or FQDN value)
+
+                    if dns_res:
+                        if dns_res not in self._addr_ipsearch[location_name].keys():
+                            self._addr_ipsearch[location_name][dns_res] = list()
+                        self._addr_ipsearch[location_name][dns_res].append(obj)
+                        self._dns_resolutions[dns_res] = addr
+
                     if addr not in self._addr_ipsearch[location_name].keys():
                         self._addr_ipsearch[location_name][addr] = list()
                     self._addr_ipsearch[location_name][addr].append(obj)
@@ -1209,28 +1222,23 @@ class PaloCleaner:
                             if not flattened:
                                 # can be in case of an IP address / subnet directly used on a rule
                                 if obj_type == "Address":
-                                    if ip_regex.match(obj) or range_regex.match(obj):
-                                        # create a (temporary) new AddressObject (whose name is the same as the value)
-                                        # and add it to the location_obj_set
-                                        addr_value = PaloCleanerTools.hostify_address(obj)
-                                        # adding the new created object to the _addr_ipsearch datastructure for the
-                                        # current location level, else the replacement process will potentially find
-                                        # only 1 replacement object (if there's one), while the current one should be
-                                        # found also (replacement will be processed only if at least 2 objects are found)
-                                        if addr_value not in self._addr_ipsearch[location_name].keys():
-                                            self._addr_ipsearch[location_name][addr_value] = list()
-                                        if not addr_value in created_addr_object:
-                                            new_addr_obj = AddressObject(name=obj, value=addr_value)
+                                    addr_value, dns_res = PaloCleanerTools.hostify_address(obj)
+                                    if ip_regex.match(addr_value) or range_regex.match(addr_value) or dns_res:
+                                        ref_val = dns_res if dns_res else addr_value
+                                        if ref_val not in self._addr_ipsearch[location_name].keys():
+                                            self._addr_ipsearch[location_name][ref_val] = list()
+                                        if not ref_val in created_addr_object:
+                                            new_addr_obj = AddressObject(name=obj, value=ref_val)
                                             # the description "palocleaner_temp_addressobject" is important as it permits
                                             # later to distiguish this AddressObjects so that it is the least prefered
                                             # one for the replacement process
                                             new_addr_obj.description = "palocleaner_temp_addressobject"
-                                            self._addr_ipsearch[location_name][addr_value].append(new_addr_obj)
+                                            self._addr_ipsearch[location_name][ref_val].append(new_addr_obj)
                                             location_obj_set += [(new_addr_obj, location_name)]
                                             self._console.log(
-                                                f"[ {location_name} ] * Created AddressObject for address {obj} used on rule {r.name!r}",
+                                                f"[ {location_name} ] * Created AddressObject for address {obj} (with val {ref_val}) used on rule {r.name!r}",
                                                 style="yellow")
-                                            created_addr_object.append(addr_value)
+                                            created_addr_object.append(ref_val)
                                         else:
                                             self._console.log(
                                                 f"[ {location_name} ] * Using previously created AddressObject for address {obj} used on rule {r.name!r}",
@@ -1287,7 +1295,7 @@ class PaloCleaner:
 
             for obj, loc in flat_addr_group:
                 if type(obj) is panos.objects.AddressObject:
-                    if addr_group.add_range(PaloCleanerTools.hostify_address(obj.value)):
+                    if addr_group.add_range(*PaloCleanerTools.hostify_address(obj.value)):
                         # if the obj.value cannot be added to the group members, not adding the group membership to the object itself
                         # it can be because of the value not being an IPv4 / IPv6 address, but an FQDN (not yet supported)
                         obj.init_object_group_membership()
@@ -1312,7 +1320,7 @@ class PaloCleaner:
         """
 
         # Get the "host" value of the object value (removes the /32 at the end)
-        obj_addr = PaloCleanerTools.hostify_address(obj.value)
+        obj_addr, dns_res = PaloCleanerTools.hostify_address(obj.value)
 
         # Initializes the list of found duplicates objects
         found_upward_objects = list()
@@ -1327,6 +1335,9 @@ class PaloCleaner:
             for obj in self._addr_ipsearch[current_location_search].get(obj_addr, list()):
                 # add each of them to the result list as a tuple (AddressObject, current location name)
                 found_upward_objects.append((obj, current_location_search))
+            if dns_res:
+                for obj in self._addr_ipsearch[current_location_search].get(dns_res, list()):
+                    found_upward_objects.append((obj, current_location_search))
             # Find the next search location (upward device group)
             upward_dg = self._dg_hierarchy[current_location_search].parent
             current_location_search = "shared" if not upward_dg else upward_dg.name
@@ -1867,7 +1878,8 @@ class PaloCleaner:
             if not o["replacement"][0].name in self._replacements[base_location]["Address"]:
                 o_hierarchy_level = self._dg_hierarchy[o['replacement'][1]].level
 
-                if o_hierarchy_level == 0 and "alias" in o['replacement'][0].name and type(o['replacement'][0].static_value) is list and len(o['replacement'][0].static_value) == 1 and base_obj_tuple[0].name in o['replacement'][0].static_value:
+                #if o_hierarchy_level == 0 and "alias" in o['replacement'][0].name and type(o['replacement'][0].static_value) is list and len(o['replacement'][0].static_value) == 1 and base_obj_tuple[0].name in o['replacement'][0].static_value:
+                if o_hierarchy_level == 0 and "alias" in o['replacement'][0].name and type(o['replacement'][0].static_value) is list and len(o['replacement'][0].static_value) == 1:
                     choosen_object = o
                     choosen_by_alias = True
                     o["replacement_type"] = "alias"
@@ -2872,7 +2884,7 @@ class PaloCleaner:
             for used_obj_tuple in self._used_objects_sets[location_name]:
                 if type(used_obj_tuple[0]) is panos.objects.AddressObject and hasattr(used_obj_tuple[0], "group_member_only") and used_obj_tuple[0].group_member_only == True:
                     # TODO : what happens if there are "blocked groups", but a given object is part of still used groups ? (else statement below)
-                    print(f"{used_obj_tuple} group membership is : {used_obj_tuple[0].group_membership}")
+                    #print(f"{used_obj_tuple} group membership is : {used_obj_tuple[0].group_membership}")
                     if blocked_groups:
                         if not (used_obj_intersect := used_obj_tuple[0].group_membership.get(location_name, set()).intersection(blocked_groups)):
                             to_remove_from_obj_set.append(used_obj_tuple)
