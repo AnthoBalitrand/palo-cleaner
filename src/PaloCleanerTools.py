@@ -219,11 +219,13 @@ def calc_group_size(self):
         #print(f"Diff between {ipaddress.ip_address(g[0])} and {ipaddress.ip_address(g[1])} is {g[1] - g[0]}")
     return size
 
-def compare_groups(g1, g2):
+def compare_groups(g1, g2, detail=False):
     i, j = 0, 0 
     intersect_nb = 0
     left_diff = 0
     right_diff = 0
+    left_diff_detail = list()
+    right_diff_detail = list()
     last_comparison_step = min(g1.min_ip, g2.min_ip)
 
     while last_comparison_step <= max(g1.max_ip, g2.max_ip):
@@ -247,6 +249,8 @@ def compare_groups(g1, g2):
             else:
                 left_diff_stop = g1.ip_tuples[i][1]
             left_diff += left_diff_stop - last_comparison_step + 1
+            if detail:
+                left_diff_detail.append((last_comparison_step + 1, left_diff_stop))
             last_comparison_step = left_diff_stop + 1
 
             if last_comparison_step > g1.ip_tuples[i][1]:
@@ -258,6 +262,8 @@ def compare_groups(g1, g2):
             else:
                 right_diff_stop = g2.ip_tuples[j][1]
             right_diff += right_diff_stop - last_comparison_step + 1
+            if detail:
+                right_diff_detail.append((last_comparison_step + 1, right_diff_stop))
             last_comparison_step = right_diff_stop + 1
 
             if last_comparison_step > g2.ip_tuples[j][1]:
@@ -273,4 +279,6 @@ def compare_groups(g1, g2):
     # calculate the percent of match between G1 and G2 with the calculated values of intersect 
     percent_match = round(abs(intersect_nb) / (g1.ip_count + g2.ip_count - intersect_nb) * 100, 2) 
 
+    if detail:
+        return abs(intersect_nb), abs(left_diff), abs(right_diff), percent_match, left_diff_detail, right_diff_detail
     return abs(intersect_nb), abs(left_diff), abs(right_diff), percent_match
