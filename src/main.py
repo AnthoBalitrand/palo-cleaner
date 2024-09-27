@@ -96,7 +96,7 @@ def parse_cli_args():
     parser.add_argument(
         "--favorise-tagged-objects",
         action = "store_true",
-        help = "Favorise objects referenced on DAG or having DAGs when eliminating duplicates (works only for shared objects)",
+        help = "Favorise objects referenced on DAG or having tags when eliminating duplicates (works only for shared objects)",
         default = False,
     )
 
@@ -159,8 +159,35 @@ def parse_cli_args():
     parser.add_argument(
         "--same-name-only",
         action = "store_true",
-        help = "Only replaces objects by ones existing at upward levels, and having same values",
+        help = "Only replaces objects by ones existing at upward levels, and having same values (does not updates rules)",
         default = False
+    )
+
+    parser.add_argument(
+        "--compare-groups", 
+        action = "store_true", 
+        help = "Compare groups to replace with higher duplicates in the hierarchy. To be used with groups-comparison-percent-match", 
+        default = False
+    )
+
+    parser.add_argument(
+        "--groups-comparison-percent-match", 
+        action = "store", 
+        help = "Match percentage between groups to be compared. Replacement groups needs to contain at least this percentage of matching IPs to be used", 
+        default = 100
+    )
+
+    parser.add_argument(
+        "--partial-group-match", 
+        action = "store_true",
+        help = "Allow for partial match on the replacement group", 
+        default = False
+    )
+
+    parser.add_argument(
+        "--dns-resolver", 
+        action = "store",
+        help = "Enable DNS resolution of FQDN objects (mainly for group processing), using the provided DNS resolver IP",
     )
 
     return parser.parse_args()
