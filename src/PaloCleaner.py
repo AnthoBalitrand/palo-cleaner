@@ -1425,7 +1425,7 @@ class PaloCleaner:
                     intersection, left_diff, right_diff, percent_match = PaloCleanerTools.compare_groups(ref_obj_group, candidate_group)
                     self._console.log(f"[ {base_location_name} ] AddressGroup {ref_obj_group.name} comparison with {candidate_group} at {current_location_search} : Intersection is {intersection}, L/R diff is {left_diff}/{right_diff}, percent match is {percent_match} %", level=3)
                     if percent_match >= self._groups_percent_match:
-                        self._console.log(f"[ {base_location_name} ] AddressGroup {ref_obj_group.name} matches at {percent_match} % with {candidate_group} at {current_location_search}. Adding to potential replacements list for further selection")
+                        self._console.log(f"[ {base_location_name} ] AddressGroup {ref_obj_group.name} matches at {percent_match} % with {candidate_group} at {current_location_search}. Adding this latter to potential replacements list for further selection")
                         found_upward_objects.append(
                             {
                                 "replacement": (candidate_group, current_location_search), 
@@ -1836,6 +1836,7 @@ class PaloCleaner:
         last_tag_intersection_set_length = 0
         choosen_by_tag = False
         for o in exact_match_replacement:
+            # TODO : check for reverse replacement already existing ???? 
             already_replaced_by = [v for k, v in self._replacements[base_location]["Address"].items() if v["source"] == o]
             if not already_replaced_by:
                 if self._tiebreak_tag_set and o["replacement"][0].tag is not None:
@@ -1996,7 +1997,7 @@ class PaloCleaner:
                                 'blocked': False, 
                                 'globally_blocked': None
                             }
-                        elif type(obj) is AddressGroup:
+                        elif type(obj) is AddressGroup and self._compare_groups:
                             self._replacements[location_name]['Address'][obj.about()['name']] = {
                                 'source': (obj, location), 
                                 'replacement': (replacement_obj, replacement_obj_location),
@@ -2005,6 +2006,14 @@ class PaloCleaner:
                                 'replacement_type': replacement_type,
                                 'replacement_match': replacement_match_percent, 
                                 'left_right_diff': (replacement_left_diff, replacement_right_diff)
+                            }
+                        elif type(obj) is AddressGroup:
+                            self._replacements[location_name]['Address'][obj.about()['name']] = {
+                                'source': (obj, location), 
+                                'replacement': (replacement_obj, replacement_obj_location),
+                                'blocked': False,
+                                'globally_blocked': None,
+                                'replacement_type': replacement_type
                             }
                         elif type(obj) in [ServiceObject, ServiceGroup]:
                             self._replacements[location_name]['Service'][obj.about()['name']] = {
@@ -2465,7 +2474,7 @@ class PaloCleaner:
                                     # blocking cases where duplicates objects are used on a field of the rule and would
                                     # be replaced by the same target object
                                     if repl_name not in field_values + items_to_add:
-                                        if type(replacement_obj_instance) is AddressGroup:
+                                        if type(replacement_obj_instance) is AddressGroup and self._compare_groups:
                                             repl_string = f"{repl_name} ({replacement_obj_location}) (M:{replacement['replacement_match']}% L/R:{replacement['left_right_diff']})"
                                         else:
                                             repl_string = f"{repl_name} ({replacement_obj_location})"
@@ -2928,7 +2937,7 @@ class PaloCleaner:
 
                     #if obj.name in indirect_protect[shortened_obj_type]:
                     if obj.name in self._indirect_protect.get(location_name, dict()).get(shortened_obj_type, list()):
-                        self._console.log(f"[ {location_name} ] {obj.name} has been found on _indirect_protect list")
+                        self._console.log(f"[ {location_name} ] {obj.name} ({type(obj)}) has been found on _indirect_protect list")
                         continue
 
                     if self._apply_cleaning and not (obj, location_name) in self._used_objects_sets[location_name]:
@@ -3066,7 +3075,7 @@ class PaloCleaner:
 
                             #if o.name in indirect_protect[obj_type]:
                             if o.name in self._indirect_protect[location_name][obj_type]:
-                                self._console.log(f"[ {o_location} ] {o.name} has been found on _indirect_protect list")
+                                self._console.log(f"[ {o_location} ] {o.name} ({type(obj)}) has been found on _indirect_protect list")
                                 continue
 
                             if not (o, location_name) in self._used_objects_sets[location_name]:
