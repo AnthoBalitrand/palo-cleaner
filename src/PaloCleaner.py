@@ -1012,6 +1012,8 @@ class PaloCleaner:
                         # copying the result at the group object location as it needs to be protected there !!
                         # (group might not be used at its location but only below, and it could have unexpected results !!)
                         # TODO : find a solution to make sure that the same replacement object will be choosen there !!!
+                        if not object_location in self._used_objects_sets:
+                            self._used_objects_sets[object_location] = set()
                         self._used_objects_sets[object_location].update(set(group_protection_flattened))
 
 
@@ -1381,6 +1383,7 @@ class PaloCleaner:
             # Iterate over the list of all Address objects at the current search location
             for obj in self._objects[current_location_search]['Address']:
                 # If the current object has the AddressGroup type
+                #if type(obj) is panos.objects.AddressGroup and obj != ref_obj_group:
                 if type(obj) is panos.objects.AddressGroup:
                     # If this is a static group
                     if ref_obj_group.static_value and obj.static_value:
@@ -1848,7 +1851,7 @@ class PaloCleaner:
                             last_tag_intersection_set_length = ti_len
                             last_exact_dg_level = ll
                             choosen_object = o
-                        elif (ti_len) > last_tag_intersection_set_length and ll == last_exact_dg_level:
+                        elif ti_len > last_tag_intersection_set_length and ll == last_exact_dg_level:
                             self._console.log(f"[ {base_location} ] {base_obj_tuple} best replacement updated by exact match of {o} : tag intersection num was {last_tag_intersection_set_length}, is now {ti_len} at DG level {last_exact_dg_level}")
                             last_tag_intersection_set_length = ti_len
                             choosen_object = o
@@ -1880,7 +1883,8 @@ class PaloCleaner:
                 o_hierarchy_level = self._dg_hierarchy[o['replacement'][1]].level
 
                 #if o_hierarchy_level == 0 and "alias" in o['replacement'][0].name and type(o['replacement'][0].static_value) is list and len(o['replacement'][0].static_value) == 1 and base_obj_tuple[0].name in o['replacement'][0].static_value:
-                if o_hierarchy_level == 0 and "alias" in o['replacement'][0].name and type(o['replacement'][0].static_value) is list and len(o['replacement'][0].static_value) == 1:
+                #if o_hierarchy_level == 0 and "alias" in o['replacement'][0].name and type(o['replacement'][0].static_value) is list and len(o['replacement'][0].static_value) == 1:
+                if o_hierarchy_level == 0 and "alias" in o['replacement'][0].name and type(o['replacement'][0].static_value) is list:
                     choosen_object = o
                     choosen_by_alias = True
                     o["replacement_type"] = "alias"
@@ -1891,13 +1895,13 @@ class PaloCleaner:
 
                 last_match_percent = o['match_percent']
                 if o_hierarchy_level < last_diff_dg_level and o_hierarchy_level < last_exact_dg_level:
+                    self._console.log(f"[ {base_location} ] {base_obj_tuple} best replacement updated by {last_match_percent}% matching group {o}, because of higher DG level (previous was {last_exact_dg_level}, current is {o_hierarchy_level})")
                     choosen_object = o
                     last_diff_dg_level = o_hierarchy_level
                     choosen_by_diff = True
             else:
                 replaced_by = self._replacements[base_location]["Address"][o["replacement"][0].name]["replacement"]
-                self._console.log(f"[ {base_location} ] ERROR !!!!!! Not using {o} as replacement for {base_obj_tuple}, because already identified as replaced by {replaced_by} <-------- 2222")
-
+                self._console.log(f"[ {base_location} ] ERROR !!!!!! Not using {o} as replacement for {base_obj_tuple}, because already identified as replaced by {replaced_by}")
 
         if choosen_by_alias and choosen_by_diff:
             self._console.log(f"[ {base_location} ] AddressGroup {choosen_object['replacement'][0].about()['name']} (context {choosen_object['replacement'][1]}) choosen by alias and matching percentage : {last_match_percent} % and DG level : {last_diff_dg_level}")
@@ -2220,7 +2224,8 @@ class PaloCleaner:
                                     except Exception as e:
                                         self._console.log(f"[ {location_name} ] [Thread-{thread_id}] ERROR when updating group {checked_object.about()['name']} ({checked_object.__class__.__name__}) for replacing {source_obj_instance.about()['name']!r} by {replacement_obj_instance.about()['name']!r} : {e}")
                     self._console.log(
-                        f"[ {location_name} ] [Thread-{thread_id}] Finished replacement of {source_obj_instance.about()['name']!r} ({source_obj_location}) by {replacement_obj_instance.about()['name']!r} ({replacement_obj_location}). {jobs_queue.qsize()} replacements remaining on queue"
+                        f"[ {location_name} ] [Thread-{thread_id}] Finished replacement of {source_obj_instance.about()['name']!r} ({source_obj_location}) by {replacement_obj_instance.about()['name']!r} ({replacement_obj_location}). {jobs_queue.qsize()} replacements remaining on queue", 
+                        level=2
                     )
 
                 except Exception as e:
@@ -2306,7 +2311,8 @@ class PaloCleaner:
                                         self._console.log(
                                             f"[ {location_name} ] [Thread-{thread_id}] Update of group {checked_object.about()['name']} ({checked_object.__class__.__name__}) : object already in bulk operation pool for context {location_name}")
                     self._console.log(
-                        f"[ {location_name} ] [Thread-{thread_id}] Finished replacement of {source_obj_instance.about()['name']!r} ({source_obj_location}) by {replacement_obj_instance.about()['name']!r} ({replacement_obj_location}). {jobs_queue.qsize()} replacements remaining on queue"
+                        f"[ {location_name} ] [Thread-{thread_id}] Finished replacement of {source_obj_instance.about()['name']!r} ({source_obj_location}) by {replacement_obj_instance.about()['name']!r} ({replacement_obj_location}). {jobs_queue.qsize()} replacements remaining on queue", 
+                        level=2
                     )
                 except Exception as e:
                     self._console.log(
@@ -2833,7 +2839,7 @@ class PaloCleaner:
                             # This is matched if compare-groups is not enabled, if the current object is not an AddressObject, or if this is an AddressObject which is not member of any group
                             if not infos['blocked'] and not infos.get('replacement_type', '') == 'alias':
                                 self._used_objects_sets[location_name].remove(infos['source'])
-                                self._console.log(f"[ {location_name} ] Object {infos['source']} removed from used objects")
+                                self._console.log(f"[ {location_name} ] Object {infos['source']} removed from used objects", level=2)
                             else:
                                 self._console.log(f"[ {location_name} ] Object {infos['source']} is kept on used objects set. See infos below")
                         elif self._compare_groups and not (blocked_membership := infos['source'][0].group_membership.get('location_name', set()).intersection(blocked_groups)):
@@ -2846,7 +2852,7 @@ class PaloCleaner:
                             self._console.log(f"[ {location_name} ] Object {infos['source']} cannot be deleted because of membership of groups {blocked_membership} which are protected", level=2)
                         else:
                             if not infos['blocked']:
-                                self._console.log(f"[ {location_name} ] Object {infos['source']} removed from used objects : not used in any group nor rule 2222", level=2)
+                                self._console.log(f"[ {location_name} ] Object {infos['source']} removed from used objects : not used in any group nor rule", level=2)
                             else:
                                 self._console.log(f"[ {location_name} ] Not removing {name} (location {infos['source'][1]}) from used objects set, as protected by hitcount", level=2)
 
