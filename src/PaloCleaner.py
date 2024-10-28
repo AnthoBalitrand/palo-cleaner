@@ -27,6 +27,7 @@ from queue import Queue
 from ctypes import c_int32
 import math
 import dns.resolver
+import copy
 
 # TODO : when using bulk-actions, make sure that tag-protected objects are not deleted (can be added to device-group for deletion before this check !)
 # TODO : block bulk operations depending of Panorama / PAN-OS version !!!
@@ -405,13 +406,13 @@ class PaloCleaner:
                             # if we have not specified an unused-only cleaning operation, we need to replace the non-optimal objects by their processed replacements (in groups, rules, etc)
                             if self._unused_only is None:
                                 # OBJECTS REPLACEMENT IN GROUPS
-                                dg_replaceingroups_task = progress.add_task(
-                                    f"[ {context_name} ] Replacing objects in groups",
-                                    total=len(self._replacements[context_name]['Address']) + len(self._replacements[context_name]['Service'])
-                                )
-                                self.replace_object_in_groups(context_name, progress, dg_replaceingroups_task)
-                                self._console.log(f"[ {context_name} ] Objects replaced in groups")
-                                progress.remove_task(dg_replaceingroups_task)
+                                #dg_replaceingroups_task = progress.add_task(
+                                #    f"[ {context_name} ] Replacing objects in groups",
+                                #    total=len(self._replacements[context_name]['Address']) + len(self._replacements[context_name]['Service'])
+                                #)
+                                #self.replace_object_in_groups(context_name, progress, dg_replaceingroups_task)
+                                #self._console.log(f"[ {context_name} ] Objects replaced in groups")
+                                #progress.remove_task(dg_replaceingroups_task)
 
                                 # OBJECTS REPLACEMENT IN RULEBASES
                                 dg_replaceinrules_task = progress.add_task(
@@ -424,9 +425,9 @@ class PaloCleaner:
                                 progress.remove_task(dg_replaceinrules_task)
 
                             # OBJECTS CLEANING (FOR FULLY INCLUDED DEVICE GROUPS ONLY)
-                            if context_name in self._analysis_perimeter['full']:
-                                self.clean_local_object_set(context_name)
-                                self._console.log(f"[ {context_name} ] Objects cleaned (fully included)")
+                            #if context_name in self._analysis_perimeter['full']:
+                            #    self.clean_local_object_set(context_name)
+                            #    self._console.log(f"[ {context_name} ] Objects cleaned (fully included)")
 
                             if context_name not in ['shared', 'predefined']:
                                 self._panorama.remove(self._objects[context_name]['context'])
@@ -1540,7 +1541,7 @@ class PaloCleaner:
                 try:
                     if (tag_intersect := self._tiebreak_tag_set.intersection(o[0].tag)):
                         ti_len = len(tag_intersect)
-                        if ti_len >= last_tag_intersection_set_length and "SAGA" in o[0].tag:
+                        if ti_len >= last_tag_intersection_set_length or "SAGA" in o[0].tag:
                             last_tag_intersection_set_length = ti_len
                             choosen_object = o
                 except TypeError:
@@ -1829,7 +1830,7 @@ class PaloCleaner:
         :param base_location: (str) The name of the location from where we need to find the best replacement object
         :return:
         """
-
+        self._console.log(f"[ {base_location} ] Looking for best replacement of {base_obj_tuple}")
         choosen_object = None
         choosen_by_tiebreak = False
         # TODO : when replacing exact_match with group_diff, need to replace all the static_matches
@@ -1838,9 +1839,11 @@ class PaloCleaner:
         last_exact_dg_level = 999
         last_tag_intersection_set_length = 0
         choosen_by_tag = False
+        last_identical_name_len = 999
         for o in exact_match_replacement:
             # TODO : check for reverse replacement already existing ???? 
-            already_replaced_by = [v for k, v in self._replacements[base_location]["Address"].items() if v["source"] == o]
+            #already_replaced_by = [v for k, v in self._replacements[base_location]["Address"].items() if v["source"] == o]
+            already_replaced_by = [v for k, v in self._replacements[base_location]["Address"].items() if v["source"] == o["replacement"]]
             if not already_replaced_by:
                 if self._tiebreak_tag_set and o["replacement"][0].tag is not None:
                     # the following section chooses the highest DG object, with the highest tag intersection length at this level
@@ -1850,55 +1853,81 @@ class PaloCleaner:
                             self._console.log(f"[ {base_location} ] {base_obj_tuple} best replacement updated by exact match of {o} : tag intersection {ti_len} previous DG level was {last_exact_dg_level}, is now {ll}")
                             last_tag_intersection_set_length = ti_len
                             last_exact_dg_level = ll
-                            choosen_object = o
+                            choosen_object = copy.copy(o)
+                            last_identical_name_len = len(choosen_object["replacement"][0].name)
+                            #print(f"Updating last_identical_name_len by {last_identical_name_len} (1)")
                         elif ti_len > last_tag_intersection_set_length and ll == last_exact_dg_level:
                             self._console.log(f"[ {base_location} ] {base_obj_tuple} best replacement updated by exact match of {o} : tag intersection num was {last_tag_intersection_set_length}, is now {ti_len} at DG level {last_exact_dg_level}")
                             last_tag_intersection_set_length = ti_len
-                            choosen_object = o
+                            choosen_object = copy.copy(o)
+                            last_identical_name_len = len(choosen_object["replacement"][0].name)
+                            #print(f"Updating last_identical_name_len by {last_identical_name_len} (2)")
+                        elif ll == last_exact_dg_level and ti_len == last_tag_intersection_set_length:
+                            if len(o["replacement"][0].name) < last_identical_name_len:
+                                choosen_object = copy.copy(o)
+                                last_identical_name_len = len(choosen_object["replacement"][0].name)
+                                #print(f"Updating last_identical_name_len by {last_identical_name_len} (3)")
+                                self._console.log(f"[ {base_location} ] {base_obj_tuple} best replacement updated by exact match of {o} having shorter name than other identical object")
                         choosen_by_tag = True
                     elif (ll := self._dg_hierarchy[o["replacement"][1]].level) < last_exact_dg_level:
                         self._console.log(f"[ {base_location} ] {base_obj_tuple} best replacement updated by exact match of {o} : no tag intersection, previous DG level was {last_exact_dg_level}, is now {ll}")
                         last_exact_dg_level = ll
-                        choosen_object = o
+                        choosen_object = copy.copy(o)
+                        last_identical_name_len = len(choosen_object["replacement"][0].name)
+                        #print(f"Updating last_identical_name_len by {last_identical_name_len}")
                 elif not choosen_object:
                     # the following section chooses the highest DG object, regardless of the tag intersection length, if no object has been choosen
                     # it means that a tag-intersection matched object at lower level will win 
                     if (ll := self._dg_hierarchy[o["replacement"][1]].level) < last_exact_dg_level:
                         self._console.log(f"[ {base_location} ] {base_obj_tuple} best replacement updated by exact match of {o} : ")
                         last_exact_dg_level = ll
-                        choosen_object = o
+                        choosen_object = copy.copy(o)
+                        last_identical_name_len = len(choosen_object["replacement"][0].name)
+                        #print(f"Updating last_identical_name_len by {last_identical_name_len}")
             else:
-                self._console.log(f"[ {base_location} ] ERROR !!!!!! Not using {o} as exact match replacement for {base_obj_tuple}, because already identified as replaced by {already_replaced_by} . Using this one instead, end of exact match selection process <-------- ")
-                choosen_object = already_replaced_by[0]
-                last_exact_dg_level = self._dg_hierarchy[choosen_object["replacement"][1]].level
-                break
+                self._console.log(f"[ {base_location} ] ERROR !!!!!! Not using {o} as exact match replacement for {base_obj_tuple}, because already identified as replaced by {already_replaced_by[0]['replacement']} . Using this one instead, end of exact match selection process <-------- ")
+                #choosen_object = already_replaced_by[0]
+                #choosen_object["replacement_type"] = "already_replaced"
+                #last_exact_dg_level = self._dg_hierarchy[choosen_object["replacement"][1]].level
+                #break
+                return already_replaced_by[0] if already_replaced_by[0]["replacement"] != base_obj_tuple else None
 
+        choosen_by_exact_alias = True if last_exact_dg_level == 0 and choosen_object and "alias" in choosen_object["replacement"][0].name else False
+        print(f"choosen_by_exact_alias is {choosen_by_exact_alias}")
         group_diff_replacement = [x for x in obj_list if x["replacement_type"] == "group_diff"]
         last_match_percent = 0
         last_diff_dg_level = 999
         choosen_by_diff = False
         choosen_by_alias = False
+        last_alias_name_len = 999
         for o in sorted(group_diff_replacement, key=lambda x: x["match_percent"], reverse=True):
+            print(f"Checking if {o} is ok")
             if not o["replacement"][0].name in self._replacements[base_location]["Address"]:
                 o_hierarchy_level = self._dg_hierarchy[o['replacement'][1]].level
 
                 #if o_hierarchy_level == 0 and "alias" in o['replacement'][0].name and type(o['replacement'][0].static_value) is list and len(o['replacement'][0].static_value) == 1 and base_obj_tuple[0].name in o['replacement'][0].static_value:
-                #if o_hierarchy_level == 0 and "alias" in o['replacement'][0].name and type(o['replacement'][0].static_value) is list and len(o['replacement'][0].static_value) == 1:
-                if o_hierarchy_level == 0 and "alias" in o['replacement'][0].name and type(o['replacement'][0].static_value) is list:
-                    choosen_object = o
-                    choosen_by_alias = True
-                    o["replacement_type"] = "alias"
-                    break
+                #if o_hierarchy_level == 0 and "alias" in o['replacement'][0].name and type(o['replacement'][0].static_value) is list and len(o['replacement'][0].static_value) == 1 and not choosen_by_exact_alias:
+                #if o_hierarchy_level == 0 and "alias" in o['replacement'][0].name and type(o['replacement'][0].static_value) is list:
+                if o_hierarchy_level == 0 and "alias" in o['replacement'][0].name and type(o['replacement'][0].static_value) is list and not choosen_by_exact_alias:
+                    if len(o['replacement'][0].name) < last_alias_name_len:
+                        choosen_object = copy.copy(o)
+                        choosen_by_alias = True
+                        o["replacement_type"] = "alias"
+                        last_alias_name_len = len(o['replacement'][0].name)
+                        print(f"Updating last_alias_name_len by {last_alias_name_len} (1)")
 
-                if o['match_percent'] < last_match_percent:
-                    continue
+                if not o["replacement_type"] == "alias":
+                    if o['match_percent'] < last_match_percent:
+                        continue
 
-                last_match_percent = o['match_percent']
-                if o_hierarchy_level < last_diff_dg_level and o_hierarchy_level < last_exact_dg_level:
-                    self._console.log(f"[ {base_location} ] {base_obj_tuple} best replacement updated by {last_match_percent}% matching group {o}, because of higher DG level (previous was {last_exact_dg_level}, current is {o_hierarchy_level})")
-                    choosen_object = o
-                    last_diff_dg_level = o_hierarchy_level
-                    choosen_by_diff = True
+                    last_match_percent = o['match_percent']
+                    if o_hierarchy_level < last_diff_dg_level and o_hierarchy_level < last_exact_dg_level:
+                        self._console.log(f"[ {base_location} ] {base_obj_tuple} best replacement updated by {last_match_percent}% matching group {o}, because of higher DG level (previous was {last_exact_dg_level}, current is {o_hierarchy_level})")
+                        choosen_object = copy.copy(o)
+                        last_diff_dg_level = o_hierarchy_level
+                        choosen_by_diff = True
+                        last_alias_name_len = len(o['replacement'][0].name)
+                        print(f"Updating last_alias_name_len by {last_alias_name_len} (2)")
             else:
                 replaced_by = self._replacements[base_location]["Address"][o["replacement"][0].name]["replacement"]
                 self._console.log(f"[ {base_location} ] ERROR !!!!!! Not using {o} as replacement for {base_obj_tuple}, because already identified as replaced by {replaced_by}")
@@ -1943,6 +1972,7 @@ class PaloCleaner:
             #self._console.log(f"[ {location_name} ] Child for DeviceGroup {self._objects[location_name]['context']} when optimizing {obj_type} is {self._objects[location_name]['context'].children}")
 
             # for each object of the current type found at the current location
+            #for (obj, location) in [(o, l) for (o, l) in self._used_objects_sets[location_name] if type(o) is obj_type]:
             for (obj, location) in [(o, l) for (o, l) in self._used_objects_sets[location_name] if type(o) is obj_type]:
                 # call the function able to find the best replacement object, for the current object type
                 # (the proper function is get from the find_maps dict defined above)
@@ -1965,18 +1995,29 @@ class PaloCleaner:
                     # Else if the type is AddressGroup and the group-comparison mode is enabled, find the best replacement using the find_best_replacement_addr_group_obj function
                     elif type(obj) is AddressGroup and self._compare_groups:
                         repl_info = self.find_best_replacement_addr_group_obj(upward_objects, location_name, (obj, location))
-                        replacement_obj, replacement_obj_location = repl_info['replacement']
-                        replacement_type = repl_info['replacement_type']
-                        replacement_match_percent = repl_info['match_percent']
-                        replacement_left_diff = repl_info['left_diff']
-                        replacement_right_diff = repl_info['right_diff']
+                        if repl_info:
+                            if repl_info.get('blocked') is not None:
+                                # it means we are getting a previous replacement information (from self._replacements)
+                                replacement_obj, replacement_obj_location = repl_info['replacement']
+                                replacement_type = repl_info['replacement_type']
+                                replacement_match_percent = repl_info['replacement_match']
+                                replacement_left_diff, replacement_right_diff = repl_info.get('left_right_diff', ("NA", "NA"))
+                            else:
+                                replacement_obj, replacement_obj_location = repl_info['replacement']
+                                replacement_type = repl_info['replacement_type']
+                                replacement_match_percent = repl_info['match_percent']
+                                replacement_left_diff = repl_info['left_diff']
+                                replacement_right_diff = repl_info['right_diff']
+                        else:
+                            replacement_obj = obj
                     else:
                         # if raised here, first object is choosen (can be the case for AddressGroups when not enabling the compare-groups mode)
                         replacement_obj, replacement_obj_location = upward_objects[0]['replacement']
                         replacement_type = "exact_match"
 
                     # if the chosen replacement object is different than the actual object
-                    if replacement_obj != obj:
+                    #if replacement_obj != obj:
+                    if replacement_obj != obj and "saga" in replacement_obj.name:
                         if replacement_type == "exact_match":
                             self._console.log(
                                 f"[ {location_name} ] Replacing {obj.about()['name']!r} ({obj.__class__.__name__}) at location {location} by {replacement_obj.about()['name']!r} at location {replacement_obj_location}",
@@ -2461,6 +2502,7 @@ class PaloCleaner:
                         # modified to use directly the obtained field format instead of relying on the repl_map descriptor information
                         #field_values = not_null_field if field_type is list else [not_null_field]
                         field_values = not_null_field if type(not_null_field) is list else [not_null_field]
+                        unique_field_values = set()
                         for o in field_values:
                             # Using the Walrus operator again to get the replacement information for the current object
                             # (if there's any)
@@ -2499,10 +2541,20 @@ class PaloCleaner:
                                         replacements_done[obj_type][field_name].append((f"{o}", 0))
                                     current_field_replacements_count += 1
                                 replacements_count += 1
+                            elif o in unique_field_values:
+                                # duplicate value in field 
+                                self._console.log(f"[ {location_name} ] Duplicate value {o} found in rule {rule.name!r}")
+                                replacements_done[obj_type][field_name].append((f"{o}", 2))
+                                current_field_replacements_count += 1
+                                replacements_count += 1
+                                items_to_remove.append(o)
+                                any_change_done = True
                             else:
                                 # replacement type 0 = no replacement
                                 replacements_done[obj_type][field_name].append((f"{o}", 0))
                                 current_field_replacements_count += 1
+
+                            unique_field_values.add(o)
 
                         # if the rule can be modified (and cleaning application has been requested), change the current
                         # field value to the appropriate one, and apply the change
