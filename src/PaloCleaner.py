@@ -406,13 +406,13 @@ class PaloCleaner:
                             # if we have not specified an unused-only cleaning operation, we need to replace the non-optimal objects by their processed replacements (in groups, rules, etc)
                             if self._unused_only is None:
                                 # OBJECTS REPLACEMENT IN GROUPS
-                                #dg_replaceingroups_task = progress.add_task(
-                                #    f"[ {context_name} ] Replacing objects in groups",
-                                #    total=len(self._replacements[context_name]['Address']) + len(self._replacements[context_name]['Service'])
-                                #)
-                                #self.replace_object_in_groups(context_name, progress, dg_replaceingroups_task)
-                                #self._console.log(f"[ {context_name} ] Objects replaced in groups")
-                                #progress.remove_task(dg_replaceingroups_task)
+                                dg_replaceingroups_task = progress.add_task(
+                                    f"[ {context_name} ] Replacing objects in groups",
+                                    total=len(self._replacements[context_name]['Address']) + len(self._replacements[context_name]['Service'])
+                                )
+                                self.replace_object_in_groups(context_name, progress, dg_replaceingroups_task)
+                                self._console.log(f"[ {context_name} ] Objects replaced in groups")
+                                progress.remove_task(dg_replaceingroups_task)
 
                                 # OBJECTS REPLACEMENT IN RULEBASES
                                 dg_replaceinrules_task = progress.add_task(
@@ -425,9 +425,9 @@ class PaloCleaner:
                                 progress.remove_task(dg_replaceinrules_task)
 
                             # OBJECTS CLEANING (FOR FULLY INCLUDED DEVICE GROUPS ONLY)
-                            #if context_name in self._analysis_perimeter['full']:
-                            #    self.clean_local_object_set(context_name)
-                            #    self._console.log(f"[ {context_name} ] Objects cleaned (fully included)")
+                            if context_name in self._analysis_perimeter['full']:
+                                self.clean_local_object_set(context_name)
+                                self._console.log(f"[ {context_name} ] Objects cleaned (fully included)")
 
                             if context_name not in ['shared', 'predefined']:
                                 self._panorama.remove(self._objects[context_name]['context'])
