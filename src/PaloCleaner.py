@@ -277,7 +277,7 @@ class PaloCleaner:
                 progress.update(download_task, description="[ Panorama ] Downloading shared objects")
                 self.fetch_objects(self._panorama, 'shared')
                 self.fetch_objects(self._panorama, 'predefined')
-                self._console.log(f"[ Panorama ] Shared objects downloaded ({self.count_objects('shared')} found)")
+                self._console.log(f"[ Panorama ] Shared objects downloaded ({self.count_objects('shared')})")
 
                 # calling a function which will make sure that the tiebreak-tag exists (if requested as argument)
                 # and will create it if it does not
@@ -299,7 +299,7 @@ class PaloCleaner:
                 for (context_name, dg) in perimeter:
                     progress.update(download_task, description=f"[ {context_name} ] Downloading objects")
                     self.fetch_objects(dg, context_name)
-                    self._console.log(f"[ {context_name} ] Objects downloaded ({self.count_objects(context_name)} found)")
+                    self._console.log(f"[ {context_name} ] Objects downloaded ({self.count_objects(context_name)})")
                     progress.update(download_task, description=f"[ {context_name} ] Downloading rulebases")
                     self.fetch_rulebase(dg, context_name)
                     self._console.log(f"[ {context_name} ] Rulebases downloaded ({self.count_rules(context_name)} rules found)")
@@ -533,16 +533,22 @@ class PaloCleaner:
         Returns the global count of all objects (Address, Tag, Service) for the provided location
         Commenting : OK (15062023)
 
-        :param location_name: (string) Name of the location (shared or device-group name) where to count objects
-        :return: (int) Total number of objects for the requested location
+        :param 
+            location_name: (string) Name of the location (shared or device-group name) where to count objects
+
+        :return: 
+            (int, dict) Total number of objects for the requested location, and dictionary with the key being the number of objects of each type
         """
 
         counter = 0
+        count_dict = dict()
         try:
             for t, l in self._objects.get(location_name, dict()).items():
                 counter += len(l) if type(l) is list else 0
+                if type(l) is list:
+                    count_dict[t] = len(l)
         finally:
-            return counter
+            return counter, count_dict
 
     def count_rules(self, location_name):
         """
