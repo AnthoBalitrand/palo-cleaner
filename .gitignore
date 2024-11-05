@@ -5,7 +5,6 @@ src/bkp.py
 src/panos/*
 src/panos
 src/*.key
-reports/*
 .DS_Store
 *.swp
 src/*.swp
