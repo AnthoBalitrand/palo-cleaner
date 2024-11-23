@@ -2,3 +2,4 @@ pan-os-python==1.7.0
 rich==11.0.0
 distutils
 dnspython==2.6.1
+setuptools==75.5.0

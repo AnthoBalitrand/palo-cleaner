@@ -9,7 +9,7 @@ def parse_cli_args():
     parser.add_argument(
         "--panorama-url",
         action = "store",
-        help = "Address of the Panorama server to which to connect",
+        help = "Address of the Panorama server to which to connect (FQDN)",
         required = True
     )
 
@@ -213,7 +213,7 @@ def main():
     # create the report directory if requested
     report_folder = None
     if not start_cli_args.no_report:
-        report_folder = os.path.dirname(os.path.abspath(__file__)).replace('/src', '')
+        report_folder = os.path.dirname(os.path.abspath(__file__)).replace('/src', '').replace('\\src', '')
         report_folder += '/reports/'
         report_folder += str(int(time.time()))
         print(f"Report folder will be {report_folder}")

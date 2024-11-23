@@ -197,9 +197,9 @@ class PaloCleaner:
         header_text = Text("""
 
   ___      _        ___ _                       
- | _ \__ _| |___   / __| |___ __ _ _ _  ___ _ _ 
- |  _/ _` | / _ \ | (__| / -_) _` | ' \/ -_) '_|
- |_| \__,_|_\___/  \___|_\___\__,_|_||_\___|_|  
+ | _ \\__ _| |___   / __| |___ __ _ _ _  ___ _ _ 
+ |  _/ _` | / _ \\ | (__| / -_) _` | ' \\/ -_) '_|
+ |_| \\__,_|_\\___/  \\___|_\\___\\__,_|_||_\\___|_|  
                                                 
         by Anthony BALITRAND v1.2                                           
 
@@ -208,7 +208,7 @@ class PaloCleaner:
 
         try:
             if self._unused_only and not self._dg_filter and not "shared" in self._unused_only:
-                self._console.log("/!\ No device-group filter provided while using unused-only list used, replicating unused-only list into the device-group filter")
+                self._console.log("/!\\ No device-group filter provided while using unused-only list used, replicating unused-only list into the device-group filter")
                 self._dg_filter = self._unused_only
 
             # if the API user password has not been provided within the CLI start command, prompt the user
@@ -878,7 +878,7 @@ class PaloCleaner:
         # remove all quotes from the logical expression
         condition = condition.replace('\'', '')
         condition = condition.replace('\"', '')
-        condition = re.sub("((\w|-|:|\+)+)", rf"self._tag_objsearch['{search_location}'].get('\1', set())", condition)
+        condition = re.sub(r"((\w|-|:|\+|\.)+)", rf"self._tag_objsearch['{search_location}'].get('\1', set())", condition)
 
         condition = "cond_expr_result = " + condition
         return condition
