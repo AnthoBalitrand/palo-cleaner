@@ -878,7 +878,11 @@ class PaloCleaner:
         # remove all quotes from the logical expression
         condition = condition.replace('\'', '')
         condition = condition.replace('\"', '')
-        condition = re.sub(r"((\w|-|:|\+|\.)+)", rf"self._tag_objsearch['{search_location}'].get('\1', set())", condition)
+        condition = condition.replace('\\', '\\\\')
+        # replace any tag name with the dict where to search for it 
+        # ie : "tag1" is replaced by "self._tag_objsearch[fwtest].get('tag1', set())"
+        # special characters are allowed on tags (- : + . / \)
+        condition = re.sub(r"((\w|-|:|\+|\.|/|\\\\)+)", rf"self._tag_objsearch['{search_location}'].get('\1', set())", condition)
 
         condition = "cond_expr_result = " + condition
         return condition
