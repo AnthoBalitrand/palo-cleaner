@@ -2962,8 +2962,14 @@ class PaloCleaner:
                 if type(used_obj_tuple[0]) is panos.objects.AddressObject and hasattr(used_obj_tuple[0], "group_member_only") and used_obj_tuple[0].group_member_only == True:
                     # TODO : what happens if there are "blocked groups", but a given object is part of still used groups ? (else statement below)
                     #print(f"{used_obj_tuple} group membership is : {used_obj_tuple[0].group_membership}")
+
+                    # get the list of groups (at all locations) where the current object is still used (group membership)
+                    still_memberof = set()
+                    any([still_memberof.update(*[x for x in used_obj_tuple[0].group_membership.values()])])
+                    #print(f"Still memberof for {used_obj_tuple[0]} : {still_memberof}")
+
                     if blocked_groups:
-                        if not (used_obj_intersect := used_obj_tuple[0].group_membership.get(location_name, set()).intersection(blocked_groups)):
+                        if not (used_obj_intersect := still_memberof.intersection(blocked_groups)):
                             to_remove_from_obj_set.append(used_obj_tuple)
                             self._console.log(f"[ {location_name} ] Object {used_obj_tuple} removed from used_object_set at location {location_name} (group member only, not member of any protected group)", level=2)
                         else:
@@ -2972,7 +2978,10 @@ class PaloCleaner:
                             # and would be deleted if member of a lower-level device-group not replicated to the upward device-group)
                             used_obj_tuple[0].group_member_only = False
                     else:
-                        if not (still_used_obj_intersect := used_obj_tuple[0].group_membership.get(location_name, set()).intersection(still_used_groups)):
+                        #print(f"Still used groups at location {location_name} : {still_used_groups}")
+                        #print(f"Group membership for {used_obj_tuple[0]} : {used_obj_tuple[0].group_membership}")
+
+                        if not (still_used_obj_intersect := still_memberof.intersection(still_used_groups)):
                             to_remove_from_obj_set.append(used_obj_tuple)
                             self._console.log(f"[ {location_name} ] Object {used_obj_tuple} removed from used_object_set at location {location_name} (group member only, not member of any still used group 2222)", level=2)
                         else:
