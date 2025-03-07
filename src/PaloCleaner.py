@@ -871,18 +871,24 @@ class PaloCleaner:
         :return:
         """
 
-        condition = condition_string.replace('and', '&')
-        condition = condition.replace('or', '^')
-        condition = condition.replace('AND', '&')
-        condition = condition.replace('OR', '^')
-        # remove all quotes from the logical expression
-        condition = condition.replace('\'', '')
-        condition = condition.replace('\"', '')
+        condition = condition_string.replace(' and ', ' & ').replace(' or ', ' ^ ')
+        condition = condition.replace(' AND ', ' & ').replace(' OR ', ' ^ ')
+
+        #condition = condition.replace('\'', '')
+        #condition = condition.replace('\"', '')
         condition = condition.replace('\\', '\\\\')
-        # replace any tag name with the dict where to search for it 
-        # ie : "tag1" is replaced by "self._tag_objsearch[fwtest].get('tag1', set())"
-        # special characters are allowed on tags (- : + . / \)
-        condition = re.sub(r"((\w|-|:|\+|\.|/|\\\\)+)", rf"self._tag_objsearch['{search_location}'].get('\1', set())", condition)
+        
+        def tag_replacement(match):
+            # replace any tag name with the dict where to search for it 
+            # ie : "tag1" is replaced by "self._tag_objsearch[fwtest].get('tag1', set())"
+            tag_name = match.group(2) if match.group(2) else match.group(3)
+            return f"self._tag_objsearch['{search_location}'].get('{tag_name}', set())"
+
+        # This new tag_pattern regex permits to match tags containing parenthesis
+        # all caracters are allowed in a tag
+        # tags can contain spaces if they are between quotes 
+        tag_pattern = r"(['\"])([^'\^&\"]+)\1|([^\s()^&]+)"
+        condition = re.sub(tag_pattern, tag_replacement, condition)
 
         condition = "cond_expr_result = " + condition
         return condition
