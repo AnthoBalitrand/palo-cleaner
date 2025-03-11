@@ -122,11 +122,13 @@ def gen_condition_expression_4_final(condition_string: str, search_location: str
     #condition = condition.replace('\'', '')
     #condition = condition.replace('\"', '')
     condition = condition.replace('\\', '\\\\')
+    tags_in_condition = set()
     
     def tag_replacement(match):
         # replace any tag name with the dict where to search for it 
         # ie : "tag1" is replaced by "self._tag_objsearch[fwtest].get('tag1', set())"
         tag_name = match.group(2) if match.group(2) else match.group(3)
+        tags_in_condition.add(tag_name)
         return f"{search_location}:'{tag_name}'"
 
     # This new tag_pattern regex permits to match tags containing parenthesis
@@ -136,4 +138,13 @@ def gen_condition_expression_4_final(condition_string: str, search_location: str
     condition = re.sub(tag_pattern, tag_replacement, condition)
 
     condition = "cond_expr_result = " + condition
+    print(tags_in_condition)
     return condition
+
+
+
+
+
+
+
+'guestos.Microsoft Windows Server 2003 Standard 32-bit' or 'guestos.Microsoft Windows 7 64-bit' or 'guestos.Microsoft Windows Server 2008 32-bit'  or 'guestos.Microsoft Windows Server 2008 64-bit'  or 'guestos.Microsoft Windows Server 2008 R2 64-bit' or 'guestos.Microsoft Windows Server 2012 64-bit' or 'vcenter.NGP_AH_MAR_A8_R5_NGP_MAR_WINDOWS_guestos.Microsoft/Windows/Server/2016/or/later/(64-bit)' or 'guestos.Microsoft Windows Server 2016 64-bit'  or 'WINDOWS'  or 'vcenter.NGP_AH_MAR_A8_R5_NGP_MAR_MGMT_guestos.Microsoft/Windows/Server/2019/(64-bit)'  or 'vcenter.NGP_AH_MAR_A8_R5_NGP_MAR_WINDOWS_guestos.Microsoft/Windows/Server/2022/(64-bit)'
