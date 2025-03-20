@@ -367,8 +367,6 @@ class PaloCleaner:
                     self._console.log(f"[ {dg.about()['name']} ] Used objects set processed")
                     progress.remove_task(dg_fetch_task)
 
-                print(self._used_objects_sets)
-
                 # ----------------------------------------------------------------------------------
                 # --       Starting objects optimization (from deepest DG to shared)              --
                 # ----------------------------------------------------------------------------------
@@ -1367,9 +1365,9 @@ class PaloCleaner:
             if current_location_search == "shared":
                 reached_max = True
             # Get the list of all matching Tag objects at the current search location
-            if (obj :=self._tag_namesearch[current_location_search].get(obj.name)):
+            if (found_obj :=self._tag_namesearch[current_location_search].get(obj.name)):
                 # add each of them to the result list as a tuple (Tag, current location name)
-                found_upward_objects.append((obj, current_location_search))
+                found_upward_objects.append((found_obj, current_location_search))
             # Find the next search location (upward device group)
             upward_dg = self._dg_hierarchy[current_location_search].parent
             current_location_search = "shared" if not upward_dg else upward_dg.name
