@@ -871,21 +871,31 @@ class PaloCleaner:
         :return:
         """
 
-        condition = condition_string.replace('and', '&')
-        condition = condition.replace('or', '^')
-        condition = condition.replace('AND', '&')
-        condition = condition.replace('OR', '^')
-        # remove all quotes from the logical expression
-        condition = condition.replace('\'', '')
-        condition = condition.replace('\"', '')
+        condition = condition_string.replace(' and ', ' & ').replace(' or ', ' ^ ')
+        condition = condition.replace(' AND ', ' & ').replace(' OR ', ' ^ ')
+
+        #condition = condition.replace('\'', '')
+        #condition = condition.replace('\"', '')
         condition = condition.replace('\\', '\\\\')
-        # replace any tag name with the dict where to search for it 
-        # ie : "tag1" is replaced by "self._tag_objsearch[fwtest].get('tag1', set())"
-        # special characters are allowed on tags (- : + . / \)
-        condition = re.sub(r"((\w|-|:|\+|\.|/|\\\\)+)", rf"self._tag_objsearch['{search_location}'].get('\1', set())", condition)
+
+        # the set below contains all tags used in the condition, so that they can be "protected" (not deleted) even if not used by any object 
+        condition_used_tags = set()
+        
+        def tag_replacement(match):
+            # replace any tag name with the dict where to search for it 
+            # ie : "tag1" is replaced by "self._tag_objsearch[fwtest].get('tag1', set())"
+            tag_name = match.group(2) if match.group(2) else match.group(3)
+            condition_used_tags.add(tag_name)
+            return f"self._tag_objsearch['{search_location}'].get('{tag_name}', set())"
+
+        # This new tag_pattern regex permits to match tags containing parenthesis
+        # all caracters are allowed in a tag
+        # tags can contain spaces if they are between quotes 
+        tag_pattern = r"(['\"])([^'\^&\"]+)\1|([^\s()^&]+)"
+        condition = re.sub(tag_pattern, tag_replacement, condition)
 
         condition = "cond_expr_result = " + condition
-        return condition
+        return condition, condition_used_tags
 
     def get_relative_object_location_by_tag(self, dag_condition, reference_location, dag_name):
         """
@@ -898,7 +908,7 @@ class PaloCleaner:
         """
 
         found_objects = list()
-        condition_expr = self.gen_condition_expression(dag_condition, reference_location)
+        condition_expr, tags_list = self.gen_condition_expression(dag_condition, reference_location)
         expr_result = dict()
         try:
             exec(condition_expr, locals(), expr_result)
@@ -910,6 +920,13 @@ class PaloCleaner:
             upward_dg = self._dg_hierarchy[reference_location].parent.name
             found_objects += self.get_relative_object_location_by_tag(dag_condition, upward_dg, dag_name)
 
+        found_tags = set()
+        for t in tags_list:
+            tag_research = self.get_relative_object_location(t, reference_location, obj_type="Tag", find_all=False, iterative_call=False)
+            if tag_research != (None, None):
+                found_tags.add(tag_research)
+
+        found_objects.extend(found_tags)
         return found_objects
 
     def flatten_object(self, used_object: panos.objects, object_location: str, usage_base: str, referencer_type: str = None, referencer_name: str = None, resolved_cache=None):
@@ -981,7 +998,7 @@ class PaloCleaner:
                 # (which can be only at the group level or above)
                 if used_object.static_value:
                     self._console.log(
-                            f"[ {usage_base} ] {'*' * recursion_level} Object {used_object.name!r} (static AddressGroup) (ref by {referencer_type} {referencer_name!r}) has been found on location {object_location}",
+                            f"[ {usage_base} ] {'*' * recursion_level} Object {used_object.name!r} (static AddressGroup) (ref by {referencer_type} {referencer_name!r}) has been found at location {object_location}",
                             style="green", level=3)
 
                     # for each static group member, call the current function recursively
@@ -1031,9 +1048,10 @@ class PaloCleaner:
                 # in case of a dynamic group, the group condition is converted to an executable Python statement,
                 # for members to be found using their tags
                 # for dynamic groups, members can be at any location, upward starting from the usage_base location
+                # all tags (even if not assigned to any address object) are protected as soon as they are mentionned on a DAG condition
                 elif used_object.dynamic_value:
                     self._console.log(
-                            f"[ {usage_base} ] {'*' * recursion_level} Object {used_object.name!r} (dynamic AddressGroup) (ref by {referencer_type} {referencer_name!r}) has been found on location {object_location}",
+                            f"[ {usage_base} ] {'*' * recursion_level} Object {used_object.name!r} (dynamic AddressGroup) (ref by {referencer_type} {referencer_name!r}) has been found at location {object_location}",
                             style="green", level=3)
 
                     # for each object matched by the get_relative_object_location_by_tag
@@ -1043,50 +1061,57 @@ class PaloCleaner:
                         usage_base,
                         used_object.name
                     ):
-                        self._console.log(
-                                f"[ {usage_base} ] {'*' * recursion_level} Found group member of dynamic AddressGroup {used_object.name!r} : {referenced_object.name!r}",
-                                style="green", level=3)
+                        if type(referenced_object) is panos.objects.Tag:
+                            # The get_relative_object_location_by_tag function not only returns the list of AddressObjects referenced on DAGs
+                            # It also returns the list of tags used on the DAG condition, to make sure they are not deleted even if not used by any referenced AddressObject at this time
+                            # Thus those tags need to be added to the _used_objects_sets for the corresponding location (tags are protected at all locations between the DAG usage location and the shared level)
+                            obj_set.append((referenced_object, referenced_object_location))
 
-                        # the condition below permits to alert for circular references
-                        if referenced_object == used_object:
-                            self._console.log(
-                                f"[ {usage_base} ] {'*' * recursion_level} Circular reference found on dynamic AddressGroup {used_object.name!r}",
-                                style="red"
-                            )
-
-                        # for each dynamic group member, call the current function recursively
-                        # (if the member has not already been resolved for the current location, which means that it would
-                        # already have been flattened)
-                        if referenced_object.name not in resolved_cache['Address']:
-                            # call to the flatten_object function with the following parameters :
-                            # referenced_object = the panos.Object found by the get_relative_object_location_by_tag
-                            # referenced_object_location = the location of this object (returned by a call to get_relative_object_location_by_tag)
-                            # usage_base = the location where the object is used (can be below the real location of the object)
-                            # used_object.__class__.__name__ = the object type where the member has been found used (AddressGroup, actually)
-                            # used_object.name = the name of the object where the member has been found (= the group name, actually)
-                            # recursion_level = the current recursion_level + 1
-
-                            obj_set += flatten_object_recurser(
-                                referenced_object,
-                                referenced_object_location,
-                                usage_base,
-                                used_object.__class__.__name__,
-                                used_object.name,
-                                recursion_level + 1)
-
-                            # add the found referenced_object and its location to the _tag_referenced dict
-                            # this dict is used by the replace_object_in_group function, when an object referenced on
-                            # a DAG by a tag needs to be replaced. This tag will need to be added to the replacement
-                            # object for this new object to be matched by the DAG also
-                            # TODO : add the matching tag information to replicate only the needed tags
-                            self._tag_referenced.add((referenced_object, referenced_object_location))
-                            self._console.log(
-                                    f"[ {usage_base} ] {'*' * recursion_level} Marking {referenced_object.name!r} as tag-referenced",
-                                    style="green", level=3)
                         else:
                             self._console.log(
-                                    f"[ {usage_base} ] {'*' * recursion_level} Address Object {referenced_object.name!r} already resolved in current context",
-                                    style="yellow", level=3)
+                                    f"[ {usage_base} ] {'*' * recursion_level} Found group member of dynamic AddressGroup {used_object.name!r} : {referenced_object.name!r}",
+                                    style="green", level=3)
+
+                            # the condition below permits to alert for circular references
+                            if referenced_object == used_object:
+                                self._console.log(
+                                    f"[ {usage_base} ] {'*' * recursion_level} Circular reference found on dynamic AddressGroup {used_object.name!r}",
+                                    style="red"
+                                )
+
+                            # for each dynamic group member, call the current function recursively
+                            # (if the member has not already been resolved for the current location, which means that it would
+                            # already have been flattened)
+                            if referenced_object.name not in resolved_cache['Address']:
+                                # call to the flatten_object function with the following parameters :
+                                # referenced_object = the panos.Object found by the get_relative_object_location_by_tag
+                                # referenced_object_location = the location of this object (returned by a call to get_relative_object_location_by_tag)
+                                # usage_base = the location where the object is used (can be below the real location of the object)
+                                # used_object.__class__.__name__ = the object type where the member has been found used (AddressGroup, actually)
+                                # used_object.name = the name of the object where the member has been found (= the group name, actually)
+                                # recursion_level = the current recursion_level + 1
+
+                                obj_set += flatten_object_recurser(
+                                    referenced_object,
+                                    referenced_object_location,
+                                    usage_base,
+                                    used_object.__class__.__name__,
+                                    used_object.name,
+                                    recursion_level + 1)
+
+                                # add the found referenced_object and its location to the _tag_referenced dict
+                                # this dict is used by the replace_object_in_group function, when an object referenced on
+                                # a DAG by a tag needs to be replaced. This tag will need to be added to the replacement
+                                # object for this new object to be matched by the DAG also
+                                # TODO : add the matching tag information to replicate only the needed tags
+                                self._tag_referenced.add((referenced_object, referenced_object_location))
+                                self._console.log(
+                                        f"[ {usage_base} ] {'*' * recursion_level} Marking {referenced_object.name!r} as tag-referenced",
+                                        style="green", level=3)
+                            else:
+                                self._console.log(
+                                        f"[ {usage_base} ] {'*' * recursion_level} Address Object {referenced_object.name!r} already resolved in current context",
+                                        style="yellow", level=3)
 
             # or here for ServiceGroup
             elif type(used_object) is panos.objects.ServiceGroup:
@@ -1321,7 +1346,35 @@ class PaloCleaner:
                 self._group_sizesearch[location_name][addr_group.ip_count] = list()
             self._group_sizesearch[location_name][addr_group.ip_count].append(addr_group)
 
-    def find_upward_obj_by_addr(self, base_location_name: str, obj: panos.objects.AddressObject):
+    def find_upward_obj_tag(self, base_location_name: str, obj: panos.objects.Tag):
+        """
+        This function finds all Tag objects on upward locations (from the base_location_name) having
+        the same value than the provided obj
+
+        :param base_location_name: (str) The location from which to start the duplicates objects search (going upward)
+        :param obj: (panos.objects.Tag) The base object for which we need to find duplicates
+        :return: [(panos.objects.Tag, str)] A list of tuples containing the duplicates objects and their location, on upward locations
+        """
+
+        found_upward_objects = list()
+        current_location_search = base_location_name
+
+        # This boolean is used to stop the search loop when the "shared" location has been reached
+        reached_max = False
+        while not reached_max:
+            if current_location_search == "shared":
+                reached_max = True
+            # Get the list of all matching Tag objects at the current search location
+            if (found_obj :=self._tag_namesearch[current_location_search].get(obj.name)):
+                # add each of them to the result list as a tuple (Tag, current location name)
+                found_upward_objects.append((found_obj, current_location_search))
+            # Find the next search location (upward device group)
+            upward_dg = self._dg_hierarchy[current_location_search].parent
+            current_location_search = "shared" if not upward_dg else upward_dg.name
+
+        return found_upward_objects
+
+    def find_upward_obj_addr(self, base_location_name: str, obj: panos.objects.AddressObject):
         """
         This function finds all Address objects on upward locations (from the base_location_name) having
         the same value than the provided obj
@@ -1357,7 +1410,7 @@ class PaloCleaner:
 
         return found_upward_objects
 
-    def find_upward_obj_group(self, base_location_name: str, ref_obj_group: panos.objects.AddressGroup):
+    def find_upward_obj_addr_group(self, base_location_name: str, ref_obj_group: panos.objects.AddressGroup):
         """
         This function finds all AddressGroup objects on upward locations (from the base_location_name) having
         the same value (static members or DAG condition expression) than the provided group obj
@@ -1705,6 +1758,29 @@ class PaloCleaner:
         # Returns the chosen object among the provided list
         return choosen_object
 
+    def find_best_replacement_tag_obj(self, obj_list: list, base_location: str):
+        """
+        Get a list of tuples (object, location) and returns the best to be used based on location
+
+        :param obj_list: list((Tag, string)) List of tuples of Tag objects and location names
+        :param base_location: (str) The name of the location from where we need to find the best replacement object
+        :return:
+        """
+
+        choosen_object = None
+
+        temp_object_level = 999
+        # This code will permit to keep the "highest" device-group level matching object (nearest to the "shared" location)
+        for o in obj_list:
+            location_level = [k for k, v in self._depthed_tree.items() if o[1] in v][0]
+            if location_level < temp_object_level:
+                temp_object_level = location_level
+                choosen_object = o
+        self._console.log(
+            f"[ {base_location} ] Tag {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's the highest level location (level = {temp_object_level})", level=2)
+
+        return choosen_object
+
     def find_best_replacement_service_obj(self, obj_list: list, base_location: str):
         """
         Get a list of tuples (object, location) and returns the best to be used based on location and naming criterias
@@ -1903,7 +1979,6 @@ class PaloCleaner:
                 return already_replaced_by[0] if already_replaced_by[0]["replacement"] != base_obj_tuple else None
 
         choosen_by_exact_alias = True if last_exact_dg_level == 0 and choosen_object and "alias" in choosen_object["replacement"][0].name else False
-        print(f"choosen_by_exact_alias is {choosen_by_exact_alias}")
         group_diff_replacement = [x for x in obj_list if x["replacement_type"] == "group_diff"]
         last_match_percent = 0
         last_diff_dg_level = 999
@@ -1969,16 +2044,17 @@ class PaloCleaner:
 
         # This dict references the function to be used to match the best replacement for each object type
         find_maps = {
-            AddressObject: self.find_upward_obj_by_addr,
-            AddressGroup: self.find_upward_obj_group,
+            AddressObject: self.find_upward_obj_addr,
+            AddressGroup: self.find_upward_obj_addr_group,
             ServiceObject: self.find_upward_obj_service,
-            ServiceGroup: self.find_upward_obj_service_group
+            ServiceGroup: self.find_upward_obj_service_group,
+            Tag: self.find_upward_obj_tag
         }
 
         # for each object type in the list below
         # TODO : find best replacement for servicegroup ?
 
-        for obj_type in [panos.objects.AddressObject, panos.objects.AddressGroup, panos.objects.ServiceObject]:
+        for obj_type in [panos.objects.AddressObject, panos.objects.AddressGroup, panos.objects.ServiceObject, panos.objects.Tag]:
             #self._console.log(f"[ {location_name} ] Child for DeviceGroup {self._objects[location_name]['context']} when optimizing {obj_type} is {self._objects[location_name]['context'].children}")
 
             # for each object of the current type found at the current location
@@ -2020,14 +2096,17 @@ class PaloCleaner:
                                 replacement_right_diff = repl_info['right_diff']
                         else:
                             replacement_obj = obj
+                    elif type(obj) is Tag:
+                        replacement_obj, replacement_obj_location = self.find_best_replacement_tag_obj(upward_objects, location_name)
+                        replacement_type = "exact_match"
                     else:
                         # if raised here, first object is choosen (can be the case for AddressGroups when not enabling the compare-groups mode)
                         replacement_obj, replacement_obj_location = upward_objects[0]['replacement']
                         replacement_type = "exact_match"
 
                     # if the chosen replacement object is different than the actual object
-                    #if replacement_obj != obj:
-                    if replacement_obj != obj and "saga" in replacement_obj.name:
+                    if replacement_obj != obj:
+                    #if replacement_obj != obj and "saga" in replacement_obj.name:
                         if replacement_type == "exact_match":
                             self._console.log(
                                 f"[ {location_name} ] Replacing {obj.about()['name']!r} ({obj.__class__.__name__}) at location {location} by {replacement_obj.about()['name']!r} at location {replacement_obj_location}",
@@ -2075,6 +2154,13 @@ class PaloCleaner:
                                 'source': (obj, location),
                                 'replacement': (replacement_obj, replacement_obj_location),
                                 'blocked': False, 
+                                'globally_blocked': None
+                            }
+                        elif type(obj) is Tag:
+                            self._replacements[location_name]['Tag'][obj.about()['name']] = {
+                                'source': (obj, location), 
+                                'replacement': (replacement_obj, replacement_obj_location),
+                                'blocked': False,
                                 'globally_blocked': None
                             }
 
@@ -2962,8 +3048,14 @@ class PaloCleaner:
                 if type(used_obj_tuple[0]) is panos.objects.AddressObject and hasattr(used_obj_tuple[0], "group_member_only") and used_obj_tuple[0].group_member_only == True:
                     # TODO : what happens if there are "blocked groups", but a given object is part of still used groups ? (else statement below)
                     #print(f"{used_obj_tuple} group membership is : {used_obj_tuple[0].group_membership}")
+
+                    # get the list of groups (at all locations) where the current object is still used (group membership)
+                    still_memberof = set()
+                    any([still_memberof.update(*[x for x in used_obj_tuple[0].group_membership.values()])])
+                    #print(f"Still memberof for {used_obj_tuple[0]} : {still_memberof}")
+
                     if blocked_groups:
-                        if not (used_obj_intersect := used_obj_tuple[0].group_membership.get(location_name, set()).intersection(blocked_groups)):
+                        if not (used_obj_intersect := still_memberof.intersection(blocked_groups)):
                             to_remove_from_obj_set.append(used_obj_tuple)
                             self._console.log(f"[ {location_name} ] Object {used_obj_tuple} removed from used_object_set at location {location_name} (group member only, not member of any protected group)", level=2)
                         else:
@@ -2972,7 +3064,10 @@ class PaloCleaner:
                             # and would be deleted if member of a lower-level device-group not replicated to the upward device-group)
                             used_obj_tuple[0].group_member_only = False
                     else:
-                        if not (still_used_obj_intersect := used_obj_tuple[0].group_membership.get(location_name, set()).intersection(still_used_groups)):
+                        #print(f"Still used groups at location {location_name} : {still_used_groups}")
+                        #print(f"Group membership for {used_obj_tuple[0]} : {used_obj_tuple[0].group_membership}")
+
+                        if not (still_used_obj_intersect := still_memberof.intersection(still_used_groups)):
                             to_remove_from_obj_set.append(used_obj_tuple)
                             self._console.log(f"[ {location_name} ] Object {used_obj_tuple} removed from used_object_set at location {location_name} (group member only, not member of any still used group 2222)", level=2)
                         else:
@@ -3224,7 +3319,7 @@ class PaloCleaner:
                                     for current_tag in obj.tag:
                                         tag_obj, tag_location = self.get_relative_object_location(current_tag, location_name, obj_type="Tag")
                                         self.add_indirect_protect(tag_location, "Tag", current_tag)
-
+                                        self._console.log(f"[ {location_name} ] Added object {obj} to indirect protect with tag {current_tag} at location {tag_location}", level=3)
                                     if "Group" in obj.__class__.__name__:
                                         if obj.static_value:
                                             self._console.log(f"[ {location_name} ] Object {obj.name} ({obj.__class__.__name__}) has static members. Flattening to protect all linked objects")
