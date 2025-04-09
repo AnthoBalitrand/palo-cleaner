@@ -2122,11 +2122,6 @@ class PaloCleaner:
                         replacement_obj, replacement_obj_location = self.find_best_replacement_tag_obj(upward_objects, location_name)
                         replacement_type = "exact_match"
                     else:
-                        # if raised here, first object is choosen (can be the case for AddressGroups when not enabling the compare-groups mode)
-                        
-                        #replacement_obj, replacement_obj_location = upward_objects[0]['replacement']
-                        #replacement_type = "exact_match"
-                        #print(f'Hi from random choice for {obj} !')
                         replacement_obj, replacement_obj_location = self.find_highest_repl_address_group(upward_objects, location_name)
                         replacement_type = "exact_match"
 
