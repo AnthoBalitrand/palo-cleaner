@@ -1914,6 +1914,7 @@ class PaloCleaner:
 
         :param obj_list: list(dict()) List of dicts representing AddressGroups replacement, see find_upward_obj_group function doc for format details
         :param base_location: (str) The name of the location from where we need to find the best replacement object
+        :base_obj_tuple: (AddressGroup, str) The tuple representing the object we are actually looking to replace
         :return:
         """
         self._console.log(f"[ {base_location} ] Looking for best replacement of {base_obj_tuple}")
@@ -2030,6 +2031,27 @@ class PaloCleaner:
         # This function returns the select dict in the input list of dicts (different format than other object selection functions)
         return choosen_object
 
+    def find_highest_repl_address_group(self, obj_list: list, base_location: str):
+        """
+        Find the best object among the obj_list (regardless of the object type), just by device-group hierarchy location
+        (returning the highest located object)
+
+        :param obj_list: list((panos.Object, str)) The list of tuples (Object, location) of the objects on which to find the highest located 
+        :param base_location: str The location from which we are trying to find the best replacement object 
+        :return: (panos.Object, str) The best choosen replacement object among the obj_list
+        """
+
+        last_dg_level = 999
+        choosen_object = None
+
+        for x in obj_list:
+            if (ll := self._dg_hierarchy[x['replacement'][1]].level < last_dg_level):
+                last_dg_level = ll
+                choosen_object = x
+
+        return choosen_object['replacement']
+
+
     def optimize_objects(self, location_name: str, progress: rich.progress.Progress, task: rich.progress.TaskID):
         """
         Start object optimization processing for device-group given as argument
@@ -2101,7 +2123,11 @@ class PaloCleaner:
                         replacement_type = "exact_match"
                     else:
                         # if raised here, first object is choosen (can be the case for AddressGroups when not enabling the compare-groups mode)
-                        replacement_obj, replacement_obj_location = upward_objects[0]['replacement']
+                        
+                        #replacement_obj, replacement_obj_location = upward_objects[0]['replacement']
+                        #replacement_type = "exact_match"
+                        #print(f'Hi from random choice for {obj} !')
+                        replacement_obj, replacement_obj_location = self.find_highest_repl_address_group(upward_objects, location_name)
                         replacement_type = "exact_match"
 
                     # if the chosen replacement object is different than the actual object
