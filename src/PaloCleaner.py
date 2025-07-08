@@ -1838,11 +1838,13 @@ class PaloCleaner:
                                 f"[ {base_location} ] Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object with standard naming", level=2)
             # Else return the first found shared object
             if shared_obj and not choosen_object:
-                for o in sorted(shared_obj, key=lambda x: x[0].about()['name']):
-                    if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_obj]:
-                        choosen_object = o
-                        self._console.log(
-                                f"[ {base_location} ] Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object", level=2)
+                #for o in sorted(shared_obj, key=lambda x: x[0].about()['name']):
+                #    if o[0].about()['name'] not in [x[0].about()['name'] for x in interm_obj]:
+                #        choosen_object = o
+                #        self._console.log(
+                #                f"[ {base_location} ] Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object", level=2)
+                choosen_object = sorted(shared_obj, key=lambda x: x[0].about()['name'])[0]
+                self._console.log(f"[ {base_location} ] Service {choosen_object[0].about()['name']} (context {choosen_object[1]}) choosen as it's a shared object", level=2)
             # Repeat the same logic for intermediate device-groups
             if interm_standard_obj and not choosen_object:
                 temp_object_level = 999
@@ -2600,12 +2602,17 @@ class PaloCleaner:
                 # iterate over each field containing the current object type, also getting the field_type from the repl_map
                 # (fields can be string values or [list of strings])
                 for field_name, field_type in [(x[0], list) if type(x) is list else (x, str) for x in repl_map[type(rule)][obj_type]]:
+
                     # initialize a list of replacements done on each field of the rule (here with the current field)
                     replacements_done[obj_type][field_name] = list()
 
                     # This variable stores the number of replacements done on the current field (used later to compare
                     # with the max_replace value, use for proper sizing of the rich.Table rows)
                     current_field_replacements_count = 0
+
+                    # fix for issue #69 (Make sure "interface IP" is not replaced with an object reference on NAT rules)
+                    if isinstance(rule, NatRule) and rule.source_translation_address_type == "interface-address" and field_name == "source_translation_ip_address":
+                        continue
 
                     # Get the value of the current field (put in on the not_null_field variable thanks to Walrus operator)
                     if (not_null_field := getattr(rule, field_name)):
