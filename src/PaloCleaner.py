@@ -201,7 +201,7 @@ class PaloCleaner:
  |  _/ _` | / _ \\ | (__| / -_) _` | ' \\/ -_) '_|
  |_| \\__,_|_\\___/  \\___|_\\___\\__,_|_||_\\___|_|  
                                                 
-        by Anthony BALITRAND v1.3                                           
+        by Anthony BALITRAND v1.4                                           
 
 """)
         self._console.print(header_text, style="green", justify="left")
