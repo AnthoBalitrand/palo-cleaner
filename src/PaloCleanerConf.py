@@ -1,4 +1,4 @@
-from panos.objects import AddressObject, AddressGroup, Tag, ServiceObject, ServiceGroup
+from panos.objects import AddressObject, AddressGroup, Tag, ServiceObject, ServiceGroup, ScheduleObject
 from panos.policies import SecurityRule, NatRule, AuthenticationRule, PolicyBasedForwarding, DecryptionRule, ApplicationOverride
 
 # The structure below identifies the attributes and their format used on each type of rules
@@ -13,6 +13,7 @@ repl_map = {
         "Address": [["source"], ["destination"]],
         "Service": [["service"]],
         "Tag": [["tag"]],
+        "Schedule": ["schedule"]
     },
     NatRule: {
         "Address": [
@@ -61,5 +62,6 @@ cleaning_order = {
     2: {"Service": ServiceGroup},
     3: {"Address": AddressObject},
     4: {"Service": ServiceObject},
-    5: {"Tag": Tag}
+    5: {"Tag": Tag}, 
+    6: {"Schedule": ScheduleObject}
 }

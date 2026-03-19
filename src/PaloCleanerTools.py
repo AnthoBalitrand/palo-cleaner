@@ -1,6 +1,9 @@
 import panos.objects
 import ipaddress
 import dns.exception
+from datetime import datetime
+
+schedule_date_format = "%Y/%m/%d@%H:%M"
 
 def hostify_address(address: str, dns_resolver: str = None) -> str:
     """
@@ -282,3 +285,19 @@ def compare_groups(g1, g2, detail=False):
     if detail:
         return abs(intersect_nb), abs(left_diff), abs(right_diff), percent_match, left_diff_detail, right_diff_detail
     return abs(intersect_nb), abs(left_diff), abs(right_diff), percent_match
+
+def schedule_to_datetime(schedule_str: list):
+    soonest_date = None
+    latest_date = None
+
+    for date_range in schedule_str:
+        start_date, end_date = date_range.split('-')
+        parsed_start_date = datetime.strptime(start_date, schedule_date_format)
+        parsed_end_date = datetime.strptime(end_date, schedule_date_format)
+        soonest_date = parsed_start_date if (not soonest_date or parsed_start_date < soonest_date) else soonest_date
+        latest_date = parsed_end_date if (not latest_date or parsed_end_date > latest_date) else latest_date
+
+    return soonest_date, latest_date
+
+def is_over_schedule(schedule_object: panos.objects.ScheduleObject):
+    return True if datetime.now() > schedule_to_datetime(schedule_object.non_recurring_date_time)[1] else False

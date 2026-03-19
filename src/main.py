@@ -190,6 +190,12 @@ def parse_cli_args():
         help = "Enable DNS resolution of FQDN objects (mainly for group processing), using the provided DNS resolver IP",
     )
 
+    parser.add_argument(
+        "--parse-schedules", 
+        action = "store_true", 
+        help = "Check the schedule objects attached to rules, and delete expired schedules and associated rules"
+    )
+
     return parser.parse_args()
 
 
