@@ -191,9 +191,16 @@ def parse_cli_args():
     )
 
     parser.add_argument(
-        "--parse-schedules", 
-        action = "store_true", 
+        "--parse-schedules",
+        action = "store_true",
         help = "Check the schedule objects attached to rules, and delete expired schedules and associated rules"
+    )
+
+    parser.add_argument(
+        "--detect-shadow-rules",
+        action = "store_true",
+        help = "Detect shadow/redundant rules (rules whose traffic is already covered by a broader rule)",
+        default = False
     )
 
     return parser.parse_args()

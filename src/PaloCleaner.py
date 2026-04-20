@@ -111,6 +111,7 @@ class PaloCleaner:
         self._dns_resolver = None
         self._dns_resolutions = dict()
         self._parse_schedules = kwargs['parse_schedules']       # boolean, indicating if schedule objects should be used to analyze objects usage (and delete expired objects / rules)
+        self._detect_shadow_rules = kwargs['detect_shadow_rules']  # boolean, indicating if shadow rule detection should be performed
         if kwargs['dns_resolver']:
             self._dns_resolver = dns.resolver.Resolver()
             self._dns_resolver.nameservers = [kwargs['dns_resolver']]
@@ -370,69 +371,110 @@ class PaloCleaner:
                     progress.remove_task(dg_fetch_task)
 
                 # ----------------------------------------------------------------------------------
-                # --       Starting objects optimization (from deepest DG to shared)              --
+                # --              Shadow rule detection (if enabled)                              --
                 # ----------------------------------------------------------------------------------
-                self._console.print(
-                    Panel("[bold green] Optimizing objects duplicates",
-                          style="green"),
-                    justify="left")
-                # starting objects optimization from the most "depth" device-groups, up to "shared"
-                for depth, contexts in sorted(self._depthed_tree.items(), key=lambda x: x[0], reverse=True):
-                    for context_name in contexts:
-                        if context_name in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']:
-                            # initialize the console with a new context name (used when splitting reports)
-                            self.init_console(context_name)
-                            self._console.print(Panel(f"  [bold magenta]{context_name}  ", style="magenta"),
-                                              justify="left")
+                if self._detect_shadow_rules:
+                    from ShadowRuleDetector import ShadowRuleDetector
+                    self._console.print(
+                        Panel("[bold yellow]Detecting shadow/redundant rules",
+                              style="yellow"),
+                        justify="left")
 
-                            # Initializing a dict (on the global _replacements dict) which will contain information about the replacement
-                            # done for each object type at the current location
-                            self._replacements[context_name] = {'Address': dict(), 'Service': dict(), 'Tag': dict()}
+                    shadow_detector = ShadowRuleDetector(self)
 
-                            if context_name not in ['shared', 'predefined']:
-                                self._panorama.add(self._objects[context_name]['context'])
+                    # Analyze shared location
+                    shadow_task = progress.add_task("[ Panorama ] Detecting shadow rules",
+                                                    total=len(perimeter) + 1)
+                    shared_shadows = shadow_detector.analyze_location("shared")
+                    if shared_shadows:
+                        self._console.log(f"[ Panorama ] Found {len(shared_shadows)} shadow rule(s)")
+                    progress.update(shadow_task, advance=1)
 
-                            # if unused-only has not been specified (normal use-case), or if it has been used with protect-potential-replacements 
-                            # we need to start an objects optimization for the current context 
-                            # (note that the tiebreak tag will be added to choosen objects at this step)
-                            if self._unused_only is None or self._protect_potential_replacements:
-                                # OBJECTS OPTIMIZATION
-                                dg_optimize_task = progress.add_task(
-                                    f"[ {context_name} ] - Optimizing objects",
-                                    total=len(self._used_objects_sets[context_name])
-                                )
-                                self.optimize_objects(context_name, progress, dg_optimize_task)
-                                self._console.log(f"[ {context_name} ] Objects optimization done")
-                                progress.remove_task(dg_optimize_task)
+                    # Analyze each device-group
+                    for (context_name, dg) in perimeter:
+                        progress.update(shadow_task, description=f"[ {context_name} ] Detecting shadow rules")
+                        shadows = shadow_detector.analyze_location(context_name)
+                        if shadows:
+                            self._console.log(f"[ {context_name} ] Found {len(shadows)} shadow rule(s)")
+                        progress.update(shadow_task, advance=1)
 
-                            # if we have not specified an unused-only cleaning operation, we need to replace the non-optimal objects by their processed replacements (in groups, rules, etc)
-                            if self._unused_only is None:
-                                # OBJECTS REPLACEMENT IN GROUPS
-                                dg_replaceingroups_task = progress.add_task(
-                                    f"[ {context_name} ] Replacing objects in groups",
-                                    total=len(self._replacements[context_name]['Address']) + len(self._replacements[context_name]['Service'])
-                                )
-                                self.replace_object_in_groups(context_name, progress, dg_replaceingroups_task)
-                                self._console.log(f"[ {context_name} ] Objects replaced in groups")
-                                progress.remove_task(dg_replaceingroups_task)
+                    progress.remove_task(shadow_task)
 
-                                # OBJECTS REPLACEMENT IN RULEBASES
-                                dg_replaceinrules_task = progress.add_task(
-                                    f"[ {context_name} ] Replacing objects in rules",
-                                    total=self.count_rules(context_name)
-                                )
+                    # Print tables grouped by location and shadowing rule
+                    tables_by_loc = shadow_detector.get_tables_by_location()
+                    if tables_by_loc:
+                        for location, tables in tables_by_loc.items():
+                            self._console.print(Panel(f"[bold magenta]{location}[/]", style="magenta"))
+                            for table in tables:
+                                self._console.print(table)
+                                self._console.print("")
+                    else:
+                        self._console.log("No shadow rules detected.", style="green")
+                else:
+                    # ----------------------------------------------------------------------------------
+                    # --       Starting objects optimization (from deepest DG to shared)              --
+                    # ----------------------------------------------------------------------------------
+                    self._console.print(
+                        Panel("[bold green] Optimizing objects duplicates",
+                            style="green"),
+                        justify="left")
+                    # starting objects optimization from the most "depth" device-groups, up to "shared"
+                    for depth, contexts in sorted(self._depthed_tree.items(), key=lambda x: x[0], reverse=True):
+                        for context_name in contexts:
+                            if context_name in self._analysis_perimeter['direct'] + self._analysis_perimeter['indirect']:
+                                # initialize the console with a new context name (used when splitting reports)
+                                self.init_console(context_name)
+                                self._console.print(Panel(f"  [bold magenta]{context_name}  ", style="magenta"),
+                                                justify="left")
 
-                                self.replace_object_in_rulebase(context_name, progress, dg_replaceinrules_task)
-                                self._console.log(f"[ {context_name} ] Objects replaced in rulebases")
-                                progress.remove_task(dg_replaceinrules_task)
+                                # Initializing a dict (on the global _replacements dict) which will contain information about the replacement
+                                # done for each object type at the current location
+                                self._replacements[context_name] = {'Address': dict(), 'Service': dict(), 'Tag': dict()}
 
-                            # OBJECTS CLEANING (FOR FULLY INCLUDED DEVICE GROUPS ONLY)
-                            if context_name in self._analysis_perimeter['full']:
-                                self.clean_local_object_set(context_name)
-                                self._console.log(f"[ {context_name} ] Objects cleaned (fully included)")
+                                if context_name not in ['shared', 'predefined']:
+                                    self._panorama.add(self._objects[context_name]['context'])
 
-                            if context_name not in ['shared', 'predefined']:
-                                self._panorama.remove(self._objects[context_name]['context'])
+                                # if unused-only has not been specified (normal use-case), or if it has been used with protect-potential-replacements 
+                                # we need to start an objects optimization for the current context 
+                                # (note that the tiebreak tag will be added to choosen objects at this step)
+                                if self._unused_only is None or self._protect_potential_replacements:
+                                    # OBJECTS OPTIMIZATION
+                                    dg_optimize_task = progress.add_task(
+                                        f"[ {context_name} ] - Optimizing objects",
+                                        total=len(self._used_objects_sets[context_name])
+                                    )
+                                    self.optimize_objects(context_name, progress, dg_optimize_task)
+                                    self._console.log(f"[ {context_name} ] Objects optimization done")
+                                    progress.remove_task(dg_optimize_task)
+
+                                # if we have not specified an unused-only cleaning operation, we need to replace the non-optimal objects by their processed replacements (in groups, rules, etc)
+                                if self._unused_only is None:
+                                    # OBJECTS REPLACEMENT IN GROUPS
+                                    dg_replaceingroups_task = progress.add_task(
+                                        f"[ {context_name} ] Replacing objects in groups",
+                                        total=len(self._replacements[context_name]['Address']) + len(self._replacements[context_name]['Service'])
+                                    )
+                                    self.replace_object_in_groups(context_name, progress, dg_replaceingroups_task)
+                                    self._console.log(f"[ {context_name} ] Objects replaced in groups")
+                                    progress.remove_task(dg_replaceingroups_task)
+
+                                    # OBJECTS REPLACEMENT IN RULEBASES
+                                    dg_replaceinrules_task = progress.add_task(
+                                        f"[ {context_name} ] Replacing objects in rules",
+                                        total=self.count_rules(context_name)
+                                    )
+
+                                    self.replace_object_in_rulebase(context_name, progress, dg_replaceinrules_task)
+                                    self._console.log(f"[ {context_name} ] Objects replaced in rulebases")
+                                    progress.remove_task(dg_replaceinrules_task)
+
+                                # OBJECTS CLEANING (FOR FULLY INCLUDED DEVICE GROUPS ONLY)
+                                if context_name in self._analysis_perimeter['full']:
+                                    self.clean_local_object_set(context_name)
+                                    self._console.log(f"[ {context_name} ] Objects cleaned (fully included)")
+
+                                if context_name not in ['shared', 'predefined']:
+                                    self._panorama.remove(self._objects[context_name]['context'])
 
 
             self.init_console("report")
