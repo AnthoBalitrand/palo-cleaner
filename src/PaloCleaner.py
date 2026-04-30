@@ -3312,6 +3312,19 @@ class PaloCleaner:
         # If they are not, they can be deleted
         # We start by the groups (removing all members before deleting the group, to avoid inter-dependency between groups)
         # Then we delete AddressObjects and ServiceObjects, then Tags
+        # Mapping from Python class names to Panorama CLI object types
+        CLI_OBJECT_TYPE_MAP = {
+            'AddressGroup': 'address-group',
+            'AddressObject': 'address',
+            'ServiceGroup': 'service-group',
+            'ServiceObject': 'service',
+            'ScheduleObject': 'schedule',
+            'Tag': 'tag',
+        }
+
+        # List to collect CLI commands for deletion
+        cli_delete_commands = []
+
         def delete_local_objects_bulk(jobs_queue: Queue, dg: DeviceGroup, lock=None, thread_id=0):
 
             while True:
@@ -3322,8 +3335,8 @@ class PaloCleaner:
                     obj_type = list(obj_item.keys())[0]
                     obj_instance = obj_item[obj_type]
 
-                    # This is for delete_similar reference
-                    first_to_be_deleted = None
+                    # Collect all objects to be deleted for this type
+                    objects_to_delete = []
 
                     for o in self._objects[location_name][obj_type]:
                         if type(o) is obj_instance:
@@ -3332,7 +3345,7 @@ class PaloCleaner:
                                 if o.tag:
                                     self._console.log(f"[ {location_name} ] Object has tags : {o.tag}", level=2)
                                     #if set(o.tag).intersection(self._protect_tags) or o.name in indirect_protect[obj_type]:
-                                    if set(o.tag).intersection(self._protect_tags) or o.name in self._indirect_protect[location_name][obj_type]:
+                                    if set(o.tag).intersection(self._protect_tags) or o.name in self._indirect_protect.get(location_name, {}).get(obj_type, set()):
                                         # protecting the other tags used on the protected object from being deleted later
                                         # this is done for all type of objects (Service, Address, ServiceGroup, AddressGroup)
                                         #indirect_protect["Tag"].update(o.tag)
@@ -3348,11 +3361,11 @@ class PaloCleaner:
                                                 self._console.log(f"[ {location_name} ] Object {o.name} ({obj_instance.__name__}) has static members. Flattening to protect all linked objects")
                                                 linked_objects = self.flatten_object(o, location_name, location_name, resolved_cache=resolved_cache)
 
-                                                for (o, o_location) in linked_objects:
-                                                    shorten_type = PaloCleanerTools.shorten_object_type(o.__class__.__name__)
-                                                    self._console.log(f"[ {o_location} ] Protecting object {o.name} ({o.__class__.__name__} / {shorten_type})", level=2)
-                                                    #indirect_protect[shorten_type].add(o.name)
-                                                    self.add_indirect_protect(o_location, shorten_type, o.name)
+                                                for (linked_obj, linked_obj_location) in linked_objects:
+                                                    shorten_type = PaloCleanerTools.shorten_object_type(linked_obj.__class__.__name__)
+                                                    self._console.log(f"[ {linked_obj_location} ] Protecting object {linked_obj.name} ({linked_obj.__class__.__name__} / {shorten_type})", level=2)
+                                                    #indirect_protect[shorten_type].add(linked_obj.name)
+                                                    self.add_indirect_protect(linked_obj_location, shorten_type, linked_obj.name)
                                         continue
                             except AttributeError as e:
                                 pass
@@ -3360,36 +3373,40 @@ class PaloCleaner:
                                 self._console.log(f"UNKNOWN EXCEPTION : {e}", style="red")
 
                             #if o.name in indirect_protect[obj_type]:
-                            if o.name in self._indirect_protect[location_name][obj_type]:
-                                self._console.log(f"[ {o_location} ] {o.name} ({type(obj)}) has been found on _indirect_protect list")
+                            if o.name in self._indirect_protect.get(location_name, {}).get(obj_type, set()):
+                                self._console.log(f"[ {location_name} ] {o.name} ({type(o)}) has been found on _indirect_protect list")
                                 continue
 
-                            if not (o, location_name) in self._used_objects_sets[location_name]:
-                                if self._apply_cleaning:
-                                    dg.add(o)
-                                if not first_to_be_deleted:
-                                    first_to_be_deleted = o
-                            else:
+                            if (o, location_name) not in self._used_objects_sets[location_name]:
+                                # Object is not used - mark for deletion
+                                objects_to_delete.append(o)
+                                self._cleaning_counts[location_name][obj_type]['removed'] += 1
                                 self._console.log(
-                                    f"[ {location_name} ] [Thread-{thread_id}] Object {o.name} ({o.__class__.__name__}) can be deleted")
-                            self._cleaning_counts[location_name][obj_type]['removed'] += 1
-
-
-                    if self._apply_cleaning and first_to_be_deleted:
-                        try:
-                            # if objects to be deleted are static groups, first empty them to avoid deletion issues because of circular references
-                            # this cannot be done as a bulk action as apply_similar would delete all other groups, and create_similar would not to anything (merging members)
-                            if isinstance(first_to_be_deleted, AddressGroup):
-                                #filtering on static groups only
-                                for child_add_group in [g for g in dg.children if g.static_value]:
-                                    self._console.log(f"[ {location_name} ] Preparing bulk action to empty group {child_add_group.name}")
-                                    child_add_group.static_value = list()
-                                    child_add_group.apply()
+                                    f"[ {location_name} ] [Thread-{thread_id}] Object {o.name} ({o.__class__.__name__}) marked for deletion", level=2)
                             else:
-                                self._console.log(f"[ {location_name} ] Sending bulk action for deletion of {o.__class__.__name__}")
-                            first_to_be_deleted.delete_similar()
-                        except Exception as e:
-                            self._console.log(f"[ {location_name} ] ERROR with bulk action : {e}", style="red")
+                                # Object is still in use - keep it
+                                self._console.log(
+                                    f"[ {location_name} ] [Thread-{thread_id}] Object {o.name} ({o.__class__.__name__}) is still in use, skipping", level=2)
+
+                    # Generate CLI commands for manual deletion (bulk API not supported in Panorama)
+                    if objects_to_delete:
+                        # Determine CLI location prefix
+                        if location_name == "shared":
+                            cli_location = "shared"
+                        else:
+                            cli_location = f"device-group {location_name}"
+
+                        # Get CLI object type
+                        cli_obj_type = CLI_OBJECT_TYPE_MAP.get(obj_instance.__name__, obj_instance.__name__.lower())
+
+                        # Generate delete commands for each object
+                        for obj in objects_to_delete:
+                            cmd = f"delete {cli_location} {cli_obj_type} \"{obj.name}\""
+                            cli_delete_commands.append(cmd)
+
+                        self._console.log(
+                            f"[ {location_name} ] Generated {len(objects_to_delete)} CLI delete commands for {obj_instance.__name__}")
+
                 except Exception as e:
                     self._console.log(
                         f"[ {location_name} ] [Thread-{thread_id}] Unknown error on delete_local_objects() : {e}"
@@ -3416,10 +3433,32 @@ class PaloCleaner:
             for obj_item in [v for k, v in sorted(cleaning_order.items())]:
                 # populate the jobs_queue with those items in the right cleaning order 
                 jobs_queue.put(obj_item)
-            # start the bulk deletion of objects 
+            # start the bulk deletion of objects
             delete_local_objects_bulk(jobs_queue, local_dg)
-            # wait for all jobs to be done 
+            # wait for all jobs to be done
             jobs_queue.join()
+
+            # Output CLI delete commands (bulk API deletion not supported in Panorama)
+            if cli_delete_commands:
+                self._console.log(f"[ {location_name} ] {len(cli_delete_commands)} CLI delete commands generated", style="yellow")
+
+                if self._no_report:
+                    # Output to stdout
+                    print(f"\n# CLI delete commands for {location_name} ({len(cli_delete_commands)} commands)")
+                    print("# Run these commands in Panorama CLI to delete objects:")
+                    for cmd in cli_delete_commands:
+                        print(cmd)
+                    print()
+                else:
+                    # Write to file in report folder
+                    cli_file_path = f"{self._report_folder}/delete_commands_{location_name}.txt"
+                    with open(cli_file_path, 'w') as f:
+                        f.write(f"# CLI delete commands for {location_name}\n")
+                        f.write(f"# Generated by PaloCleaner - {len(cli_delete_commands)} commands\n")
+                        f.write("# Run these commands in Panorama CLI to delete objects:\n\n")
+                        for cmd in cli_delete_commands:
+                            f.write(cmd + "\n")
+                    self._console.log(f"[ {location_name} ] CLI delete commands written to {cli_file_path}")
         else:
             # for each object type in the list [{"Address": AddressGroup}, {"Service": ServiceGroup}, ...]
             for obj_item in [v for k, v in sorted(cleaning_order.items())]:

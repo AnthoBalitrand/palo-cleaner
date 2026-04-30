@@ -39,6 +39,7 @@ class NormalizedRule:
     applications: Set[str] = field(default_factory=set)
     source_users: Set[str] = field(default_factory=set)  # User-ID filtering
     categories: Set[str] = field(default_factory=set)  # URL category filtering
+    url_filtering: Optional[str] = None  # URL filtering profile name
     action: str = "allow"
     disabled: bool = False
 
@@ -156,6 +157,22 @@ def is_category_subset(subset: Set[str], superset: Set[str]) -> bool:
     return subset.issubset(superset)
 
 
+def is_url_filtering_match(profile_a: Optional[str], profile_b: Optional[str]) -> bool:
+    """
+    Check if URL filtering profiles match.
+    Rules must have the same profile (or both have none) to be considered shadows.
+    Different profiles mean different traffic handling.
+    """
+    # Both None or empty - match
+    if not profile_a and not profile_b:
+        return True
+    # One has profile, other doesn't - no match
+    if not profile_a or not profile_b:
+        return False
+    # Both have profiles - must be the same
+    return profile_a == profile_b
+
+
 def is_fqdn_subset(subset: Set[str], superset: Set[str]) -> bool:
     """
     Check if FQDNs in subset are covered by superset.
@@ -245,7 +262,11 @@ def is_shadowed_by(rule_a: NormalizedRule, rule_b: NormalizedRule) -> Optional[s
     # URL category check
     if not is_category_subset(rule_a.categories, rule_b.categories):
         return None
-    
+
+    # URL filtering profile check (must match exactly)
+    if not is_url_filtering_match(rule_a.url_filtering, rule_b.url_filtering):
+        return None
+
     # Determine shadow type
     src_ip_exact = set(rule_a.source_ips) == set(rule_b.source_ips)
     src_fqdn_exact = rule_a.source_fqdns == rule_b.source_fqdns
@@ -255,9 +276,10 @@ def is_shadowed_by(rule_a: NormalizedRule, rule_b: NormalizedRule) -> Optional[s
     app_exact = rule_a.applications == rule_b.applications
     user_exact = rule_a.source_users == rule_b.source_users
     cat_exact = rule_a.categories == rule_b.categories
+    url_filter_exact = rule_a.url_filtering == rule_b.url_filtering
 
     if (src_ip_exact and src_fqdn_exact and dst_ip_exact and dst_fqdn_exact and
-            svc_exact and app_exact and user_exact and cat_exact):
+            svc_exact and app_exact and user_exact and cat_exact and url_filter_exact):
         return "exact"
     return "subset"
 
@@ -335,7 +357,7 @@ class ShadowRuleDetector:
         # Extract service strings from all flattened ServiceObjects
         from PaloCleanerTools import stringify_service
         result = set()
-        for flat_obj, flat_loc in flattened:
+        for flat_obj, _ in flattened:
             if isinstance(flat_obj, panos.objects.ServiceObject):
                 result.add(stringify_service(flat_obj))
             # Skip ServiceGroups (they're containers)
@@ -396,6 +418,10 @@ class ShadowRuleDetector:
             normalized.categories = set(rule.category)
         else:
             normalized.categories = {"any"}
+
+        # URL filtering profile
+        if hasattr(rule, 'url_filtering') and rule.url_filtering:
+            normalized.url_filtering = rule.url_filtering
 
         return normalized
 
@@ -493,59 +519,118 @@ class ShadowRuleDetector:
 
         return all_results
 
+    @staticmethod
+    def _format_field(values, max_items: int = 3) -> str:
+        """Format a list/set of values, showing max_items with '...' if truncated"""
+        if not values:
+            return "any"
+        items = list(values)[:max_items]
+        result = "\n".join(str(v) for v in items)
+        if len(values) > max_items:
+            result += "\n..."
+        return result
+
     def get_tables_by_location(self) -> Dict[str, List[Any]]:
         """
-        Generate Rich Table objects grouped by location, then by shadowing rule.
+        Generate Rich Table objects grouped by location, then by shadowing (master) rule.
         Returns a dict: {location: [Table, Table, ...]}
-        Each table represents one shadowing rule and all rules it shadows.
+        Each table shows an "ultimate master" rule at the top and all redundant rules below.
+        Only rules that are NOT themselves shadowed by another rule are shown as masters.
         """
         from rich.table import Table
 
         if not self._shadow_results:
             return {}
 
-        # Group by location, then by shadowing rule
-        by_location = {}
+        # First, identify all rules that are shadowed by something (per location)
+        # These cannot be "ultimate masters"
+        shadowed_rules_by_location: Dict[str, Set[str]] = {}
+        for result in self._shadow_results:
+            loc = result.shadowed_rule.location
+            if loc not in shadowed_rules_by_location:
+                shadowed_rules_by_location[loc] = set()
+            shadowed_rules_by_location[loc].add(result.shadowed_rule.name)
+
+        # Group by location, then by shadowing rule (the master rule)
+        by_location: Dict[str, Dict[str, List[ShadowResult]]] = {}
         for result in self._shadow_results:
             loc = result.shadowed_rule.location
             if loc not in by_location:
                 by_location[loc] = {}
 
+            # Group by the SHADOWING rule (the master that covers others)
             shadowing_key = result.shadowing_rule.name
             if shadowing_key not in by_location[loc]:
-                by_location[loc][shadowing_key] = {
-                    'shadowing_rule': result.shadowing_rule,
-                    'shadowed': []
-                }
-            by_location[loc][shadowing_key]['shadowed'].append(result)
+                by_location[loc][shadowing_key] = []
+            by_location[loc][shadowing_key].append(result)
 
         tables = {}
         for location, by_shadowing in by_location.items():
             location_tables = []
+            shadowed_rules = shadowed_rules_by_location.get(location, set())
 
-            for shadowing_name, data in by_shadowing.items():
-                shadowing_rule = data['shadowing_rule']
-                shadowed_results = data['shadowed']
+            for shadowing_name, shadow_results in by_shadowing.items():
+                # Skip this "master" if it is itself shadowed by another rule
+                # (it's not an "ultimate master")
+                if shadowing_name in shadowed_rules:
+                    continue
 
-                # Create a table for each shadowing rule
+                # Get the shadowing (master) rule
+                shadowing_rule = shadow_results[0].shadowing_rule
+                master_rule = shadowing_rule.rule_ref
+
+                # Create a table for each master rule
                 table = Table(
-                    title=f"[bold green]{shadowing_name}[/] shadows {len(shadowed_results)} rule(s)",
+                    title=f"[bold green]{shadowing_name}[/] covers {len(shadow_results)} rule(s) that can be deleted",
                     show_header=True,
                     header_style="bold cyan",
                     title_style="yellow",
                     border_style="dim",
                     show_lines=True,
-                    caption=f"Action: {shadowing_rule.action} | Location: {location}"
+                    caption=f"Location: {location}"
                 )
-                table.add_column("#", style="dim", width=4, justify="right")
-                table.add_column("Shadowed Rule (redundant)", style="red", no_wrap=False)
-                table.add_column("Type", style="yellow", width=8, justify="center")
+                table.add_column("Rule", style="bold", width=40)
+                table.add_column("Src Zones", width=15)
+                table.add_column("Source", width=18)
+                table.add_column("Dst Zones", width=15)
+                table.add_column("Destination", width=18)
+                table.add_column("Services", width=15)
+                table.add_column("Apps", width=15)
+                table.add_column("Users", width=15)
+                table.add_column("Categories", width=15)
+                table.add_column("Action", width=8, justify="center")
 
-                for idx, r in enumerate(shadowed_results, 1):
+                # Add master rule row at the top (green - KEEP this rule)
+                table.add_row(
+                    f"{shadowing_name} (KEEP)",
+                    self._format_field(master_rule.fromzone),
+                    self._format_field(master_rule.source),
+                    self._format_field(master_rule.tozone),
+                    self._format_field(master_rule.destination),
+                    self._format_field(master_rule.service),
+                    self._format_field(master_rule.application),
+                    self._format_field(master_rule.source_user),
+                    self._format_field(master_rule.category),
+                    shadowing_rule.action,
+                    style="green"
+                )
+
+                # Add shadowed rules below (dim - these are redundant and can be DELETED)
+                for result in shadow_results:
+                    shadowed = result.shadowed_rule
+                    srule = shadowed.rule_ref
                     table.add_row(
-                        str(idx),
-                        r.shadowed_rule.name,
-                        r.shadow_type
+                        f"  {shadowed.name} ({result.shadow_type})",
+                        self._format_field(srule.fromzone),
+                        self._format_field(srule.source),
+                        self._format_field(srule.tozone),
+                        self._format_field(srule.destination),
+                        self._format_field(srule.service),
+                        self._format_field(srule.application),
+                        self._format_field(srule.source_user),
+                        self._format_field(srule.category),
+                        shadowed.action,
+                        style="dim"
                     )
 
                 location_tables.append(table)

@@ -223,6 +223,15 @@ def main():
         print("\n Error - --bulk-operations cannot be used in conjunction with --multithread \n")
         exit(0)
 
+    if start_cli_args.bulk_operations:
+        print("\n WARNING - Bulk API deletion is no longer supported in Panorama.")
+        print(" Object deletion commands will be generated as CLI commands that must be")
+        print(" executed manually in Panorama CLI.")
+        if start_cli_args.no_report:
+            print(" Commands will be printed to stdout.\n")
+        else:
+            print(" Commands will be written to files in the report folder.\n")
+
     # create the report directory if requested
     report_folder = None
     if not start_cli_args.no_report:
