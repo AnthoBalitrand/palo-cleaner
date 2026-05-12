@@ -112,6 +112,8 @@ class PaloCleaner:
         self._dns_resolutions = dict()
         self._parse_schedules = kwargs['parse_schedules']       # boolean, indicating if schedule objects should be used to analyze objects usage (and delete expired objects / rules)
         self._detect_shadow_rules = kwargs['detect_shadow_rules']  # boolean, indicating if shadow rule detection should be performed
+        self._detect_shadow_objects = kwargs.get('detect_shadow_objects', False)  # boolean, detect shadow objects in rule fields
+        self._detect_shadow_group_members = kwargs.get('detect_shadow_group_members', False)  # boolean, detect shadow members in groups
         if kwargs['dns_resolver']:
             self._dns_resolver = dns.resolver.Resolver()
             self._dns_resolver.nameservers = [kwargs['dns_resolver']]
@@ -369,6 +371,48 @@ class PaloCleaner:
                     self.fetch_used_obj_set(dg.about()['name'], progress, dg_fetch_task)
                     self._console.log(f"[ {dg.about()['name']} ] Used objects set processed")
                     progress.remove_task(dg_fetch_task)
+
+                # ----------------------------------------------------------------------------------
+                # --     Shadow group members detection (if enabled)                             --
+                # ----------------------------------------------------------------------------------
+                if self._detect_shadow_group_members:
+                    from ShadowObjectDetector import ShadowObjectDetector
+                    self._console.print(
+                        Panel("[bold yellow]Detecting shadow members in groups",
+                              style="yellow"),
+                        justify="left")
+
+                    shadow_grp_detector = ShadowObjectDetector(self)
+                    shadow_grp_task = progress.add_task("[ Panorama ] Detecting shadow group members",
+                                                        total=len(perimeter) + 1)
+
+                    shadow_grp_detector.analyze_groups_at_location("shared")
+                    progress.update(shadow_grp_task, advance=1)
+
+                    for (context_name, dg) in perimeter:
+                        progress.update(shadow_grp_task, description=f"[ {context_name} ] Detecting shadow group members")
+                        shadow_grp_detector.analyze_groups_at_location(context_name)
+                        progress.update(shadow_grp_task, advance=1)
+
+                    progress.remove_task(shadow_grp_task)
+
+                    # Display results
+                    tables_by_loc = shadow_grp_detector.get_tables_by_location()
+                    if tables_by_loc:
+                        for location, tables in tables_by_loc.items():
+                            self._console.print(Panel(f"[bold magenta]{location}[/]", style="magenta"))
+                            for table in tables:
+                                self._console.print(table)
+                                self._console.print("")
+                    else:
+                        self._console.log("No shadow group members detected.", style="green")
+
+                    # Apply group cleaning
+                    for (context_name, dg) in perimeter:
+                        shadow_grp_detector.apply_group_cleaning(context_name)
+                    shadow_grp_detector.apply_group_cleaning("shared")
+
+                    self._console.log(shadow_grp_detector.get_summary())
 
                 # ----------------------------------------------------------------------------------
                 # --              Shadow rule detection (if enabled)                              --
@@ -2656,6 +2700,11 @@ class PaloCleaner:
                     tab_headers[rule_type.__name__].append(field[0] if type(field) is list else field)
             tab_headers[rule_type.__name__] += ["rule_modification_timestamp", "last_hit_timestamp", "changed"]
 
+        shadow_obj_detector = None
+        if self._detect_shadow_objects:
+            from ShadowObjectDetector import ShadowObjectDetector
+            shadow_obj_detector = ShadowObjectDetector(self)
+
         def replace_in_rule(rule, editable_rule):
             """
             This function will perform the changes (replacing objects with the best replacement found) on each rule
@@ -2769,6 +2818,34 @@ class PaloCleaner:
 
                             unique_field_values.add(o)
 
+                        # Shadow object detection: find objects whose IP coverage is already
+                        # included by another object in the same field (after regular replacements)
+                        if self._detect_shadow_objects and obj_type == "Address" and field_type is list:
+                            resulting_objects = [x for x in field_values if x not in items_to_remove] + items_to_add
+                            if len(resulting_objects) > 1 and resulting_objects != ["any"]:
+                                shadows = shadow_obj_detector._find_shadows_in_object_list(resulting_objects, location_name)
+                                for shadowed_name, shadowing_names, shadow_type in shadows:
+                                    if shadowed_name not in items_to_remove and len(resulting_objects) > 1:
+                                        if shadowed_name in items_to_add:
+                                            items_to_add.remove(shadowed_name)
+                                        else:
+                                            items_to_remove.append(shadowed_name)
+                                        resulting_objects.remove(shadowed_name)
+                                        covering = ", ".join(shadowing_names)
+                                        # Replace existing entry for this object (type 0 or 3) with the shadow entry
+                                        shadow_entry = (f"{shadowed_name} (covered by {covering})", 4)
+                                        replaced_existing = False
+                                        for idx, (entry_name, entry_type) in enumerate(replacements_done[obj_type][field_name]):
+                                            if entry_name.startswith(shadowed_name) and entry_type in (0, 3):
+                                                replacements_done[obj_type][field_name][idx] = shadow_entry
+                                                replaced_existing = True
+                                                break
+                                        if not replaced_existing:
+                                            replacements_done[obj_type][field_name].append(shadow_entry)
+                                            current_field_replacements_count += 1
+                                        replacements_count += 1
+                                        any_change_done = True
+
                         # if the rule can be modified (and cleaning application has been requested), change the current
                         # field value to the appropriate one, and apply the change
                         if editable_rule:
@@ -2810,8 +2887,8 @@ class PaloCleaner:
             :return:
             """
 
-            type_map = {0: '', 1: 'yellow', 2: 'red', 3: 'green'}
-            action_map = {0: ' ', 1: '!', 2: '-', 3: '+'}
+            type_map = {0: '', 1: 'yellow', 2: 'red', 3: 'green', 4: 'magenta'}
+            action_map = {0: ' ', 1: '!', 2: '-', 3: '+', 4: '~'}
             formatted_return = f"[{type_map[repl_type]}]" if repl_type > 0 else ""
             formatted_return += f"{action_map[repl_type]} {repl_name}"
             formatted_return += f"[/{type_map[repl_type]}]" if repl_type > 0 else ""

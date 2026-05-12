@@ -203,6 +203,20 @@ def parse_cli_args():
         default = False
     )
 
+    parser.add_argument(
+        "--detect-shadow-objects",
+        action = "store_true",
+        help = "Detect and remove address objects in rules that are already covered by another object/group in the same rule field",
+        default = False
+    )
+
+    parser.add_argument(
+        "--detect-shadow-group-members",
+        action = "store_true",
+        help = "Detect and remove address group members that are already covered by another member in the same group",
+        default = False
+    )
+
     return parser.parse_args()
 
 
