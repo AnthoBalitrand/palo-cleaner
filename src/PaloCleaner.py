@@ -1116,12 +1116,34 @@ class PaloCleaner:
                             # used_object.name = the name of the object where the member has been found (= the group name, actually)
                             # recursion_level = the current recursion_level + 1
 
+                            # First, lookup from usage_base (finds shadowing object if exists, or actual member)
                             obj_set += flatten_object_recurser(
-                                *self.get_relative_object_location(group_member,usage_base),
+                                *self.get_relative_object_location(group_member, usage_base),
                                 usage_base,
                                 used_object.__class__.__name__ if referencer_type != "AGprocessor" else referencer_type,
                                 used_object.name if referencer_name != "AGprocessor" else referencer_name,
                                 recursion_level + 1)
+
+                            # FIX: In --unused-only mode, if the group is at a higher level than usage,
+                            # also protect the member at the group's level.
+                            # This handles the case where a same-named object shadows the actual group member.
+                            # In optimization mode, we skip this to allow replacing redundant shadowing objects.
+                            if self._unused_only is not None and object_location != usage_base and referencer_type != 'AGprocessor':
+                                member_at_group_level = self.get_relative_object_location(group_member, object_location)
+                                if member_at_group_level[0] is not None:
+                                    # Check if we found a different object than what we found from usage_base
+                                    member_from_usage = self.get_relative_object_location(group_member, usage_base)
+                                    if member_at_group_level[1] != member_from_usage[1]:
+                                        # The member at group level is different (shadowed) - protect it too
+                                        self._console.log(
+                                            f"[ {object_location} ] {'*' * recursion_level} Also protecting shadowed member {group_member!r} at group level {object_location}",
+                                            style="yellow", level=2)
+                                        obj_set += flatten_object_recurser(
+                                            *member_at_group_level,
+                                            object_location,
+                                            used_object.__class__.__name__,
+                                            used_object.name,
+                                            recursion_level + 1)
 
                     # the condition below permits to "protect" the group members (at group level) if they are overriden at a lower location
                     # if the current referencer_type is 'AGprocessor', we are in the groups processing run 
@@ -1224,6 +1246,27 @@ class PaloCleaner:
                                 used_object.__class__.__name__,
                                 used_object.name,
                                 recursion_level + 1)
+
+                            # FIX: In --unused-only mode, if the group is at a higher level than usage,
+                            # also protect the member at the group's level.
+                            # This handles the case where a same-named object shadows the actual group member.
+                            # In optimization mode, we skip this to allow replacing redundant shadowing objects.
+                            if self._unused_only is not None and object_location != usage_base and referencer_type != 'AGprocessor':
+                                member_at_group_level = self.get_relative_object_location(group_member, object_location, obj_type="Service")
+                                if member_at_group_level[0] is not None:
+                                    # Check if we found a different object than what we found from usage_base
+                                    member_from_usage = self.get_relative_object_location(group_member, usage_base, obj_type="Service")
+                                    if member_at_group_level[1] != member_from_usage[1]:
+                                        # The member at group level is different (shadowed) - protect it too
+                                        self._console.log(
+                                            f"[ {object_location} ] {'*' * recursion_level} Also protecting shadowed service member {group_member!r} at group level {object_location}",
+                                            style="yellow", level=2)
+                                        obj_set += flatten_object_recurser(
+                                            *member_at_group_level,
+                                            object_location,
+                                            used_object.__class__.__name__,
+                                            used_object.name,
+                                            recursion_level + 1)
 
             # checking if the resolved objects has tags (which needs to be added to the used_object_set too)
             # checking if used_object is not None permits to avoid cases where unsupported objects are used on the rule
@@ -3412,46 +3455,62 @@ class PaloCleaner:
                     obj_type = list(obj_item.keys())[0]
                     obj_instance = obj_item[obj_type]
 
-                    # Collect all objects to be deleted for this type
+                    # FIRST PASS: Identify all protected objects and populate _indirect_protect
+                    # This ensures that members of protected groups are marked before deciding on deletion
+                    for o in self._objects[location_name][obj_type]:
+                        if type(o) is obj_instance:
+                            try:
+                                if o.tag:
+                                    tag_match = set(o.tag).intersection(self._protect_tags)
+                                    in_indirect = o.name in self._indirect_protect.get(location_name, {}).get(obj_type, set())
+
+                                    if tag_match or in_indirect:
+                                        # protecting the other tags used on the protected object from being deleted later
+                                        for current_tag in o.tag:
+                                            tag_obj, tag_location = self.get_relative_object_location(current_tag, location_name, obj_type="Tag")
+                                            if tag_location:
+                                                self.add_indirect_protect(tag_location, "Tag", current_tag)
+
+                                        # in case of a protected group, protecting the members from being deleted later
+                                        if "Group" in obj_instance.__name__:
+                                            if o.static_value:
+                                                self._console.log(f"[ {location_name} ] Object {o.name} ({obj_instance.__name__}) has static members. Flattening to protect all linked objects")
+                                                # Use a fresh cache for each protection flattening
+                                                protection_cache = dict({'Address': dict(), 'Service': dict(), 'Tag': dict()})
+                                                linked_objects = self.flatten_object(o, location_name, location_name, resolved_cache=protection_cache)
+
+                                                for (linked_obj, linked_obj_location) in linked_objects:
+                                                    shorten_type = PaloCleanerTools.shorten_object_type(linked_obj.__class__.__name__)
+                                                    self._console.log(f"[ {linked_obj_location} ] Protecting object {linked_obj.name} ({linked_obj.__class__.__name__} / {shorten_type})", level=2)
+                                                    self.add_indirect_protect(linked_obj_location, shorten_type, linked_obj.name)
+                            except AttributeError:
+                                pass
+                            except Exception as e:
+                                self._console.log(f"UNKNOWN EXCEPTION in protection pass: {e}", style="red")
+
+                    # SECOND PASS: Collect objects to be deleted, now that _indirect_protect is fully populated
                     objects_to_delete = []
 
                     for o in self._objects[location_name][obj_type]:
                         if type(o) is obj_instance:
                             self._console.log(f"[ {location_name} ] Checking tag protection of object {o.name} ({obj_instance.__name__})", level=2)
+
+                            # Check if protected by tag or indirect_protect
+                            is_protected = False
                             try:
                                 if o.tag:
                                     self._console.log(f"[ {location_name} ] Object has tags : {o.tag}", level=2)
-                                    #if set(o.tag).intersection(self._protect_tags) or o.name in indirect_protect[obj_type]:
                                     if set(o.tag).intersection(self._protect_tags) or o.name in self._indirect_protect.get(location_name, {}).get(obj_type, set()):
-                                        # protecting the other tags used on the protected object from being deleted later
-                                        # this is done for all type of objects (Service, Address, ServiceGroup, AddressGroup)
-                                        #indirect_protect["Tag"].update(o.tag)
-                                        for current_tag in o.tag:
-                                            tag_obj, tag_location = self.get_relative_object_location(current_tag, location_name, obj_type="Tag")
-                                            self.add_indirect_protect(tag_location, "Tag", o.tag)
-
-                                        # in case of a protected group, protecting the members from being deleted later (+ all associated objects, like tags)
-                                        # this is done only for static groups, using the flatten_objects method
-                                        # dynamic groups members are not protected (except if they have a --protect-tags matching tag)
-                                        if "Group" in obj_instance.__name__:
-                                            if o.static_value:
-                                                self._console.log(f"[ {location_name} ] Object {o.name} ({obj_instance.__name__}) has static members. Flattening to protect all linked objects")
-                                                linked_objects = self.flatten_object(o, location_name, location_name, resolved_cache=resolved_cache)
-
-                                                for (linked_obj, linked_obj_location) in linked_objects:
-                                                    shorten_type = PaloCleanerTools.shorten_object_type(linked_obj.__class__.__name__)
-                                                    self._console.log(f"[ {linked_obj_location} ] Protecting object {linked_obj.name} ({linked_obj.__class__.__name__} / {shorten_type})", level=2)
-                                                    #indirect_protect[shorten_type].add(linked_obj.name)
-                                                    self.add_indirect_protect(linked_obj_location, shorten_type, linked_obj.name)
-                                        continue
-                            except AttributeError as e:
+                                        is_protected = True
+                            except AttributeError:
                                 pass
-                            except Exception as e:
-                                self._console.log(f"UNKNOWN EXCEPTION : {e}", style="red")
 
-                            #if o.name in indirect_protect[obj_type]:
-                            if o.name in self._indirect_protect.get(location_name, {}).get(obj_type, set()):
+                            # Also check _indirect_protect for objects without tags
+                            if not is_protected and o.name in self._indirect_protect.get(location_name, {}).get(obj_type, set()):
+                                is_protected = True
                                 self._console.log(f"[ {location_name} ] {o.name} ({type(o)}) has been found on _indirect_protect list")
+
+                            if is_protected:
                                 continue
 
                             if (o, location_name) not in self._used_objects_sets[location_name]:
@@ -3539,40 +3598,63 @@ class PaloCleaner:
         else:
             # for each object type in the list [{"Address": AddressGroup}, {"Service": ServiceGroup}, ...]
             for obj_item in [v for k, v in sorted(cleaning_order.items())]:
-                # for each object having the "Address", "Service" or "Tag" object type
+                # FIRST PASS: Identify all protected objects and populate _indirect_protect
+                # This ensures that members of protected groups are marked before queuing for deletion
                 for obj in self._objects[location_name][list(obj_item.keys())[0]]:
-                    # if the current object type is the one being actually cleaned (AddressObject, AddressGroup...) 
+                    if type(obj) is obj_item[list(obj_item.keys())[0]]:
+                        shortened_obj_type = PaloCleanerTools.shorten_object_type(obj.__class__.__name__)
+                        try:
+                            if obj.tag:
+                                tag_intersection = set(obj.tag).intersection(self._protect_tags)
+                                in_indirect = obj.name in self._indirect_protect.get(location_name, dict()).get(shortened_obj_type, list())
+
+                                if tag_intersection or in_indirect:
+                                    # object is protected by tags, protect all other used tags at their location
+                                    for current_tag in obj.tag:
+                                        tag_obj, tag_location = self.get_relative_object_location(current_tag, location_name, obj_type="Tag")
+                                        if tag_location:
+                                            self.add_indirect_protect(tag_location, "Tag", current_tag)
+                                    if "Group" in obj.__class__.__name__:
+                                        if obj.static_value:
+                                            self._console.log(f"[ {location_name} ] Object {obj.name} ({obj.__class__.__name__}) has static members. Flattening to protect all linked objects")
+                                            # Use a fresh resolved_cache for each protection flattening to ensure all members are found
+                                            protection_cache = dict({'Address': dict(), 'Service': dict(), 'Tag': dict()})
+                                            linked_objects = self.flatten_object(obj, location_name, location_name, resolved_cache=protection_cache)
+
+                                            for (o, o_location) in linked_objects:
+                                                member_shortened_type = PaloCleanerTools.shorten_object_type(o.__class__.__name__)
+                                                self._console.log(f"[ {o_location} ] Protecting object {o.name} ({o.__class__.__name__} / {member_shortened_type})", level=2)
+                                                self.add_indirect_protect(o_location, member_shortened_type, o.name)
+                        except AttributeError:
+                            pass
+                        except Exception as e:
+                            self._console.log(f"ERROR - UNKNOWN EXCEPTION in protection pass: {e}", style="red")
+
+                # SECOND PASS: Queue objects for deletion, now that _indirect_protect is fully populated
+                for obj in self._objects[location_name][list(obj_item.keys())[0]]:
                     if type(obj) is obj_item[list(obj_item.keys())[0]]:
                         shortened_obj_type = PaloCleanerTools.shorten_object_type(obj.__class__.__name__)
                         add_to_queue = True
 
-                        # Directly flattening groups here to fix #57
                         try:
                             self._console.log(f"[ {location_name} ] Checking tag protection of object {obj.name} ({obj.__class__.__name__})", level=2)
                             if obj.tag:
                                 self._console.log(f"[ {location_name} ] Object has tags : {obj.tag}", level=2)
-                                #if set(obj.tag).intersection(self._protect_tags) or obj.name in indirect_protect[shortened_obj_type]:
-                                if set(obj.tag).intersection(self._protect_tags) or obj.name in self._indirect_protect.get(location_name, dict()).get(shortened_obj_type, list()):
-                                    # object is protected by tags, protect all other used tags at their location
-                                    #indirect_protect["Tag"].update(obj.tag)
-                                    for current_tag in obj.tag:
-                                        tag_obj, tag_location = self.get_relative_object_location(current_tag, location_name, obj_type="Tag")
-                                        self.add_indirect_protect(tag_location, "Tag", current_tag)
-                                        self._console.log(f"[ {location_name} ] Added object {obj} to indirect protect with tag {current_tag} at location {tag_location}", level=3)
-                                    if "Group" in obj.__class__.__name__:
-                                        if obj.static_value:
-                                            self._console.log(f"[ {location_name} ] Object {obj.name} ({obj.__class__.__name__}) has static members. Flattening to protect all linked objects")
-                                            linked_objects = self.flatten_object(obj, location_name, location_name, resolved_cache=resolved_cache)
-                                            for (o, o_location) in linked_objects:
-                                                self._console.log(f"[ {o_location} ] Protecting object {o.name} ({o.__class__.__name__} / {shortened_obj_type})", level=2)
-                                                #indirect_protect[shortened_obj_type].add(o.name)
-                                                self.add_indirect_protect(o_location, shortened_obj_type, o.name)
+                                tag_match = set(obj.tag).intersection(self._protect_tags)
+                                in_indirect = obj.name in self._indirect_protect.get(location_name, dict()).get(shortened_obj_type, list())
+                                if tag_match or in_indirect:
+                                    self._console.log(f"[ {location_name} ] Object {obj.name} is protected (tag or indirect)", level=2)
                                     add_to_queue = False
-                        except AttributeError as e:
+                        except AttributeError:
                             # matched only for Tag objects (which does not have "tag" attribute)
                             pass
                         except Exception as e:
-                            self._console.log(f"ERROR - UNKNOWN EXCEPTION : {e}", style="red")
+                            self._console.log(f"ERROR - UNKNOWN EXCEPTION: {e}", style="red")
+
+                        # Also check _indirect_protect for objects without tags
+                        if add_to_queue and obj.name in self._indirect_protect.get(location_name, dict()).get(shortened_obj_type, list()):
+                            self._console.log(f"[ {location_name} ] Object {obj.name} is indirectly protected", level=2)
+                            add_to_queue = False
 
                         if add_to_queue:
                             jobs_queue.put(obj)
