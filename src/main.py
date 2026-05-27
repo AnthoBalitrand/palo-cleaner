@@ -190,6 +190,33 @@ def parse_cli_args():
         help = "Enable DNS resolution of FQDN objects (mainly for group processing), using the provided DNS resolver IP",
     )
 
+    parser.add_argument(
+        "--parse-schedules",
+        action = "store_true",
+        help = "[BETA] Check the schedule objects attached to rules, and delete expired schedules and associated rules"
+    )
+
+    parser.add_argument(
+        "--detect-shadow-rules",
+        action = "store_true",
+        help = "[BETA] Detect shadow/redundant rules (rules whose traffic is already covered by a broader rule)",
+        default = False
+    )
+
+    parser.add_argument(
+        "--detect-shadow-objects",
+        action = "store_true",
+        help = "[BETA] Detect and remove address objects in rules that are already covered by another object/group in the same rule field",
+        default = False
+    )
+
+    parser.add_argument(
+        "--detect-shadow-group-members",
+        action = "store_true",
+        help = "[BETA] Detect and remove address group members that are already covered by another member in the same group",
+        default = False
+    )
+
     return parser.parse_args()
 
 
@@ -209,6 +236,15 @@ def main():
     if start_cli_args.bulk_operations and start_cli_args.number_of_threads is not None:
         print("\n Error - --bulk-operations cannot be used in conjunction with --multithread \n")
         exit(0)
+
+    if start_cli_args.bulk_operations:
+        print("\n WARNING - Bulk API deletion is no longer supported in Panorama.")
+        print(" Object deletion commands will be generated as CLI commands that must be")
+        print(" executed manually in Panorama CLI.")
+        if start_cli_args.no_report:
+            print(" Commands will be printed to stdout.\n")
+        else:
+            print(" Commands will be written to files in the report folder.\n")
 
     # create the report directory if requested
     report_folder = None
