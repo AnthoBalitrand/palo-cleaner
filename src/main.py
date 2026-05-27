@@ -193,27 +193,27 @@ def parse_cli_args():
     parser.add_argument(
         "--parse-schedules",
         action = "store_true",
-        help = "Check the schedule objects attached to rules, and delete expired schedules and associated rules"
+        help = "[BETA] Check the schedule objects attached to rules, and delete expired schedules and associated rules"
     )
 
     parser.add_argument(
         "--detect-shadow-rules",
         action = "store_true",
-        help = "Detect shadow/redundant rules (rules whose traffic is already covered by a broader rule)",
+        help = "[BETA] Detect shadow/redundant rules (rules whose traffic is already covered by a broader rule)",
         default = False
     )
 
     parser.add_argument(
         "--detect-shadow-objects",
         action = "store_true",
-        help = "Detect and remove address objects in rules that are already covered by another object/group in the same rule field",
+        help = "[BETA] Detect and remove address objects in rules that are already covered by another object/group in the same rule field",
         default = False
     )
 
     parser.add_argument(
         "--detect-shadow-group-members",
         action = "store_true",
-        help = "Detect and remove address group members that are already covered by another member in the same group",
+        help = "[BETA] Detect and remove address group members that are already covered by another member in the same group",
         default = False
     )
 
