@@ -188,26 +188,15 @@ def is_fqdn_subset(subset: Set[str], superset: Set[str]) -> bool:
     # Both have FQDNs - check exact match
     return subset.issubset(superset)
 
-
-def is_zone_match(rule_a: NormalizedRule, rule_b: NormalizedRule) -> bool:
-    """Check if zones match (both directions)"""
-    # Handle "any" zones
-    a_src = rule_a.source_zones or {"any"}
-    a_dst = rule_a.destination_zones or {"any"}
-    b_src = rule_b.source_zones or {"any"}
-    b_dst = rule_b.destination_zones or {"any"}
-
-    if "any" in b_src:
-        src_match = True
-    else:
-        src_match = a_src.issubset(b_src) or "any" in a_src
-
-    if "any" in b_dst:
-        dst_match = True
-    else:
-        dst_match = a_dst.issubset(b_dst) or "any" in a_dst
-
-    return src_match and dst_match
+def is_zone_subset(subset: Set[str], superset: Set[str]) -> bool: 
+    """Check if zones in subset are covered by superset."""
+    if not subset:
+        return True
+    if "any" in superset: 
+        return True
+    if "any" in subset: 
+        return "any" in superset
+    return subset.issubset(superset)
 
 
 def is_shadowed_by(rule_a: NormalizedRule, rule_b: NormalizedRule) -> Optional[str]:
@@ -228,7 +217,7 @@ def is_shadowed_by(rule_a: NormalizedRule, rule_b: NormalizedRule) -> Optional[s
         return None
 
     # Zone check
-    if not is_zone_match(rule_a, rule_b):
+    if not is_zone_subset(rule_a.source_zones, rule_b.source_zones) and not is_zone_subset(rule_a.destination_zones, rule_b.destination_zones):
         return None
 
     # Source IP check
