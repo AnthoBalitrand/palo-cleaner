@@ -179,23 +179,22 @@ def is_fqdn_subset(subset: Set[str], superset: Set[str]) -> bool:
     FQDNs must match exactly (no wildcard/subnet logic).
     If subset has FQDNs but superset doesn't, it's NOT a subset.
     """
-    if not subset:
+    if not subset or not superset:
         # No FQDNs in subset - OK
         return True
-    if not superset:
-        # Subset has FQDNs but superset doesn't - NOT a subset
-        return False
     # Both have FQDNs - check exact match
     return subset.issubset(superset)
 
 def is_zone_subset(subset: Set[str], superset: Set[str]) -> bool: 
     """Check if zones in subset are covered by superset."""
+
     if not subset:
+        # Not supposed to happen as replaced by "any" by the rule normalization, 
         return True
     if "any" in superset: 
+        # Superset (zones in rule_b) is "any" : rule_b shadows rule_a 
         return True
-    if "any" in subset: 
-        return "any" in superset
+    # Returns True if all zones from rule_b are in rule_a, else False
     return subset.issubset(superset)
 
 
@@ -208,7 +207,7 @@ def is_shadowed_by(rule_a: NormalizedRule, rule_b: NormalizedRule) -> Optional[s
     if rule_a.disabled or rule_b.disabled:
         return None
 
-    # Same rule check
+    # Same rule check (normally not supposed to happen, but just in case)
     if rule_a.name == rule_b.name and rule_a.location == rule_b.location:
         return None
 
@@ -217,7 +216,7 @@ def is_shadowed_by(rule_a: NormalizedRule, rule_b: NormalizedRule) -> Optional[s
         return None
 
     # Zone check
-    if not is_zone_subset(rule_a.source_zones, rule_b.source_zones) and not is_zone_subset(rule_a.destination_zones, rule_b.destination_zones):
+    if not (is_zone_subset(rule_a.source_zones, rule_b.source_zones) and is_zone_subset(rule_a.destination_zones, rule_b.destination_zones)):
         return None
 
     # Source IP check
@@ -257,6 +256,8 @@ def is_shadowed_by(rule_a: NormalizedRule, rule_b: NormalizedRule) -> Optional[s
         return None
 
     # Determine shadow type
+    src_zone_exact = set(rule_a.source_zones) == set(rule_b.source_zones)
+    dst_zone_exact = set(rule_a.destination_zones) == set(rule_b.destination_zones)
     src_ip_exact = set(rule_a.source_ips) == set(rule_b.source_ips)
     src_fqdn_exact = rule_a.source_fqdns == rule_b.source_fqdns
     dst_ip_exact = set(rule_a.destination_ips) == set(rule_b.destination_ips)
@@ -267,7 +268,7 @@ def is_shadowed_by(rule_a: NormalizedRule, rule_b: NormalizedRule) -> Optional[s
     cat_exact = rule_a.categories == rule_b.categories
     url_filter_exact = rule_a.url_filtering == rule_b.url_filtering
 
-    if (src_ip_exact and src_fqdn_exact and dst_ip_exact and dst_fqdn_exact and
+    if (src_zone_exact and dst_zone_exact and src_ip_exact and src_fqdn_exact and dst_ip_exact and dst_fqdn_exact and
             svc_exact and app_exact and user_exact and cat_exact and url_filter_exact):
         return "exact"
     return "subset"
@@ -366,8 +367,12 @@ class ShadowRuleDetector:
         # Zones
         if rule.fromzone:
             normalized.source_zones = set(rule.fromzone)
+        else:
+            normalized.source_zones = {"any"}
         if rule.tozone:
             normalized.destination_zones = set(rule.tozone)
+        else:
+            normalized.destination_zones = {"any"}
 
         # Source addresses (IPs and FQDNs)
         sources = rule.source or ["any"]
@@ -443,11 +448,14 @@ class ShadowRuleDetector:
             # Find all exact duplicates of rule_a (rules that shadow each other mutually)
             duplicates = []
             for j, rule_b in enumerate(normalized_rules):
+                # avoids comparing a rule with itself, and comparing the same pair of rules 2 times 
                 if i >= j:
                     continue
+
                 if j in reported_as_exact_duplicate:
                     continue
 
+                # comparison is performed on both directions --> ??? 
                 shadow_type_ab = is_shadowed_by(rule_a, rule_b)
                 shadow_type_ba = is_shadowed_by(rule_b, rule_a)
 
@@ -466,6 +474,7 @@ class ShadowRuleDetector:
         # Second pass: find subset shadows (non-mutual)
         for i, rule_a in enumerate(normalized_rules):
             for j, rule_b in enumerate(normalized_rules):
+                # avoids comparing a rule with itself, and comparing the same pair of rules 2 times 
                 if i >= j:
                     continue
 
