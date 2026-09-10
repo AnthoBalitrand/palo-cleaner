@@ -173,15 +173,23 @@ def is_url_filtering_match(profile_a: Optional[str], profile_b: Optional[str]) -
     return profile_a == profile_b
 
 
-def is_fqdn_subset(subset: Set[str], superset: Set[str]) -> bool:
+def is_fqdn_subset(subset: Set[str], superset: Set[str], superset_is_any: bool = False) -> bool:
     """
     Check if FQDNs in subset are covered by superset.
     FQDNs must match exactly (no wildcard/subnet logic).
-    If subset has FQDNs but superset doesn't, it's NOT a subset.
+
+    If superset_is_any is True, the superset rule has "any" which covers all FQDNs.
+    If subset has FQDNs but superset doesn't (and superset is not "any"), it's NOT a subset.
     """
-    if not subset or not superset:
+    if not subset:
         # No FQDNs in subset - OK
         return True
+    if superset_is_any:
+        # "any" covers all FQDNs
+        return True
+    if not superset:
+        # subset has FQDNs but superset doesn't (and superset is not "any") - NOT a subset
+        return False
     # Both have FQDNs - check exact match
     return subset.issubset(superset)
 
@@ -219,20 +227,24 @@ def is_shadowed_by(rule_a: NormalizedRule, rule_b: NormalizedRule) -> Optional[s
     if not (is_zone_subset(rule_a.source_zones, rule_b.source_zones) and is_zone_subset(rule_a.destination_zones, rule_b.destination_zones)):
         return None
 
+    # Check if rule_b has "any" for source/destination (0.0.0.0/0 covers everything including FQDNs)
+    source_b_is_any = any(t[0] == 0 and t[1] == 4294967295 for t in rule_b.source_ips)
+    dest_b_is_any = any(t[0] == 0 and t[1] == 4294967295 for t in rule_b.destination_ips)
+
     # Source IP check
     if not is_ip_subset(rule_a.source_ips, rule_b.source_ips):
         return None
 
-    # Source FQDN check (FQDNs must match exactly)
-    if not is_fqdn_subset(rule_a.source_fqdns, rule_b.source_fqdns):
+    # Source FQDN check (FQDNs must match exactly, unless rule_b has "any")
+    if not is_fqdn_subset(rule_a.source_fqdns, rule_b.source_fqdns, superset_is_any=source_b_is_any):
         return None
 
     # Destination IP check
     if not is_ip_subset(rule_a.destination_ips, rule_b.destination_ips):
         return None
 
-    # Destination FQDN check (FQDNs must match exactly)
-    if not is_fqdn_subset(rule_a.destination_fqdns, rule_b.destination_fqdns):
+    # Destination FQDN check (FQDNs must match exactly, unless rule_b has "any")
+    if not is_fqdn_subset(rule_a.destination_fqdns, rule_b.destination_fqdns, superset_is_any=dest_b_is_any):
         return None
 
     # Service check
@@ -310,6 +322,7 @@ class ShadowRuleDetector:
         )
 
         # Extract IP tuples and FQDNs from all flattened AddressObjects
+        # TODO : check sooner if object is FQDN type (panos.objects.AddressObject.type)
         ip_result = []
         fqdn_result = set()
         for flat_obj, _ in flattened:
